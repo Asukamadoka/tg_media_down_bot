@@ -1,0 +1,53 @@
+# Copy to config.yaml and edit. Anything set in the environment (or .env)
+# overrides the value here, so secrets are usually better kept in .env.
+
+telegram:
+  api_id: 0                 # https://my.telegram.org/apps
+  api_hash: ""
+  bot_token: ""             # @BotFather
+  user_session: ""          # output of `python -m tgmd.login`
+  session_dir: sessions
+
+access:
+  admin_user_ids: []        # e.g. [123456789]
+  allowed_user_ids: []
+  allow_all_users: false
+
+download:
+  dir: downloads
+  data_dir: data
+  # Template for the path of a downloaded file, relative to download.dir.
+  # Available fields: chat, chat_id, message_id, topic_id, name, ext, date
+  filename_template: "{chat}/{message_id}_{name}"
+  concurrent: 2             # parallel downloads across all users
+  max_queue_per_user: 20
+  max_batch: 50             # cap on messages expanded from one range link
+  progress_interval: 5.0    # seconds between progress message edits
+  # Remove the local copy once it has been delivered to Telegram or PikPak.
+  delete_after_delivery: true
+  # Join invite links (t.me/+hash) automatically with the user account.
+  auto_join_invites: false
+
+delivery:
+  default_mode: telegram    # telegram | local | pikpak
+  # Bots can upload at most 2000 MiB over MTProto. Larger files fall back to
+  # being kept locally, with a message explaining why.
+  max_upload_size_mb: 2000
+  cache_chat_id: null       # channel id the bot is admin of, for upload reuse
+
+pikpak:
+  enabled: false
+  username: ""
+  password: ""
+  folder: /TelegramMedia    # created on demand
+  # How long to poll an offline-download task before replying "still running".
+  task_timeout: 600
+
+http:
+  enabled: false
+  host: 0.0.0.0
+  port: 8080
+  public_base_url: ""       # e.g. https://media.example.com
+  url_ttl: 3600             # signed URL lifetime, seconds
+
+log_level: INFO

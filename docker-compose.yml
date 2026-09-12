@@ -1,0 +1,18 @@
+services:
+  bot:
+    build: .
+    image: tg-media-down-bot
+    container_name: tg-media-down-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # Sessions, the SQLite database and downloaded files.
+      - ./data:/data
+      # Uncomment to use a config.yaml alongside (or instead of) .env. Create
+      # the file first: Docker turns a missing bind source into a directory.
+      # - ./config.yaml:/app/config.yaml:ro
+    # Only required for Telegram -> PikPak transfers, which need PikPak to be
+    # able to fetch files from this host. Put it behind a TLS reverse proxy and
+    # set PUBLIC_BASE_URL to that address.
+    ports:
+      - "8080:8080"
