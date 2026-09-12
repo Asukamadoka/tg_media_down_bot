@@ -1,0 +1,11 @@
+# MTProto client. Pinned below 2.0 because Telethon 2.x is a breaking rewrite.
+Telethon>=1.41,<2.0
+# Optional but strongly recommended: C implementation of the MTProto crypto,
+# which roughly triples download throughput.
+cryptg>=0.5
+# PikPak cloud API (async, httpx based).
+pikpakapi==0.1.11
+# Serves downloaded files over HTTP so PikPak can fetch them itself.
+aiohttp>=3.9
+PyYAML>=6.0
+python-dotenv>=1.0

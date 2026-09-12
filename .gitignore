@@ -1,0 +1,35 @@
+# Secrets and runtime configuration
+.env
+config.yaml
+config.yml
+
+# Telegram / PikPak session state
+sessions/
+*.session
+*.session-journal
+
+# Runtime data
+data/
+downloads/
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
