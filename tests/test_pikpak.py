@@ -15,7 +15,13 @@ from pikpakapi import DownloadStatus, PikPakApi
 
 from tgmd.config import PikPakConfig
 from tgmd.db import Database
-from tgmd.pikpak import TOKEN_KEY, PikPakError, PikPakService
+from tgmd.pikpak import (
+    TOKEN_KEY,
+    PikPakError,
+    PikPakService,
+    strip_credentials,
+    user_token_key,
+)
 
 
 class TestLibraryContract:
@@ -106,8 +112,21 @@ class FakeClient:
             "get_quota_info", {"quota": {"limit": "1000", "usage": "250"}}
         )
 
+    encoded_token: str | None = None
+
+    def encode_token(self):
+        self.encoded_token = "encoded-token-value"
+
     def to_dict(self):
-        return {"access_token": "a", "refresh_token": "r"}
+        # Mirrors the real client, which serialises the credentials too. The
+        # service is expected to strip them before they reach the database.
+        return {
+            "access_token": "a",
+            "refresh_token": "r",
+            "encoded_token": self.encoded_token,
+            "username": "user@example.com",
+            "password": "secret",
+        }
 
 
 @pytest.fixture
@@ -128,7 +147,7 @@ def make_service(db, client: FakeClient | None = None, **overrides) -> PikPakSer
     )
     service = PikPakService(config, db)
     if client is not None:
-        service._client = client  # noqa: SLF001 - injecting the stub is the point
+        service._shared = client  # noqa: SLF001 - injecting the stub is the point
     return service
 
 
@@ -136,11 +155,18 @@ class TestConfiguration:
     async def test_unconfigured_service_refuses_to_build_a_client(self, db):
         service = PikPakService(PikPakConfig(), db)
         assert not service.configured
-        with pytest.raises(PikPakError, match="not configured"):
+        with pytest.raises(PikPakError, match="no PikPak account is connected"):
             await service.client()
 
     async def test_credentials_make_it_configured(self, db):
         assert make_service(db).configured
+
+    async def test_unconfigured_service_is_unavailable_to_a_user(self, db):
+        service = PikPakService(PikPakConfig(), db)
+        assert not await service.available_for(42)
+
+    async def test_shared_account_is_available_to_everyone(self, db):
+        assert await make_service(db, FakeClient()).available_for(42)
 
 
 class TestFolders:
@@ -267,13 +293,85 @@ class TestSessionPersistence:
     async def test_tokens_are_written_on_refresh(self, db):
         service = make_service(db)
         await service._persist(FakeClient())  # noqa: SLF001 - the refresh callback
-        assert await db.kv_get_json(TOKEN_KEY) == {
-            "access_token": "a",
-            "refresh_token": "r",
-        }
+        stored = await db.kv_get_json(TOKEN_KEY)
+        assert stored["access_token"] == "a"
+        assert stored["refresh_token"] == "r"
+        assert stored["encoded_token"] == "encoded-token-value"
+
+    async def test_the_password_is_never_stored(self, db):
+        service = make_service(db)
+        await service._persist(FakeClient())  # noqa: SLF001
+        stored = await db.kv_get_json(TOKEN_KEY)
+        assert "password" not in stored
+        assert "username" not in stored
+        assert "secret" not in str(stored)
+
+    async def test_strip_credentials_keeps_everything_else(self):
+        cleaned = strip_credentials(
+            {"username": "u", "password": "p", "access_token": "a", "device_id": "d"}
+        )
+        assert cleaned == {"access_token": "a", "device_id": "d"}
 
     async def test_logout_clears_the_stored_session(self, db):
         service = make_service(db, FakeClient())
         await service._persist(FakeClient())  # noqa: SLF001
         await service.logout()
         assert await db.kv_get(TOKEN_KEY) is None
+
+
+class TestPerUserSessions:
+    async def test_a_user_starts_with_no_session(self, db):
+        service = make_service(db, FakeClient())
+        assert not await service.has_user_session(42)
+
+    async def test_a_stored_token_counts_as_a_session(self, db):
+        service = make_service(db, FakeClient())
+        await db.kv_set_json(user_token_key(42), {"encoded_token": "t"})
+        assert await service.has_user_session(42)
+
+    async def test_a_token_without_credentials_does_not_count(self, db):
+        service = make_service(db, FakeClient())
+        await db.kv_set_json(user_token_key(42), {"device_id": "d"})
+        assert not await service.has_user_session(42)
+
+    async def test_the_users_own_client_is_preferred(self, db):
+        shared = FakeClient()
+        own = FakeClient()
+        service = make_service(db, shared)
+        service._users[42] = own  # noqa: SLF001
+        assert await service.client(42) is own
+        assert await service.client(7) is shared
+        assert await service.client() is shared
+
+    async def test_key_is_namespaced_per_user(self):
+        assert user_token_key(42) == f"{TOKEN_KEY}:42"
+        assert user_token_key(7) != user_token_key(42)
+
+    async def test_logout_only_affects_that_user(self, db):
+        service = make_service(db, FakeClient())
+        await db.kv_set_json(user_token_key(42), {"encoded_token": "t"})
+        await db.kv_set_json(user_token_key(7), {"encoded_token": "t"})
+        await service.logout(42)
+        assert not await service.has_user_session(42)
+        assert await service.has_user_session(7)
+
+    async def test_logout_does_not_clear_the_shared_session(self, db):
+        service = make_service(db, FakeClient())
+        await service._persist(FakeClient())  # noqa: SLF001
+        await service.logout(42)
+        assert await db.kv_get(TOKEN_KEY) is not None
+
+    async def test_a_users_transfers_use_their_own_client(self, db):
+        shared = FakeClient()
+        own = FakeClient()
+        service = make_service(db, shared)
+        service._users[42] = own  # noqa: SLF001
+        await service.offline_download("magnet:?xt=urn:btih:abc", user_id=42)
+        assert any(call[0] == "offline_download" for call in own.calls)
+        assert not any(call[0] == "offline_download" for call in shared.calls)
+
+    async def test_account_label_distinguishes_the_source(self, db):
+        service = make_service(db, FakeClient())
+        service._users[42] = FakeClient()  # noqa: SLF001
+        assert "your own" in await service.account_label(42)
+        assert "shared" in await service.account_label(7)

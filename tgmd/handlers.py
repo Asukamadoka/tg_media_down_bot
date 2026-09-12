@@ -11,8 +11,10 @@ from .db import Database
 from .downloader import has_downloadable_media
 from .links import LinkBundle, extract_links
 from .pikpak import PikPakError, PikPakService
+from .portal import PikPakLoginPortal, PortalError
 from .tasks import Job, JobKind, JobQueue, QueueFull
-from .utils import escape_html, human_size, truncate
+from .utils import escape_html, human_duration, human_size, truncate
+from .verify import run_live_checks
 
 log = logging.getLogger(__name__)
 
@@ -37,8 +39,11 @@ from channels that block saving, as long as the reading account is a member.
 /cancel [id] — stop one job, or everything
 /stats — your recent jobs
 /pikpak — PikPak account, quota and target folder
+/pikpak login — connect your own PikPak account
 /id — your Telegram user id
 /help — this message"""
+
+ADMIN_HELP = "\n/verify — check the bot's identity and configuration"
 
 
 class BotHandlers:
@@ -51,15 +56,21 @@ class BotHandlers:
         db: Database,
         queue: JobQueue,
         pikpak: PikPakService,
+        portal: PikPakLoginPortal,
         *,
-        has_user_client: bool,
+        user_client=None,
     ) -> None:
         self._bot = bot
         self._config = config
         self._db = db
         self._queue = queue
         self._pikpak = pikpak
-        self._has_user_client = has_user_client
+        self._portal = portal
+        self._user_client = user_client
+
+    @property
+    def _has_user_client(self) -> bool:
+        return self._user_client is not None
 
     def register(self) -> None:
         """Attach all handlers. Commands are matched before the link fallback."""
@@ -71,6 +82,7 @@ class BotHandlers:
         add(self.on_cancel, events.NewMessage(pattern=r"^/cancel\b"))
         add(self.on_stats, events.NewMessage(pattern=r"^/stats\b"))
         add(self.on_pikpak, events.NewMessage(pattern=r"^/pikpak\b"))
+        add(self.on_verify, events.NewMessage(pattern=r"^/verify\b"))
         add(self.on_message, events.NewMessage(incoming=True))
 
     # --------------------------------------------------------- access control
@@ -114,13 +126,15 @@ class BotHandlers:
     async def on_help(self, event) -> None:
         if not await self._authorized(event):
             return
-        warning = ""
+        text = HELP
+        if self._config.access.is_admin(event.sender_id):
+            text += ADMIN_HELP
         if not self._has_user_client:
-            warning = (
+            text += (
                 "\n\n⚠️ No user session is configured, so I can only read chats "
                 "I am a member of myself."
             )
-        await event.reply(HELP + warning, parse_mode="html", link_preview=False)
+        await event.reply(text, parse_mode="html", link_preview=False)
 
     async def on_id(self, event) -> None:
         await event.reply(
@@ -152,12 +166,20 @@ class BotHandlers:
                 + ", ".join(MODES)
             )
             return
-        if choice == "pikpak" and not self._pikpak.configured:
-            await event.reply(
-                "PikPak is not configured on this server, so that mode would "
-                "fail. Ask the operator to set PIKPAK_USERNAME and "
-                "PIKPAK_PASSWORD."
-            )
+        if choice == "pikpak" and not await self._pikpak.available_for(event.sender_id):
+            if self._portal.unavailable_reason() is None:
+                await event.reply(
+                    "No PikPak account is connected yet. Send "
+                    "<code>/pikpak login</code> first and I will send you a "
+                    "login link.",
+                    parse_mode="html",
+                )
+            else:
+                await event.reply(
+                    "PikPak is not available on this server. Ask the operator "
+                    "to set PIKPAK_USERNAME and PIKPAK_PASSWORD, or to enable "
+                    "login links."
+                )
             return
 
         await self._db.set_user_mode(event.sender_id, choice)
@@ -229,56 +251,168 @@ class BotHandlers:
         parts = (event.raw_text or "").split(maxsplit=2)
         action = parts[1].lower() if len(parts) >= 2 else "status"
 
-        if not self._pikpak.configured:
-            await event.reply(
-                "PikPak is not configured. The operator needs to set "
-                "PIKPAK_USERNAME and PIKPAK_PASSWORD."
-            )
+        if action == "login":
+            await self._pikpak_login(event)
             return
-
+        if action == "logout":
+            await self._pikpak_logout(event, parts)
+            return
         if action == "dir":
-            if len(parts) < 3:
-                current = await self._pikpak_folder_for(event.sender_id)
-                await event.reply(
-                    "Your PikPak folder: "
-                    f"<code>{escape_html(current or self._config.pikpak.folder)}</code>\n"
-                    "Change it with <code>/pikpak dir /Movies/Anime</code>.",
-                    parse_mode="html",
-                )
-                return
-            folder = "/" + parts[2].strip().strip("/")
-            await self._db.set_user_pikpak_dir(event.sender_id, folder)
+            await self._pikpak_dir(event, parts)
+            return
+        await self._pikpak_status(event)
+
+    async def _pikpak_login(self, event) -> None:
+        """Send a one-time link the user can connect their own account with."""
+        reason = self._portal.unavailable_reason()
+        if reason is not None:
+            hint = ""
+            if self._pikpak.configured:
+                hint = "\n\nThe shared account configured on the server still works."
             await event.reply(
-                f"PikPak folder set to <code>{escape_html(folder)}</code>.",
+                f"Login links are not available: {escape_html(reason)}{hint}",
                 parse_mode="html",
             )
             return
 
-        if action == "logout" and self._config.access.is_admin(event.sender_id):
+        try:
+            link = self._portal.create_link(event.sender_id)
+        except PortalError as exc:
+            await event.reply(f"❌ {escape_html(str(exc))}", parse_mode="html")
+            return
+
+        ttl = human_duration(self._config.pikpak.login_link_ttl)
+        already = await self._pikpak.has_user_session(event.sender_id)
+        replacing = (
+            "\n\nThis will replace the account you have connected now."
+            if already
+            else ""
+        )
+        await event.reply(
+            "<b>Connect your PikPak account</b>\n\n"
+            f'<a href="{link}">Open the login page</a>\n\n'
+            f"The link works once and expires in {ttl}. It opens a page served "
+            "by this bot, not by PikPak. Your password is used once to get an "
+            f"access token, and only the token is stored.{replacing}",
+            parse_mode="html",
+            link_preview=False,
+        )
+
+    async def _pikpak_logout(self, event, parts: list[str]) -> None:
+        """Clear the caller's own session, or the shared one for an admin."""
+        scope = parts[2].strip().lower() if len(parts) >= 3 else ""
+        if scope == "shared":
+            if not self._config.access.is_admin(event.sender_id):
+                await event.reply("Only an admin can clear the shared session.")
+                return
             await self._pikpak.logout()
-            await event.reply("Stored PikPak session cleared.")
+            await event.reply("Shared PikPak session cleared.")
+            return
+
+        if not await self._pikpak.has_user_session(event.sender_id):
+            await event.reply("You have no PikPak account connected.")
+            return
+        await self._pikpak.logout(event.sender_id)
+        self._portal.revoke(event.sender_id)
+        await event.reply(
+            "Your PikPak account is disconnected and the stored token is gone."
+        )
+
+    async def _pikpak_dir(self, event, parts: list[str]) -> None:
+        if len(parts) < 3:
+            current = await self._pikpak_folder_for(event.sender_id)
+            await event.reply(
+                "Your PikPak folder: "
+                f"<code>{escape_html(current or self._config.pikpak.folder)}</code>\n"
+                "Change it with <code>/pikpak dir /Movies/Anime</code>.",
+                parse_mode="html",
+            )
+            return
+        folder = "/" + parts[2].strip().strip("/")
+        await self._db.set_user_pikpak_dir(event.sender_id, folder)
+        await event.reply(
+            f"PikPak folder set to <code>{escape_html(folder)}</code>.",
+            parse_mode="html",
+        )
+
+    async def _pikpak_status(self, event) -> None:
+        user_id = event.sender_id
+        own = await self._pikpak.has_user_session(user_id)
+
+        if not await self._pikpak.available_for(user_id):
+            reason = self._portal.unavailable_reason()
+            if reason is None:
+                await event.reply(
+                    "No PikPak account is connected. Send "
+                    "<code>/pikpak login</code> and I will send you a login link.",
+                    parse_mode="html",
+                )
+            else:
+                await event.reply(
+                    "PikPak is not available on this server.\n"
+                    f"Login links: {escape_html(reason)}",
+                    parse_mode="html",
+                )
             return
 
         try:
-            quota = await self._pikpak.quota()
+            quota = await self._pikpak.quota(user_id=user_id)
         except PikPakError as exc:
             await event.reply(f"❌ {escape_html(str(exc))}", parse_mode="html")
             return
 
-        folder = await self._pikpak_folder_for(event.sender_id)
+        folder = await self._pikpak_folder_for(user_id)
         transfers = (
-            "magnet links, URLs and share links"
-            if not self._config.http.usable
-            else "magnet links, URLs, share links and Telegram media"
+            "magnet links, URLs, share links and Telegram media"
+            if self._config.http.usable
+            else "magnet links, URLs and share links"
+        )
+        account = (
+            "your own account"
+            if own
+            else f"the shared account ({escape_html(self._config.pikpak.username)})"
+        )
+        footer = (
+            "\n\n<code>/pikpak logout</code> disconnects your account."
+            if own
+            else "\n\n<code>/pikpak login</code> connects your own account instead."
         )
         await event.reply(
             "<b>PikPak</b>\n"
+            f"Account: {account}\n"
             f"Storage: {human_size(quota.used)} of {human_size(quota.limit)} used "
             f"({quota.fraction * 100:.0f}%)\n"
             f"Folder: <code>{escape_html(folder or self._config.pikpak.folder)}</code>\n"
-            f"Supported transfers: {transfers}",
+            f"Supported transfers: {transfers}"
+            f"{footer}",
             parse_mode="html",
         )
+
+    async def on_verify(self, event) -> None:
+        """Report the bot's identity and configuration. Admins only."""
+        if not await self._authorized(event):
+            return
+        if not self._config.access.is_admin(event.sender_id):
+            await event.reply("Only an admin can run /verify.")
+            return
+
+        notice = await event.reply("Checking…")
+        try:
+            report = await run_live_checks(
+                self._config,
+                bot=self._bot,
+                user=self._user_client,
+                pikpak=self._pikpak,
+                portal=self._portal,
+                for_user_id=event.sender_id,
+            )
+        except Exception as exc:
+            log.exception("/verify failed")
+            await notice.edit(f"❌ Verification failed: {escape_html(str(exc))}",
+                              parse_mode="html")
+            return
+
+        await notice.edit(report.render_html(), parse_mode="html", link_preview=False)
 
     # ------------------------------------------------------------- dispatching
 

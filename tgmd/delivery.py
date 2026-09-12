@@ -206,12 +206,18 @@ class Delivery:
     # ---------------------------------------------------------------- pikpak
 
     async def to_pikpak(
-        self, path: Path, info: MediaInfo, *, folder: str | None = None
+        self,
+        path: Path,
+        info: MediaInfo,
+        *,
+        folder: str | None = None,
+        user_id: int | None = None,
     ) -> DeliveryResult:
         """Hand the file to PikPak by publishing it on the bot's HTTP server."""
-        if not self._pikpak.configured:
+        if user_id is not None and not await self._pikpak.available_for(user_id):
             raise DeliveryError(
-                "PikPak is not configured. Set PIKPAK_USERNAME and PIKPAK_PASSWORD."
+                "no PikPak account is connected. Use /pikpak login to connect "
+                "yours, or ask the operator to configure a shared account."
             )
         if not self._files.usable:
             raise DeliveryError(
@@ -224,9 +230,9 @@ class Delivery:
         status: DownloadStatus | None = None
         try:
             task = await self._pikpak.offline_download(
-                url, folder=folder, name=info.file_name
+                url, folder=folder, name=info.file_name, user_id=user_id
             )
-            status = await self._pikpak.wait_for_task(task)
+            status = await self._pikpak.wait_for_task(task, user_id=user_id)
         except PikPakError as exc:
             self._files.unpublish_all(path)
             raise DeliveryError(str(exc)) from exc
@@ -256,11 +262,18 @@ class Delivery:
         )
 
     async def url_to_pikpak(
-        self, url: str, *, folder: str | None = None, wait: bool = False
+        self,
+        url: str,
+        *,
+        folder: str | None = None,
+        wait: bool = False,
+        user_id: int | None = None,
     ) -> DeliveryResult:
         """Transfer a magnet link or direct URL without touching local disk."""
         try:
-            task = await self._pikpak.offline_download(url, folder=folder)
+            task = await self._pikpak.offline_download(
+                url, folder=folder, user_id=user_id
+            )
         except PikPakError as exc:
             raise DeliveryError(str(exc)) from exc
 
@@ -272,7 +285,7 @@ class Delivery:
                 remote_path=f"{target}/{task.name}",
             )
 
-        status = await self._pikpak.wait_for_task(task)
+        status = await self._pikpak.wait_for_task(task, user_id=user_id)
         if status is DownloadStatus.done:
             return DeliveryResult(
                 mode="pikpak",

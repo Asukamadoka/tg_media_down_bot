@@ -17,6 +17,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 from .config import Config
+from .identity import BotTokenError, account_link, describe_account, parse_bot_token
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +73,26 @@ async def start_clients(config: Config) -> tuple[TelegramClient, TelegramClient 
     bot = build_bot_client(config)
     await bot.start(bot_token=config.telegram.bot_token)
     me = await bot.get_me()
-    log.info("bot client started as @%s (id %s)", me.username, me.id)
+    log.info(
+        "bot client started as %s%s",
+        describe_account(me),
+        f" — {account_link(me)}" if account_link(me) else "",
+    )
+
+    # The digits before the colon in a bot token are the bot's own user id, so
+    # a mismatch means the token and the account that answered disagree.
+    try:
+        token = parse_bot_token(config.telegram.bot_token)
+    except BotTokenError as exc:
+        log.warning("bot token looks malformed (%s) even though it worked", exc)
+    else:
+        if me.id != token.bot_id:
+            log.error(
+                "bot identity mismatch: the token names id %s but the account "
+                "that answered is %s",
+                token.bot_id,
+                me.id,
+            )
 
     user = build_user_client(config)
     if user is None:
