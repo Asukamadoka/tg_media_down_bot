@@ -88,9 +88,15 @@ class PikPakConfig:
     password: str = ""
     folder: str = "/TelegramMedia"
     task_timeout: int = 600
+    allow_user_login: bool = True
+    """Whether users may connect their own account with /pikpak login."""
+
+    login_link_ttl: int = 900
+    """How long a login link stays valid, in seconds."""
 
     @property
     def configured(self) -> bool:
+        """True when a shared account is available to every user."""
         return self.enabled and bool(self.username and self.password)
 
 
@@ -191,9 +197,16 @@ class Config:
                 "every request. Set ADMIN_USER_IDS."
             )
         if self.delivery.default_mode == "pikpak" and not self.pikpak.configured:
-            warnings.append(
-                "default mode is pikpak but PikPak credentials are missing."
-            )
+            if self.pikpak.allow_user_login and self.http.usable:
+                warnings.append(
+                    "default mode is pikpak with no shared account, so each user "
+                    "must run /pikpak login before their first transfer."
+                )
+            else:
+                warnings.append(
+                    "default mode is pikpak but there is no shared account and "
+                    "no way for users to connect their own."
+                )
         if self.pikpak.configured and not self.http.usable:
             warnings.append(
                 "PikPak is configured but the HTTP file server is not; magnet and "
@@ -342,6 +355,13 @@ def load_config(path: Path | None = None) -> Config:
         password=_env_str("PIKPAK_PASSWORD", str(_get(data, "pikpak", "password", default=""))),
         folder=_env_str("PIKPAK_FOLDER", str(_get(data, "pikpak", "folder", default="/TelegramMedia"))),
         task_timeout=_env_int("PIKPAK_TASK_TIMEOUT", int(_get(data, "pikpak", "task_timeout", default=600))),
+        allow_user_login=parse_bool(
+            os.environ.get("PIKPAK_ALLOW_USER_LOGIN"),
+            parse_bool(_get(data, "pikpak", "allow_user_login", default=True), True),
+        ),
+        login_link_ttl=_env_int(
+            "PIKPAK_LOGIN_LINK_TTL", int(_get(data, "pikpak", "login_link_ttl", default=900))
+        ),
     )
     # PikPak turns itself on as soon as credentials exist, so a user who only
     # fills in .env does not also have to remember the enabled flag.

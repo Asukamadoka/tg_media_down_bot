@@ -49,10 +49,24 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Fill in `.env`:
+### 1. Create the bot
+
+Open [@BotFather](https://t.me/BotFather) and send `/newbot`. It asks for a
+display name, then a username ending in `bot`. It replies with a token that
+looks like `123456789:AAHfiqks…`. Put that in `TG_BOT_TOKEN`.
+
+The digits before the colon are the bot's own Telegram user id. The setup
+check below uses that: it compares them against the account that actually
+answers, so a token pasted from the wrong bot is caught rather than quietly
+producing a bot that talks to the wrong chats.
+
+While you are in BotFather, `/setprivacy` → Disable is worth doing if you
+plan to use the bot inside a group, otherwise it only sees commands.
+
+### 2. Fill in the credentials
 
 1. `TG_API_ID` and `TG_API_HASH` from <https://my.telegram.org/apps>.
-2. `TG_BOT_TOKEN` from [@BotFather](https://t.me/BotFather).
+2. `TG_BOT_TOKEN` from the step above.
 3. `ADMIN_USER_IDS` — your numeric id. Send `/id` to the bot if you do not
    know it; it answers that command to anyone.
 4. `TG_USER_SESSION` — generate it once:
@@ -65,7 +79,46 @@ That signs in the reading account and prints a session string. It is a
 credential equivalent to the account password, so keep it out of version
 control; revoke it under Telegram → Settings → Devices if it leaks.
 
-Then start the bot:
+### 3. Verify before starting
+
+```bash
+python -m tgmd.verify
+```
+
+This is the confirmation step. It does not guess from the configuration file;
+it connects and checks:
+
+```
+✓ configuration        loaded and internally consistent
+✓ access control       1 admin(s), 0 additional user(s)
+✓ bot token            well-formed, names bot id 123456789
+✓ directories          downloads=downloads, data=data, sessions=sessions
+✓ database             opened data/tgmd.sqlite3
+✓ bot created          @my_media_bot (id 123456789) — https://t.me/my_media_bot
+✓ bot identity         id 123456789 matches the token, and is a bot
+✓ user session         @myaccount (id 987654321) from TG_USER_SESSION, authorised
+✓ account separation   bot 123456789 reads through account 987654321
+✓ history access       the account can list its chats
+✓ cache chat           the bot administrates chat -1001234567890
+✓ pikpak account       you@example.com signed in, 4.7 GiB of 10.0 TiB used
+✓ pikpak login links   /pikpak login will issue https://media.example.com/…
+✓ http server          bound 0.0.0.0:8080
+✓ public reachability  https://media.example.com/healthz answers
+
+everything passed
+```
+
+It exits non-zero if anything failed, so it drops straight into a deployment
+script. Warnings do not fail the run. Run it while the bot is stopped, so the
+two processes do not contend for a session file.
+
+Admins can run the same identity checks in chat at any time with `/verify`.
+
+Note that MTProto is not plain HTTPS. The host needs to open a direct TCP
+connection to Telegram; an HTTPS-only egress proxy will block the bot even
+though the token is fine, and the check says so when that happens.
+
+### 4. Start it
 
 ```bash
 python -m tgmd
@@ -98,14 +151,7 @@ PikPak's API has **no upload endpoint**. The only way to put a file into it is
 to give it a URL to fetch. That splits PikPak support in two:
 
 **Magnet links, direct URLs and share links need nothing extra.** They are
-handed to PikPak, which downloads them on its own infrastructure. Set the
-credentials and it works:
-
-```
-PIKPAK_USERNAME=you@example.com
-PIKPAK_PASSWORD=...
-PIKPAK_FOLDER=/TelegramMedia
-```
+handed to PikPak, which downloads them on its own infrastructure.
 
 **Telegram media needs the built-in HTTP server.** The bot downloads the file,
 serves it at a signed, expiring URL, and asks PikPak to pull it from there. So
@@ -117,15 +163,61 @@ HTTP_PORT=8080
 PUBLIC_BASE_URL=https://media.example.com
 ```
 
-Put a TLS reverse proxy in front of it. URLs carry an HMAC over the file id
-and an expiry, so only the exact link the bot generated works, and only until
-it expires (`http.url_ttl`, one hour by default).
+Put a TLS reverse proxy in front of it. File URLs carry an HMAC over the file
+id and an expiry, so only the exact link the bot generated works, and only
+until it expires (`http.url_ttl`, one hour by default).
 
 Without this, `/mode pikpak` still works for magnets and URLs and says clearly
 why a Telegram file cannot be transferred.
 
-`/pikpak` shows quota and the target folder; `/pikpak dir /Movies/Anime`
-changes where your transfers land.
+### Connecting an account
+
+There are two ways, and they can coexist.
+
+**Each user connects their own account.** They send `/pikpak login` and the
+bot replies with a link:
+
+```
+Connect your PikPak account
+  → Open the login page
+The link works once and expires in 15m.
+```
+
+The link opens a page the bot serves itself at `/pikpak/login/<token>`. It
+asks for the PikPak email and password, signs in once through the API, and
+stores only the resulting token. From then on that person's transfers go to
+their own drive. `/pikpak logout` disconnects it and deletes the token.
+
+The page is deliberately plain and says on its face that it belongs to your
+bot and not to PikPak, because a page that asks for someone's credentials
+should never look like it came from the service it is asking about.
+
+Four things keep the link from being a liability:
+
+- it is signed, so the user id inside it cannot be swapped for another;
+- it works once, and issuing a new one invalidates the previous;
+- it expires (`pikpak.login_link_ttl`, 15 minutes by default);
+- three wrong passwords burn it, so a leaked link is not a password oracle.
+
+The bot refuses to issue a link at all unless `PUBLIC_BASE_URL` is HTTPS
+(loopback is allowed for local development), since the point is to keep the
+password off the wire as well as out of the chat transcript. Set
+`PIKPAK_ALLOW_USER_LOGIN=false` to turn the feature off.
+
+**Or configure one shared account** for everyone who has not connected their
+own:
+
+```
+PIKPAK_USERNAME=you@example.com
+PIKPAK_PASSWORD=...
+PIKPAK_FOLDER=/TelegramMedia
+```
+
+Stored sessions never contain a password in either case. The token is kept and
+the credentials are discarded as soon as they have been exchanged for one.
+
+`/pikpak` shows which account is in use, the quota and the target folder;
+`/pikpak dir /Movies/Anime` changes where your transfers land.
 
 ## Commands
 
@@ -136,8 +228,12 @@ changes where your transfers land.
 | `/status` | jobs currently queued or running |
 | `/cancel [id]` | cancel one job, or all of yours |
 | `/stats` | your recent jobs and total transferred |
-| `/pikpak [dir <path>]` | PikPak quota and target folder |
+| `/pikpak` | which account is in use, quota, target folder |
+| `/pikpak login` | get a one-time link to connect your own account |
+| `/pikpak logout` | disconnect your account and delete the stored token |
+| `/pikpak dir <path>` | change where your transfers land |
 | `/id` | your user id and the current chat id |
+| `/verify` | admins only: identity and configuration report |
 
 Progress is reported in a single message that is edited as the transfer runs,
 throttled to one edit every `progress_interval` seconds so Telegram does not
@@ -161,6 +257,8 @@ The settings worth knowing about:
 | `delivery.max_upload_size_mb` | 2000 | above this, keep the file locally |
 | `delivery.cache_chat_id` | none | channel used to avoid re-uploading |
 | `access.allow_all_users` | false | open the bot to everyone |
+| `pikpak.allow_user_login` | true | users may connect their own account |
+| `pikpak.login_link_ttl` | 900 | login link lifetime, seconds |
 
 Template fields: `chat`, `chat_id`, `message_id`, `topic_id`, `name`, `stem`,
 `ext`, `date`. An unknown field is rejected at startup rather than at the
@@ -192,12 +290,16 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-The suite covers link parsing, filename and path building, URL signing,
-configuration precedence and validation, the database layer, media
-inspection, and the HTTP file server over a real socket, including its
-rejection paths. It also asserts that the `pikpakapi` methods this project
-calls still take the arguments it passes, so a dependency upgrade fails in
-tests rather than in production. No Telegram credentials are needed.
+The suite covers link parsing, bot-token parsing, filename and path building,
+URL signing, configuration precedence and validation, the database layer,
+media inspection, per-user PikPak session selection, and both HTTP surfaces
+over a real socket: the file server and the login portal, including expiry,
+single use, forged tokens and attempt limits.
+
+It also asserts that the `pikpakapi` methods this project calls still take the
+arguments it passes, so a dependency upgrade fails in tests rather than in
+production, and that a test which accidentally reaches PikPak over the network
+fails immediately instead of hanging. No credentials are needed.
 
 ### Layout
 
@@ -209,10 +311,13 @@ tests rather than in production. No Telegram credentials are needed.
 | `delivery.py` | sending to Telegram, disk or PikPak |
 | `tasks.py` | the job queue and per-job orchestration |
 | `handlers.py` | bot commands and dispatch |
-| `pikpak.py` | PikPak session, offline downloads, share restore |
+| `identity.py` | bot-token parsing and the check-report model |
+| `verify.py` | the preflight and in-chat verification checks |
+| `pikpak.py` | per-user PikPak sessions, transfers, share restore |
+| `portal.py` | one-time PikPak login links and their page |
 | `webserver.py` | signed URLs so PikPak can fetch local files |
 | `config.py` | YAML + environment configuration |
-| `db.py` | SQLite: preferences, upload cache, job history |
+| `db.py` | SQLite: preferences, upload cache, job history, tokens |
 
 ## Prior art
 

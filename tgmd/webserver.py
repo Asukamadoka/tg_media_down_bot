@@ -17,6 +17,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 from urllib.parse import quote
 
 from aiohttp import web
@@ -31,6 +32,12 @@ log = logging.getLogger(__name__)
 _SWEEP_INTERVAL = 300.0
 
 
+class RouteProvider(Protocol):
+    """Anything that wants to add routes to the bot's HTTP server."""
+
+    def register(self, router: web.UrlDispatcher) -> None: ...
+
+
 @dataclass
 class ServedFile:
     path: Path
@@ -41,9 +48,12 @@ class ServedFile:
 class FileServer:
     """Serves registered local files at unguessable, expiring URLs."""
 
-    def __init__(self, config: HttpConfig, secret: str) -> None:
+    def __init__(
+        self, config: HttpConfig, secret: str, *, portal: RouteProvider | None = None
+    ) -> None:
         self._config = config
         self._secret = secret
+        self._portal = portal
         self._files: dict[str, ServedFile] = {}
         self._runner: web.AppRunner | None = None
         self._sweeper: asyncio.Task | None = None
@@ -60,6 +70,8 @@ class FileServer:
         app.router.add_get("/healthz", self._handle_health)
         # add_get also registers HEAD, which PikPak uses to size a file first.
         app.router.add_get("/f/{token}/{name}", self._handle_file)
+        if self._portal is not None:
+            self._portal.register(app.router)
 
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()

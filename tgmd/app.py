@@ -17,6 +17,7 @@ from .delivery import Delivery
 from .downloader import Downloader
 from .handlers import BotHandlers
 from .pikpak import PikPakService
+from .portal import PikPakLoginPortal
 from .resolver import Resolver
 from .tasks import JobQueue
 from .webserver import FileServer
@@ -45,6 +46,7 @@ class Application:
         self.config = config
         self.db = Database(config.download.db_path)
         self.file_server: FileServer | None = None
+        self.portal: PikPakLoginPortal | None = None
         self.queue: JobQueue | None = None
         self.bot = None
         self.user = None
@@ -57,7 +59,11 @@ class Application:
         await self.db.connect()
         secret = await self.db.get_or_create_secret()
 
-        self.file_server = FileServer(config.http, secret)
+        # PikPak and its login portal come first: the portal registers its
+        # routes on the same HTTP server that serves files to PikPak.
+        pikpak = PikPakService(config.pikpak, self.db)
+        self.portal = PikPakLoginPortal(pikpak, config.pikpak, config.http, secret)
+        self.file_server = FileServer(config.http, secret, portal=self.portal)
         await self.file_server.start()
 
         self.bot, self.user = await start_clients(config)
@@ -65,7 +71,6 @@ class Application:
         # chats it belongs to itself, which still covers some setups.
         reading_client = self.user or self.bot
 
-        pikpak = PikPakService(config.pikpak, self.db)
         resolver = Resolver(
             reading_client, auto_join=config.download.auto_join_invites
         )
@@ -89,15 +94,18 @@ class Application:
             self.db,
             self.queue,
             pikpak,
-            has_user_client=self.user is not None,
+            self.portal,
+            user_client=self.user,
         ).register()
 
         log.info(
-            "ready — mode %s, %d worker(s), cache chat %s, PikPak %s",
+            "ready — mode %s, %d worker(s), cache chat %s, shared PikPak %s, "
+            "PikPak login links %s",
             config.delivery.default_mode,
             config.download.concurrent,
             config.delivery.cache_chat_id or "disabled",
             "on" if config.pikpak.configured else "off",
+            "on" if self.portal.unavailable_reason() is None else "off",
         )
 
     async def run(self) -> None:

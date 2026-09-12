@@ -47,3 +47,22 @@ def clean_environment(monkeypatch):
     """Remove every setting the config loader looks at."""
     for name in ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_pikpak_network(monkeypatch):
+    """Make a real PikPak call fail loudly instead of hanging.
+
+    Every request in the library funnels through these two methods, so a test
+    that reaches PikPak by accident (a renamed attribute breaking a stub, say)
+    fails in milliseconds with a clear message rather than stalling on a
+    network timeout.
+    """
+
+    async def refuse(*_args, **_kwargs):
+        raise AssertionError(
+            "a test tried to reach PikPak over the network; stub the client instead"
+        )
+
+    monkeypatch.setattr("pikpakapi.PikPakApi.login", refuse)
+    monkeypatch.setattr("pikpakapi.PikPakApi._make_request", refuse)
