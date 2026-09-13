@@ -1,0 +1,44 @@
+# Render Blueprint. Paired with the "Deploy to Render" button in DEPLOY.md,
+# this builds the Dockerfile, asks for the three required secrets, and mounts
+# a persistent disk.
+#
+# It is a *web* service rather than a worker on purpose: only a web service
+# gets a public HTTPS address, and that address is what PikPak fetches files
+# from and what the Telegram Mini App is served on. The bot reads Render's
+# PORT and RENDER_EXTERNAL_URL automatically, so no HTTP settings are needed.
+#
+# The disk matters. Without it the SQLite database is wiped on every deploy,
+# which would lose the reading-account session created by /setup telegram and
+# every connected PikPak account.
+
+services:
+  - type: web
+    name: tg-media-down-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /healthz
+    disk:
+      name: state
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      # Asked for at deploy time: sync: false means "prompt, do not inherit".
+      - key: TG_API_ID
+        sync: false
+      - key: TG_API_HASH
+        sync: false
+      - key: TG_BOT_TOKEN
+        sync: false
+      - key: ADMIN_USER_IDS
+        sync: false
+
+      # Everything below has a working default. PikPak and the reading account
+      # are connected from inside Telegram with /setup, so they are not asked
+      # for here.
+      - key: HTTP_ENABLED
+        value: "true"
+      - key: DEFAULT_MODE
+        value: telegram
+      - key: LOG_LEVEL
+        value: INFO

@@ -1,0 +1,42 @@
+{
+  "name": "tg-media-down-bot",
+  "description": "Telegram bot that turns a message link into the file behind it, and transfers to PikPak. Finish setup inside Telegram with /setup.",
+  "repository": "https://github.com/Asukamadoka/tg_media_down_bot",
+  "keywords": ["telegram", "bot", "downloader", "pikpak", "telethon"],
+  "stack": "container",
+  "env": {
+    "TG_API_ID": {
+      "description": "API id from https://my.telegram.org/apps",
+      "required": true
+    },
+    "TG_API_HASH": {
+      "description": "API hash from https://my.telegram.org/apps",
+      "required": true
+    },
+    "TG_BOT_TOKEN": {
+      "description": "Bot token from @BotFather, like 123456789:AAH...",
+      "required": true
+    },
+    "ADMIN_USER_IDS": {
+      "description": "Your numeric Telegram user id. The bot answers /id to anyone if you do not know it. Access is closed to everyone else.",
+      "required": true
+    },
+    "HTTP_ENABLED": {
+      "description": "Serve the PikPak file endpoint and the Telegram Mini App login page.",
+      "value": "true"
+    },
+    "PUBLIC_BASE_URL": {
+      "description": "Public HTTPS address of this deployment, for example https://my-bot.example.com. Leave blank on platforms that export it themselves.",
+      "required": false
+    },
+    "DEFAULT_MODE": {
+      "description": "Where files go by default: telegram, local or pikpak.",
+      "value": "telegram"
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1
+    }
+  }
+}

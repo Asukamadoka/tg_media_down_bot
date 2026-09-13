@@ -33,12 +33,21 @@ ENV_VARS = (
     "PIKPAK_PASSWORD",
     "PIKPAK_FOLDER",
     "PIKPAK_TASK_TIMEOUT",
+    "PIKPAK_ALLOW_USER_LOGIN",
+    "PIKPAK_LOGIN_LINK_TTL",
     "HTTP_ENABLED",
     "HTTP_HOST",
     "HTTP_PORT",
     "PUBLIC_BASE_URL",
     "HTTP_URL_TTL",
     "LOG_LEVEL",
+    # Hosting platforms export these; they must not leak into tests.
+    "PORT",
+    "RENDER_EXTERNAL_URL",
+    "KOYEB_PUBLIC_DOMAIN",
+    "RAILWAY_PUBLIC_DOMAIN",
+    "SPACE_HOST",
+    "FLY_APP_NAME",
 )
 
 

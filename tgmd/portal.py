@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 from aiohttp import web
 
 from .config import HttpConfig, PikPakConfig
+from .miniapp import InitDataError, validate_init_data
 from .pikpak import PikPakError, PikPakService
 from .signing import TokenError, make_token, verify_token
 
@@ -36,6 +37,11 @@ log = logging.getLogger(__name__)
 # A user gets a few tries before the link burns, so one typo is survivable but
 # a stolen link is not a password oracle.
 MAX_ATTEMPTS = 3
+
+# The Mini App proves identity through Telegram rather than a link, so the
+# only limit needed there is one that stops PikPak being hammered.
+MINIAPP_ATTEMPT_LIMIT = 8
+MINIAPP_ATTEMPT_WINDOW = 600.0
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
 
@@ -155,6 +161,83 @@ def render_form(action: str, *, error: str | None = None) -> str:
     )
 
 
+_MINIAPP_SCRIPT = """
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const form = document.getElementById('f');
+const errorBox = document.getElementById('e');
+const button = document.getElementById('b');
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  errorBox.textContent = '';
+  button.disabled = true;
+  button.textContent = 'Connecting…';
+  try {
+    const response = await fetch(window.location.pathname, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        initData: tg ? tg.initData : '',
+        username: form.username.value,
+        password: form.password.value
+      })
+    });
+    const result = await response.json();
+    if (response.ok && result.ok) {
+      document.body.innerHTML =
+        '<main class="card"><p class="ok">\\u2705</p><h1>PikPak connected</h1>' +
+        '<p class="sub">Transfers now go to your own PikPak account.</p></main>';
+      if (tg) { setTimeout(() => tg.close(), 1600); }
+      return;
+    }
+    errorBox.textContent = result.error || 'That did not work.';
+  } catch (problem) {
+    errorBox.textContent = 'Could not reach the bot: ' + problem;
+  }
+  button.disabled = false;
+  button.textContent = 'Connect';
+});
+"""
+
+
+def render_miniapp() -> str:
+    """The Mini App page, which Telegram opens inside its own client.
+
+    Identity comes from Telegram's signed initData rather than a one-time
+    link, so there is no token in the URL at all.
+    """
+    return (
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<meta name="robots" content="noindex, nofollow">'
+        "<title>Connect PikPak</title>"
+        f"<style>{_STYLE}</style>"
+        '<script src="https://telegram.org/js/telegram-web-app.js"></script>'
+        "</head><body>"
+        '<main class="card">'
+        "<h1>Connect your PikPak account</h1>"
+        '<p class="sub">This page belongs to your own media-downloader bot. '
+        "It is not operated by PikPak.</p>"
+        '<form id="f">'
+        '<label for="username">PikPak email or phone</label>'
+        '<input id="username" name="username" type="text" autocomplete="username" '
+        'autocapitalize="none" spellcheck="false" required>'
+        '<label for="password">PikPak password</label>'
+        '<input id="password" name="password" type="password" '
+        'autocomplete="current-password" required>'
+        '<button id="b" type="submit">Connect</button>'
+        "</form>"
+        '<p class="error" id="e" style="background:none;border:0;padding:0"></p>'
+        '<p class="note">Telegram tells me who you are, so there is no login '
+        "link to leak. Your password is sent to PikPak once to obtain an "
+        "access token; only the token is stored. Disconnect any time with "
+        "<code>/pikpak logout</code>.</p>"
+        "</main>"
+        f"<script>{_MINIAPP_SCRIPT}</script>"
+        "</body></html>"
+    )
+
+
 def render_result(title: str, message: str, *, good: bool) -> str:
     """A terminal page: either connected, or a refusal."""
     return _shell(
@@ -188,12 +271,16 @@ class PikPakLoginPortal:
         pikpak_config: PikPakConfig,
         http_config: HttpConfig,
         secret: str,
+        *,
+        bot_token: str = "",
     ) -> None:
         self._pikpak = pikpak
         self._pikpak_config = pikpak_config
         self._http = http_config
         self._secret = secret
+        self._bot_token = bot_token
         self._pending: dict[str, PendingLogin] = {}
+        self._miniapp_attempts: dict[int, list[float]] = {}
         self._running = False
 
     # ------------------------------------------------------------- lifecycle
@@ -202,7 +289,23 @@ class PikPakLoginPortal:
         """Attach the portal's routes to a running application."""
         router.add_get("/pikpak/login/{token}", self._handle_form)
         router.add_post("/pikpak/login/{token}", self._handle_submit)
+        router.add_get("/pikpak/app", self._handle_miniapp)
+        router.add_post("/pikpak/app", self._handle_miniapp_submit)
         self._running = True
+
+    @property
+    def miniapp_url(self) -> str | None:
+        """URL for the Mini App button, or None when it cannot be offered.
+
+        Telegram only opens ``web_app`` buttons over HTTPS, so a loopback or
+        plain-HTTP deployment gets the one-time link instead.
+        """
+        if not self._pikpak_config.allow_user_login or not self._running:
+            return None
+        base = self._http.base_url
+        if not base or not base.startswith("https://"):
+            return None
+        return f"{base}/pikpak/app"
 
     @property
     def enabled(self) -> bool:
@@ -316,6 +419,72 @@ class PikPakLoginPortal:
                 _Page(render_result("Link unavailable", str(exc), good=False), 410)
             )
         return self._respond(_Page(render_form(str(request.rel_url))))
+
+    # --------------------------------------------------------------- Mini App
+
+    async def _handle_miniapp(self, _request: web.Request) -> web.Response:
+        return self._respond(_Page(render_miniapp()))
+
+    def _miniapp_throttled(self, user_id: int) -> bool:
+        """True when this user has tried too often recently."""
+        now = time.time()
+        attempts = [
+            stamp
+            for stamp in self._miniapp_attempts.get(user_id, [])
+            if now - stamp < MINIAPP_ATTEMPT_WINDOW
+        ]
+        self._miniapp_attempts[user_id] = attempts
+        return len(attempts) >= MINIAPP_ATTEMPT_LIMIT
+
+    async def _handle_miniapp_submit(self, request: web.Request) -> web.Response:
+        """Log in using the identity Telegram signed into initData."""
+
+        def problem(message: str, status: int) -> web.Response:
+            return web.json_response(
+                {"ok": False, "error": message}, status=status, headers=_SECURITY_HEADERS
+            )
+
+        if not self._pikpak_config.allow_user_login:
+            return problem("Per-user PikPak logins are disabled.", 403)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return problem("Malformed request.", 400)
+        if not isinstance(body, dict):
+            return problem("Malformed request.", 400)
+
+        try:
+            init_data = validate_init_data(
+                str(body.get("initData") or ""), self._bot_token
+            )
+        except InitDataError as exc:
+            log.info("rejected a Mini App submission: %s", exc)
+            return problem(
+                "Telegram could not confirm who you are. Reopen this page from "
+                "the bot.",
+                401,
+            )
+
+        user_id = init_data.user.id
+        if self._miniapp_throttled(user_id):
+            return problem("Too many attempts. Wait a few minutes.", 429)
+        self._miniapp_attempts.setdefault(user_id, []).append(time.time())
+
+        username = str(body.get("username") or "").strip()
+        password = str(body.get("password") or "")
+        if not username or not password:
+            return problem("Enter both fields.", 400)
+
+        try:
+            await self._pikpak.login_with_password(user_id, username, password)
+        except PikPakError as exc:
+            return problem(str(exc), 401)
+
+        log.info("user %s connected PikPak through the Mini App", user_id)
+        return web.json_response({"ok": True}, headers=_SECURITY_HEADERS)
+
+    # ------------------------------------------------------- one-time link
 
     async def _handle_submit(self, request: web.Request) -> web.Response:
         token = request.match_info["token"]
