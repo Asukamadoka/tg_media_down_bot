@@ -6,6 +6,7 @@ import logging
 
 from telethon import TelegramClient, events
 
+from .buttons import url_button, webview_button
 from .config import MODES, Config
 from .db import Database
 from .downloader import has_downloadable_media
@@ -43,7 +44,10 @@ from channels that block saving, as long as the reading account is a member.
 /id — your Telegram user id
 /help — this message"""
 
-ADMIN_HELP = "\n/verify — check the bot's identity and configuration"
+ADMIN_HELP = (
+    "\n/setup — finish setup here: sign in a reading account or PikPak"
+    "\n/verify — check the bot's identity and configuration"
+)
 
 
 class BotHandlers:
@@ -67,15 +71,25 @@ class BotHandlers:
         self._pikpak = pikpak
         self._portal = portal
         self._user_client = user_client
+        self._wizard = None
 
     @property
     def _has_user_client(self) -> bool:
         return self._user_client is not None
 
+    def attach_wizard(self, wizard) -> None:
+        """Give the handlers the setup wizard, before registering."""
+        self._wizard = wizard
+
+    def set_user_client(self, client) -> None:
+        """Adopt a reading client added at runtime by the setup wizard."""
+        self._user_client = client
+
     def register(self) -> None:
         """Attach all handlers. Commands are matched before the link fallback."""
         add = self._bot.add_event_handler
         add(self.on_help, events.NewMessage(pattern=r"^/(start|help)\b"))
+        add(self.on_setup, events.NewMessage(pattern=r"^/setup\b"))
         add(self.on_id, events.NewMessage(pattern=r"^/id\b"))
         add(self.on_mode, events.NewMessage(pattern=r"^/mode\b"))
         add(self.on_status, events.NewMessage(pattern=r"^/status\b"))
@@ -131,9 +145,11 @@ class BotHandlers:
             text += ADMIN_HELP
         if not self._has_user_client:
             text += (
-                "\n\n⚠️ No user session is configured, so I can only read chats "
-                "I am a member of myself."
+                "\n\n⚠️ No reading account is connected yet, so private and "
+                "save-restricted chats will not work."
             )
+            if self._config.access.is_admin(event.sender_id):
+                text += " Send <code>/setup</code> to finish that here."
         await event.reply(text, parse_mode="html", link_preview=False)
 
     async def on_id(self, event) -> None:
@@ -263,39 +279,59 @@ class BotHandlers:
         await self._pikpak_status(event)
 
     async def _pikpak_login(self, event) -> None:
-        """Send a one-time link the user can connect their own account with."""
-        reason = self._portal.unavailable_reason()
-        if reason is not None:
-            hint = ""
-            if self._pikpak.configured:
-                hint = "\n\nThe shared account configured on the server still works."
+        """Offer every way of connecting PikPak that this deployment supports."""
+        if not self._pikpak.user_login_allowed:
+            await event.reply("The operator has disabled per-user PikPak logins.")
+            return
+
+        already = await self._pikpak.has_user_session(event.sender_id)
+        replacing = (
+            "\n\nThis replaces the account you have connected now." if already else ""
+        )
+
+        # Best case: a Mini App, which opens inside Telegram and needs no link
+        # at all, because Telegram signs the visitor's identity for us.
+        miniapp = self._portal.miniapp_url
+        if miniapp is not None:
             await event.reply(
-                f"Login links are not available: {escape_html(reason)}{hint}",
+                "<b>Connect your PikPak account</b>\n\n"
+                "Tap below to open the form inside Telegram. There is no link "
+                "to leak: Telegram tells me who you are.\n\n"
+                "Your password goes to PikPak once, in exchange for an access "
+                f"token. Only the token is stored.{replacing}",
                 parse_mode="html",
+                buttons=webview_button("🔐 Connect PikPak", miniapp),
+                link_preview=False,
             )
             return
 
-        try:
-            link = self._portal.create_link(event.sender_id)
-        except PortalError as exc:
-            await event.reply(f"❌ {escape_html(str(exc))}", parse_mode="html")
+        reason = self._portal.unavailable_reason()
+        if reason is None:
+            try:
+                link = self._portal.create_link(event.sender_id)
+            except PortalError as exc:
+                await event.reply(f"❌ {escape_html(str(exc))}", parse_mode="html")
+                return
+            ttl = human_duration(self._config.pikpak.login_link_ttl)
+            await event.reply(
+                "<b>Connect your PikPak account</b>\n\n"
+                f"The link works once and expires in {ttl}. It opens a page "
+                "served by this bot, not by PikPak. Your password is used once "
+                f"to get an access token, and only the token is stored.{replacing}",
+                parse_mode="html",
+                buttons=url_button("🔐 Open the login page", link),
+                link_preview=False,
+            )
             return
 
-        ttl = human_duration(self._config.pikpak.login_link_ttl)
-        already = await self._pikpak.has_user_session(event.sender_id)
-        replacing = (
-            "\n\nThis will replace the account you have connected now."
-            if already
-            else ""
-        )
+        # No usable web server: the in-chat conversation still works, and
+        # needs no public address or TLS at all.
         await event.reply(
             "<b>Connect your PikPak account</b>\n\n"
-            f'<a href="{link}">Open the login page</a>\n\n'
-            f"The link works once and expires in {ttl}. It opens a page served "
-            "by this bot, not by PikPak. Your password is used once to get an "
-            f"access token, and only the token is stored.{replacing}",
+            "Send <code>/setup pikpak</code> and I will ask for your email and "
+            "password here, deleting each message as I read it.\n\n"
+            f"<i>A web form is not available: {escape_html(reason)}</i>{replacing}",
             parse_mode="html",
-            link_preview=False,
         )
 
     async def _pikpak_logout(self, event, parts: list[str]) -> None:
@@ -388,6 +424,46 @@ class BotHandlers:
             parse_mode="html",
         )
 
+    async def on_setup(self, event) -> None:
+        """Show the setup checklist, or start one of its conversations."""
+        if not await self._authorized(event):
+            return
+        if self._wizard is None:  # pragma: no cover - always attached in practice
+            await event.reply("Setup is not available in this build.")
+            return
+
+        parts = (event.raw_text or "").split()
+        action = parts[1].lower() if len(parts) >= 2 else ""
+
+        if action == "cancel":
+            stopped = await self._wizard.cancel(event.sender_id)
+            await event.reply("Setup cancelled." if stopped else "Nothing to cancel.")
+            return
+
+        if action in ("pikpak", "telegram", "tg"):
+            # Signing an account in to the bot is an operator action: it
+            # decides what the whole bot can read, or where files land.
+            if not self._config.access.is_admin(event.sender_id):
+                await event.reply("Only an admin can run setup.")
+                return
+            if action == "pikpak":
+                await self._wizard.begin_pikpak(event)
+            else:
+                await self._wizard.begin_telegram(event)
+            return
+
+        text = await self._wizard.status_text(event.sender_id)
+        if not self._config.access.is_admin(event.sender_id):
+            await event.reply(text, parse_mode="html", link_preview=False)
+            return
+        await event.reply(
+            text
+            + "\n\n<code>/setup telegram</code> · <code>/setup pikpak</code> · "
+            "<code>/setup cancel</code>",
+            parse_mode="html",
+            link_preview=False,
+        )
+
     async def on_verify(self, event) -> None:
         """Report the bot's identity and configuration. Admins only."""
         if not await self._authorized(event):
@@ -418,6 +494,13 @@ class BotHandlers:
 
     async def on_message(self, event) -> None:
         """Handle anything that is not a command: links, or attached media."""
+        # A setup conversation owns the next message the admin sends, so it
+        # gets first refusal. It declines commands, which then fall through to
+        # their own handlers.
+        if self._wizard is not None and self._wizard.active(event.sender_id):
+            if await self._wizard.handle(event):
+                return
+
         text = event.raw_text or ""
         if text.startswith("/"):
             return  # handled by a command handler, or simply unknown

@@ -126,6 +126,17 @@ class JobQueue:
             )
         log.info("started %d download worker(s)", len(self._workers))
 
+    def rebind_reader(self, resolver: Resolver, downloader: Downloader) -> None:
+        """Swap in a new reading client, after an in-chat login adds one.
+
+        Jobs already running keep the client they started with, which is what
+        you want: replacing it mid-download would abort the transfer. Anything
+        queued from here on uses the new one.
+        """
+        self._resolver = resolver
+        self._downloader = downloader
+        log.info("job queue rebound to a new reading client")
+
     async def stop(self) -> None:
         for worker in self._workers:
             worker.cancel()

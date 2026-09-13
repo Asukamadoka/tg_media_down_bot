@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+from telethon import TelegramClient
+from telethon.sessions import StringSession
 
 from .clients import start_clients
 from .config import Config, ConfigError, load_config
@@ -16,9 +18,11 @@ from .db import Database
 from .delivery import Delivery
 from .downloader import Downloader
 from .handlers import BotHandlers
+from .identity import describe_account
 from .pikpak import PikPakService
 from .portal import PikPakLoginPortal
 from .resolver import Resolver
+from .setup import SetupWizard, stored_user_session
 from .tasks import JobQueue
 from .webserver import FileServer
 
@@ -47,7 +51,10 @@ class Application:
         self.db = Database(config.download.db_path)
         self.file_server: FileServer | None = None
         self.portal: PikPakLoginPortal | None = None
+        self.pikpak: PikPakService | None = None
         self.queue: JobQueue | None = None
+        self.handlers: BotHandlers | None = None
+        self.wizard: SetupWizard | None = None
         self.bot = None
         self.user = None
         self._stopping = asyncio.Event()
@@ -61,42 +68,62 @@ class Application:
 
         # PikPak and its login portal come first: the portal registers its
         # routes on the same HTTP server that serves files to PikPak.
-        pikpak = PikPakService(config.pikpak, self.db)
-        self.portal = PikPakLoginPortal(pikpak, config.pikpak, config.http, secret)
+        self.pikpak = PikPakService(config.pikpak, self.db)
+        self.portal = PikPakLoginPortal(
+            self.pikpak,
+            config.pikpak,
+            config.http,
+            secret,
+            bot_token=config.telegram.bot_token,
+        )
         self.file_server = FileServer(config.http, secret, portal=self.portal)
         await self.file_server.start()
 
-        self.bot, self.user = await start_clients(config)
+        # A session added by a previous in-chat login is picked up here, so
+        # the wizard's work survives a restart.
+        self.bot, self.user = await start_clients(
+            config, await stored_user_session(self.db)
+        )
         # The user client reads history; without one the bot can only read
         # chats it belongs to itself, which still covers some setups.
         reading_client = self.user or self.bot
 
-        resolver = Resolver(
-            reading_client, auto_join=config.download.auto_join_invites
-        )
-        delivery = Delivery(self.bot, config, self.db, pikpak, self.file_server)
+        delivery = Delivery(self.bot, config, self.db, self.pikpak, self.file_server)
 
         self.queue = JobQueue(
             config=config,
             db=self.db,
             bot=self.bot,
-            resolver=resolver,
+            resolver=Resolver(
+                reading_client, auto_join=config.download.auto_join_invites
+            ),
             downloader=Downloader(reading_client),
             bot_downloader=Downloader(self.bot),
             delivery=delivery,
-            pikpak=pikpak,
+            pikpak=self.pikpak,
         )
         await self.queue.start()
 
-        BotHandlers(
+        self.handlers = BotHandlers(
             self.bot,
             config,
             self.db,
             self.queue,
-            pikpak,
+            self.pikpak,
             self.portal,
             user_client=self.user,
-        ).register()
+        )
+        self.wizard = SetupWizard(
+            self.bot,
+            config,
+            self.db,
+            self.pikpak,
+            self.portal,
+            adopt_session=self.adopt_user_session,
+            has_user_client=lambda: self.user is not None,
+        )
+        self.handlers.attach_wizard(self.wizard)
+        self.handlers.register()
 
         log.info(
             "ready — mode %s, %d worker(s), cache chat %s, shared PikPak %s, "
@@ -122,6 +149,48 @@ class Application:
             # Surface a client-side failure rather than exiting silently.
             if task is disconnected and not task.cancelled():
                 task.result()
+
+    async def adopt_user_session(self, session_string: str) -> str:
+        """Bring a session created by an in-chat login into service at once.
+
+        Without this the wizard could only tell the operator to restart, which
+        defeats the point of finishing setup inside Telegram. Jobs already
+        running keep the client they started with; everything after this uses
+        the new one.
+        """
+        client = TelegramClient(
+            StringSession(session_string),
+            self.config.telegram.api_id,
+            self.config.telegram.api_hash,
+            flood_sleep_threshold=60,
+        )
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            raise RuntimeError("the new session is not authorized")
+
+        account = await client.get_me()
+        previous, self.user = self.user, client
+
+        if self.queue is not None:
+            self.queue.rebind_reader(
+                Resolver(
+                    client, auto_join=self.config.download.auto_join_invites
+                ),
+                Downloader(client),
+            )
+        if self.handlers is not None:
+            self.handlers.set_user_client(client)
+
+        if previous is not None:
+            try:
+                await previous.disconnect()
+            except Exception:  # pragma: no cover - best effort
+                log.debug("could not disconnect the previous user client", exc_info=True)
+
+        label = describe_account(account)
+        log.info("adopted a new reading account: %s", label)
+        return label
 
     def request_stop(self) -> None:
         self._stopping.set()

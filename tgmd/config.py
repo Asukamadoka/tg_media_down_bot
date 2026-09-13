@@ -215,6 +215,33 @@ class Config:
         return warnings
 
 
+def detect_platform_base_url(environment: dict[str, str] | None = None) -> str | None:
+    """Work out the public HTTPS address a hosting platform gave this service.
+
+    One-click deploys are the main reason this exists: PikPak transfers and the
+    Mini App both need a public HTTPS address, and asking someone to paste
+    their own deployment URL back into their own deployment is friction that
+    every platform already solved by exporting it.
+    """
+    env = os.environ if environment is None else environment
+
+    direct = (env.get("RENDER_EXTERNAL_URL") or "").strip()
+    if direct:
+        return direct.rstrip("/")
+
+    for name in ("KOYEB_PUBLIC_DOMAIN", "RAILWAY_PUBLIC_DOMAIN", "SPACE_HOST"):
+        domain = (env.get(name) or "").strip()
+        if domain:
+            domain = domain.removeprefix("https://").removeprefix("http://")
+            return f"https://{domain.rstrip('/')}"
+
+    fly_app = (env.get("FLY_APP_NAME") or "").strip()
+    if fly_app:
+        return f"https://{fly_app}.fly.dev"
+
+    return None
+
+
 def _get(source: dict[str, Any], *path: str, default: Any = None) -> Any:
     """Read a nested key out of a plain dict, tolerating missing levels."""
     current: Any = source
@@ -370,16 +397,31 @@ def load_config(path: Path | None = None) -> Config:
         parse_bool(_get(data, "pikpak", "enabled", default=False)),
     ) or bool(pikpak.username and pikpak.password)
 
+    # A hosting platform tells us both of these, so a one-click deploy needs
+    # no HTTP settings at all: PORT is the port it routes to, and its external
+    # URL is what PikPak and the Mini App must be able to reach.
+    platform_url = detect_platform_base_url()
+    public_base_url = _env_str(
+        "PUBLIC_BASE_URL", str(_get(data, "http", "public_base_url", default=""))
+    ) or (platform_url or "")
+
     http = HttpConfig(
         enabled=parse_bool(
             os.environ.get("HTTP_ENABLED"),
-            parse_bool(_get(data, "http", "enabled", default=False)),
+            # Platforms route traffic to the port they assign, so a service
+            # deployed on one should serve it unless told otherwise. The
+            # default here must be None, not False, or an absent key would
+            # look like a deliberate "off" and shadow the platform default.
+            parse_bool(
+                _get(data, "http", "enabled", default=None), bool(platform_url)
+            ),
         ),
         host=_env_str("HTTP_HOST", str(_get(data, "http", "host", default="0.0.0.0"))),
-        port=_env_int("HTTP_PORT", int(_get(data, "http", "port", default=8080))),
-        public_base_url=_env_str(
-            "PUBLIC_BASE_URL", str(_get(data, "http", "public_base_url", default=""))
+        port=_env_int(
+            "HTTP_PORT",
+            _env_int("PORT", int(_get(data, "http", "port", default=8080))),
         ),
+        public_base_url=public_base_url,
         url_ttl=_env_int("HTTP_URL_TTL", int(_get(data, "http", "url_ttl", default=3600))),
     )
 

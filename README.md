@@ -7,6 +7,11 @@ the server, or transfers it into PikPak.
 It also takes magnet links, direct URLs and PikPak share links, which go
 straight into PikPak without passing through this machine.
 
+**Deploying it?** [DEPLOY.md](DEPLOY.md) is the guided path: the four values
+you need and where each comes from, one-click deploy for a few hosts, and then
+`/setup` inside Telegram for everything else. No link can create a running
+bot, but that is the only part that happens outside the Telegram app.
+
 ## What it does
 
 | You send | It does |
@@ -69,15 +74,22 @@ plan to use the bot inside a group, otherwise it only sees commands.
 2. `TG_BOT_TOKEN` from the step above.
 3. `ADMIN_USER_IDS` — your numeric id. Send `/id` to the bot if you do not
    know it; it answers that command to anyone.
-4. `TG_USER_SESSION` — generate it once:
+
+That is everything the process needs to start. The reading account and PikPak
+are connected afterwards from inside Telegram with `/setup`, so they are not
+environment variables unless you want them to be.
+
+If you would rather pin the reading account in the environment, generate a
+session string once:
 
 ```bash
 python -m tgmd.login
 ```
 
-That signs in the reading account and prints a session string. It is a
-credential equivalent to the account password, so keep it out of version
-control; revoke it under Telegram → Settings → Devices if it leaks.
+Put it in `TG_USER_SESSION`. It is a credential equivalent to the account
+password, so keep it out of version control; revoke it under Telegram →
+Settings → Devices if it leaks. Setting it also disables the in-chat login,
+and `/setup` says so rather than appearing to work.
 
 ### 3. Verify before starting
 
@@ -123,6 +135,30 @@ though the token is fine, and the check says so when that happens.
 ```bash
 python -m tgmd
 ```
+
+### 5. Finish inside Telegram
+
+Open the bot and send `/setup`. It shows what is done and what is left:
+
+```
+✅ Bot account      — connected, you are talking to it
+⬜ Reading account  — /setup telegram to sign in here
+⬜ PikPak           — /setup pikpak to sign in here
+⬜ Upload cache     — optional
+```
+
+`/setup telegram` signs a normal account in to the bot, which is what lets it
+read private channels and channels that block saving. It asks for the phone
+number, then the login code Telegram sends, then the two-step password if the
+account has one. Each message is deleted as it is read, and the session is
+brought into service immediately with no restart.
+
+It is admin-only, and the prompt says why it is safe here and nowhere else: a
+bot asking for a Telegram login code is the shape of the commonest
+account-theft scam on the platform, and this is legitimate only because you
+own both the bot and the account.
+
+`/setup pikpak` does the same for PikPak, and needs no web server at all.
 
 ### Docker
 
@@ -172,27 +208,33 @@ why a Telegram file cannot be transferred.
 
 ### Connecting an account
 
-There are two ways, and they can coexist.
+Three ways, and they can coexist. The bot offers whichever its deployment
+supports, best first.
 
-**Each user connects their own account.** They send `/pikpak login` and the
-bot replies with a link:
+**A Mini App, inside Telegram.** With the HTTP server on HTTPS,
+`/pikpak login` shows a button that opens the form inside the Telegram app.
+There is no link at all: Telegram signs who is opening the page, so identity
+comes from Telegram rather than from a secret in a URL. This is the nicest
+path and the one a one-click deploy gets automatically, because the public
+address is read from the platform.
 
-```
-Connect your PikPak account
-  → Open the login page
-The link works once and expires in 15m.
-```
+**In chat.** `/setup pikpak` asks for the email and password as ordinary
+messages, deletes each one as it reads it, and keeps only the token. It needs
+no web server, no public address and no TLS, so it works on any deployment
+including a worker with no inbound networking.
 
-The link opens a page the bot serves itself at `/pikpak/login/<token>`. It
-asks for the PikPak email and password, signs in once through the API, and
-stores only the resulting token. From then on that person's transfers go to
-their own drive. `/pikpak logout` disconnects it and deletes the token.
+**A one-time link.** Where the HTTP server is running but Telegram will not
+open it as a Mini App, `/pikpak login` sends a link to a page the bot serves
+at `/pikpak/login/<token>`.
+
+However it is done, only the access token is stored, never the password, and
+`/pikpak logout` disconnects the account and deletes the token.
 
 The page is deliberately plain and says on its face that it belongs to your
 bot and not to PikPak, because a page that asks for someone's credentials
 should never look like it came from the service it is asking about.
 
-Four things keep the link from being a liability:
+Four things keep the one-time link from being a liability:
 
 - it is signed, so the user id inside it cannot be swapped for another;
 - it works once, and issuing a new one invalidates the previous;
@@ -233,6 +275,7 @@ the credentials are discarded as soon as they have been exchanged for one.
 | `/pikpak logout` | disconnect your account and delete the stored token |
 | `/pikpak dir <path>` | change where your transfers land |
 | `/id` | your user id and the current chat id |
+| `/setup` | admins only: the setup checklist, and finish it here |
 | `/verify` | admins only: identity and configuration report |
 
 Progress is reported in a single message that is edited as the transfer runs,
@@ -291,15 +334,20 @@ python -m pytest
 ```
 
 The suite covers link parsing, bot-token parsing, filename and path building,
-URL signing, configuration precedence and validation, the database layer,
-media inspection, per-user PikPak session selection, and both HTTP surfaces
-over a real socket: the file server and the login portal, including expiry,
-single use, forged tokens and attempt limits.
+URL signing, configuration precedence and validation, platform detection for
+one-click deploys, the database layer, media inspection, per-user PikPak
+session selection, the setup conversations, Mini App signature validation, and
+both HTTP surfaces over a real socket: the file server, the one-time login
+page and the Mini App endpoint, including expiry, single use, forged tokens,
+forged user ids and attempt limits.
 
-It also asserts that the `pikpakapi` methods this project calls still take the
-arguments it passes, so a dependency upgrade fails in tests rather than in
-production, and that a test which accidentally reaches PikPak over the network
-fails immediately instead of hanging. No credentials are needed.
+Three of those exist to catch dependency drift rather than our own bugs:
+the `pikpakapi` methods this project calls are asserted to still take the
+arguments it passes; the inline keyboards are serialised, which fails if
+Telegram's schema layer moves them again; and a test that accidentally reaches
+PikPak over the network fails immediately instead of hanging.
+
+No credentials are needed.
 
 ### Layout
 
@@ -313,6 +361,9 @@ fails immediately instead of hanging. No credentials are needed.
 | `handlers.py` | bot commands and dispatch |
 | `identity.py` | bot-token parsing and the check-report model |
 | `verify.py` | the preflight and in-chat verification checks |
+| `setup.py` | the in-Telegram setup conversations |
+| `miniapp.py` | Telegram Mini App initData validation |
+| `buttons.py` | inline keyboards, isolated because they are layer-specific |
 | `pikpak.py` | per-user PikPak sessions, transfers, share restore |
 | `portal.py` | one-time PikPak login links and their page |
 | `webserver.py` | signed URLs so PikPak can fetch local files |
@@ -321,11 +372,14 @@ fails immediately instead of hanging. No credentials are needed.
 
 ## Prior art
 
-The feature set follows
-[tangyoha/telegram_media_downloader](https://github.com/tangyoha/telegram_media_downloader)
-and [Dineshkarthik/telegram_media_downloader](https://github.com/Dineshkarthik/telegram_media_downloader),
-with the bot-first interface of
-[CodeXBotz/File-Sharing-Bot](https://github.com/CodeXBotz/File-Sharing-Bot)
-and the cloud-transfer idea from
-[anasty17/mirror-leech-telegram-bot](https://github.com/anasty17/mirror-leech-telegram-bot).
-This is an independent implementation on Telethon rather than a fork.
+[REFERENCES.md](REFERENCES.md) covers this properly: what is reused as code,
+the closest prior art and what to take from each, and what PikPak's own
+[@PikPak_Bot](https://t.me/PikPak_Bot) already does so you can decide whether
+you need this at all.
+
+The short version: an independent implementation on Telethon, not a fork.
+The feature set follows the two `telegram_media_downloader` projects, the
+cache-channel trick comes from `File-Sharing-Bot`, and the queue and progress
+behaviour from `mirror-leech-telegram-bot`. Browse the fields at
+[topics/pikpak](https://github.com/topics/pikpak) and
+[topics/telegram](https://github.com/topics/telegram).
