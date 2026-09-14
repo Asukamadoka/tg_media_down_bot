@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
+from . import botconfig
 from .clients import start_clients
 from .config import Config, ConfigError, load_config
 from .db import Database
@@ -124,6 +125,10 @@ class Application:
         )
         self.handlers.attach_wizard(self.wizard)
         self.handlers.register()
+
+        # Write the command menu and profile text ourselves, so nobody has to
+        # paste them into @BotFather.
+        await botconfig.apply(self.bot)
 
         log.info(
             "ready — mode %s, %d worker(s), cache chat %s, shared PikPak %s, "
