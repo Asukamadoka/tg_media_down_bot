@@ -88,9 +88,15 @@ class PikPakConfig:
     password: str = ""
     folder: str = "/TelegramMedia"
     task_timeout: int = 600
+    allow_user_login: bool = True
+    """Whether users may connect their own account with /pikpak login."""
+
+    login_link_ttl: int = 900
+    """How long a login link stays valid, in seconds."""
 
     @property
     def configured(self) -> bool:
+        """True when a shared account is available to every user."""
         return self.enabled and bool(self.username and self.password)
 
 
@@ -186,20 +192,57 @@ class Config:
                 "chat your user account can see."
             )
         elif not self.access.admin_user_ids and not self.access.allowed_user_ids:
+            # Not fatal: the bot prints a claim code at startup, and /claim
+            # makes the first holder of that code an admin without a redeploy.
             warnings.append(
-                "no admin or allowed user ids configured, so the bot will refuse "
-                "every request. Set ADMIN_USER_IDS."
+                "no admin configured yet. The bot will print a claim code to "
+                "this log and refuse everyone until someone sends /claim with "
+                "it. Set ADMIN_USER_IDS to skip that step."
             )
         if self.delivery.default_mode == "pikpak" and not self.pikpak.configured:
-            warnings.append(
-                "default mode is pikpak but PikPak credentials are missing."
-            )
+            if self.pikpak.allow_user_login and self.http.usable:
+                warnings.append(
+                    "default mode is pikpak with no shared account, so each user "
+                    "must run /pikpak login before their first transfer."
+                )
+            else:
+                warnings.append(
+                    "default mode is pikpak but there is no shared account and "
+                    "no way for users to connect their own."
+                )
         if self.pikpak.configured and not self.http.usable:
             warnings.append(
                 "PikPak is configured but the HTTP file server is not; magnet and "
                 "URL transfers will work, Telegram-to-PikPak transfers will not."
             )
         return warnings
+
+
+def detect_platform_base_url(environment: dict[str, str] | None = None) -> str | None:
+    """Work out the public HTTPS address a hosting platform gave this service.
+
+    One-click deploys are the main reason this exists: PikPak transfers and the
+    Mini App both need a public HTTPS address, and asking someone to paste
+    their own deployment URL back into their own deployment is friction that
+    every platform already solved by exporting it.
+    """
+    env = os.environ if environment is None else environment
+
+    direct = (env.get("RENDER_EXTERNAL_URL") or "").strip()
+    if direct:
+        return direct.rstrip("/")
+
+    for name in ("KOYEB_PUBLIC_DOMAIN", "RAILWAY_PUBLIC_DOMAIN", "SPACE_HOST"):
+        domain = (env.get(name) or "").strip()
+        if domain:
+            domain = domain.removeprefix("https://").removeprefix("http://")
+            return f"https://{domain.rstrip('/')}"
+
+    fly_app = (env.get("FLY_APP_NAME") or "").strip()
+    if fly_app:
+        return f"https://{fly_app}.fly.dev"
+
+    return None
 
 
 def _get(source: dict[str, Any], *path: str, default: Any = None) -> Any:
@@ -342,6 +385,13 @@ def load_config(path: Path | None = None) -> Config:
         password=_env_str("PIKPAK_PASSWORD", str(_get(data, "pikpak", "password", default=""))),
         folder=_env_str("PIKPAK_FOLDER", str(_get(data, "pikpak", "folder", default="/TelegramMedia"))),
         task_timeout=_env_int("PIKPAK_TASK_TIMEOUT", int(_get(data, "pikpak", "task_timeout", default=600))),
+        allow_user_login=parse_bool(
+            os.environ.get("PIKPAK_ALLOW_USER_LOGIN"),
+            parse_bool(_get(data, "pikpak", "allow_user_login", default=True), True),
+        ),
+        login_link_ttl=_env_int(
+            "PIKPAK_LOGIN_LINK_TTL", int(_get(data, "pikpak", "login_link_ttl", default=900))
+        ),
     )
     # PikPak turns itself on as soon as credentials exist, so a user who only
     # fills in .env does not also have to remember the enabled flag.
@@ -350,16 +400,31 @@ def load_config(path: Path | None = None) -> Config:
         parse_bool(_get(data, "pikpak", "enabled", default=False)),
     ) or bool(pikpak.username and pikpak.password)
 
+    # A hosting platform tells us both of these, so a one-click deploy needs
+    # no HTTP settings at all: PORT is the port it routes to, and its external
+    # URL is what PikPak and the Mini App must be able to reach.
+    platform_url = detect_platform_base_url()
+    public_base_url = _env_str(
+        "PUBLIC_BASE_URL", str(_get(data, "http", "public_base_url", default=""))
+    ) or (platform_url or "")
+
     http = HttpConfig(
         enabled=parse_bool(
             os.environ.get("HTTP_ENABLED"),
-            parse_bool(_get(data, "http", "enabled", default=False)),
+            # Platforms route traffic to the port they assign, so a service
+            # deployed on one should serve it unless told otherwise. The
+            # default here must be None, not False, or an absent key would
+            # look like a deliberate "off" and shadow the platform default.
+            parse_bool(
+                _get(data, "http", "enabled", default=None), bool(platform_url)
+            ),
         ),
         host=_env_str("HTTP_HOST", str(_get(data, "http", "host", default="0.0.0.0"))),
-        port=_env_int("HTTP_PORT", int(_get(data, "http", "port", default=8080))),
-        public_base_url=_env_str(
-            "PUBLIC_BASE_URL", str(_get(data, "http", "public_base_url", default=""))
+        port=_env_int(
+            "HTTP_PORT",
+            _env_int("PORT", int(_get(data, "http", "port", default=8080))),
         ),
+        public_base_url=public_base_url,
         url_ttl=_env_int("HTTP_URL_TTL", int(_get(data, "http", "url_ttl", default=3600))),
     )
 

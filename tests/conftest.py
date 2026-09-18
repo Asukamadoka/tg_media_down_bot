@@ -33,12 +33,21 @@ ENV_VARS = (
     "PIKPAK_PASSWORD",
     "PIKPAK_FOLDER",
     "PIKPAK_TASK_TIMEOUT",
+    "PIKPAK_ALLOW_USER_LOGIN",
+    "PIKPAK_LOGIN_LINK_TTL",
     "HTTP_ENABLED",
     "HTTP_HOST",
     "HTTP_PORT",
     "PUBLIC_BASE_URL",
     "HTTP_URL_TTL",
     "LOG_LEVEL",
+    # Hosting platforms export these; they must not leak into tests.
+    "PORT",
+    "RENDER_EXTERNAL_URL",
+    "KOYEB_PUBLIC_DOMAIN",
+    "RAILWAY_PUBLIC_DOMAIN",
+    "SPACE_HOST",
+    "FLY_APP_NAME",
 )
 
 
@@ -47,3 +56,22 @@ def clean_environment(monkeypatch):
     """Remove every setting the config loader looks at."""
     for name in ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_pikpak_network(monkeypatch):
+    """Make a real PikPak call fail loudly instead of hanging.
+
+    Every request in the library funnels through these two methods, so a test
+    that reaches PikPak by accident (a renamed attribute breaking a stub, say)
+    fails in milliseconds with a clear message rather than stalling on a
+    network timeout.
+    """
+
+    async def refuse(*_args, **_kwargs):
+        raise AssertionError(
+            "a test tried to reach PikPak over the network; stub the client instead"
+        )
+
+    monkeypatch.setattr("pikpakapi.PikPakApi.login", refuse)
+    monkeypatch.setattr("pikpakapi.PikPakApi._make_request", refuse)

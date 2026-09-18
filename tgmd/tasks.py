@@ -126,6 +126,17 @@ class JobQueue:
             )
         log.info("started %d download worker(s)", len(self._workers))
 
+    def rebind_reader(self, resolver: Resolver, downloader: Downloader) -> None:
+        """Swap in a new reading client, after an in-chat login adds one.
+
+        Jobs already running keep the client they started with, which is what
+        you want: replacing it mid-download would abort the transfer. Anything
+        queued from here on uses the new one.
+        """
+        self._resolver = resolver
+        self._downloader = downloader
+        log.info("job queue rebound to a new reading client")
+
     async def stop(self) -> None:
         for worker in self._workers:
             worker.cancel()
@@ -220,19 +231,19 @@ class JobQueue:
     async def _run_url_job(self, job: Job, reporter: Reporter) -> None:
         """Hand a magnet link or direct URL straight to PikPak."""
         await reporter.open(f"⏳ Sending to PikPak: <code>{escape_html(job.label)}</code>")
-        if not self._pikpak.configured:
+        if not await self._pikpak.available_for(job.user_id):
             job.state = JobState.FAILED
-            job.detail = "PikPak is not configured"
+            job.detail = "no PikPak account connected"
             await reporter.close(
-                "❌ PikPak is not configured, and a magnet link or URL has "
-                "nowhere else to go. Set PIKPAK_USERNAME and PIKPAK_PASSWORD."
+                "❌ No PikPak account is connected, and a magnet link or URL "
+                "has nowhere else to go. Use /pikpak login to connect yours."
             )
             await self._db.finish_job(job.id, "failed", error=job.detail)
             return
 
         try:
             result = await self._delivery.url_to_pikpak(
-                job.url or "", folder=job.pikpak_folder
+                job.url or "", folder=job.pikpak_folder, user_id=job.user_id
             )
         except (DeliveryError, PikPakError) as exc:
             job.state = JobState.FAILED
@@ -249,7 +260,9 @@ class JobQueue:
         """Save a PikPak share link into the account."""
         await reporter.open("⏳ Saving the PikPak share…")
         try:
-            names = await self._pikpak.restore_share(job.url or "")
+            names = await self._pikpak.restore_share(
+                job.url or "", user_id=job.user_id
+            )
         except PikPakError as exc:
             job.state = JobState.FAILED
             job.detail = str(exc)
@@ -471,7 +484,7 @@ class JobQueue:
                 force=True,
             )
             return await self._delivery.to_pikpak(
-                path, info, folder=job.pikpak_folder
+                path, info, folder=job.pikpak_folder, user_id=job.user_id
             )
 
         try:

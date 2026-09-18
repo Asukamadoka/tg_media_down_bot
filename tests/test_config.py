@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tgmd.config import ConfigError, load_config
+from tgmd.config import ConfigError, detect_platform_base_url, load_config
 
 MINIMAL_YAML = """
 telegram:
@@ -135,11 +135,14 @@ class TestValidation:
         with pytest.raises(ConfigError, match="public_base_url"):
             config.validate()
 
-    def test_no_allowed_users_is_a_warning(self, tmp_path):
+    def test_no_admin_is_a_warning_that_points_at_claim(self, tmp_path):
+        # Not fatal: an unclaimed bot is a normal bootstrap state now, so the
+        # warning has to explain the way out rather than just the symptom.
         body = MINIMAL_YAML.replace("admin_user_ids: [42]", "admin_user_ids: []")
         config = load_config(write_config(tmp_path, body))
         warnings = config.validate()
-        assert any("refuse every request" in warning for warning in warnings)
+        assert any("/claim" in warning for warning in warnings)
+        assert any("claim code" in warning for warning in warnings)
 
     def test_open_access_is_a_warning(self, tmp_path):
         config = load_config(
@@ -187,3 +190,101 @@ class TestDerivedValues:
         assert (tmp_path / "downloads").is_dir()
         assert (tmp_path / "data").is_dir()
         assert (tmp_path / "sessions").is_dir()
+
+
+class TestPlatformDetection:
+    """One-click deploys rely on reading the host's own environment."""
+
+    def test_nothing_detected_by_default(self):
+        assert detect_platform_base_url({}) is None
+
+    def test_render_exports_a_full_url(self):
+        assert (
+            detect_platform_base_url({"RENDER_EXTERNAL_URL": "https://a.onrender.com"})
+            == "https://a.onrender.com"
+        )
+
+    def test_a_trailing_slash_is_trimmed(self):
+        assert (
+            detect_platform_base_url({"RENDER_EXTERNAL_URL": "https://a.onrender.com/"})
+            == "https://a.onrender.com"
+        )
+
+    @pytest.mark.parametrize(
+        "name", ["KOYEB_PUBLIC_DOMAIN", "RAILWAY_PUBLIC_DOMAIN", "SPACE_HOST"]
+    )
+    def test_bare_domains_get_an_https_scheme(self, name):
+        assert detect_platform_base_url({name: "app.example.com"}) == (
+            "https://app.example.com"
+        )
+
+    def test_a_domain_that_already_has_a_scheme_is_not_doubled(self):
+        assert (
+            detect_platform_base_url({"KOYEB_PUBLIC_DOMAIN": "https://app.example.com"})
+            == "https://app.example.com"
+        )
+
+    def test_fly_builds_its_conventional_hostname(self):
+        assert detect_platform_base_url({"FLY_APP_NAME": "mybot"}) == (
+            "https://mybot.fly.dev"
+        )
+
+    def test_render_wins_over_the_others(self):
+        assert detect_platform_base_url(
+            {
+                "RENDER_EXTERNAL_URL": "https://render.example",
+                "KOYEB_PUBLIC_DOMAIN": "koyeb.example",
+                "FLY_APP_NAME": "fly",
+            }
+        ) == "https://render.example"
+
+    def test_blank_values_are_ignored(self):
+        assert detect_platform_base_url({"RENDER_EXTERNAL_URL": "  "}) is None
+
+
+class TestPlatformConfiguration:
+    def test_a_platform_url_becomes_the_public_base_url(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bot.onrender.com")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.http.base_url == "https://bot.onrender.com"
+
+    def test_a_platform_url_enables_the_http_server(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bot.onrender.com")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.http.enabled
+        assert config.http.usable
+
+    def test_an_explicit_public_url_wins(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bot.onrender.com")
+        monkeypatch.setenv("PUBLIC_BASE_URL", "https://media.example.com")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.http.base_url == "https://media.example.com"
+
+    def test_an_explicit_off_switch_wins(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bot.onrender.com")
+        monkeypatch.setenv("HTTP_ENABLED", "false")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert not config.http.enabled
+
+    def test_a_yaml_off_switch_wins(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bot.onrender.com")
+        config = load_config(
+            write_config(tmp_path, MINIMAL_YAML + "\nhttp:\n  enabled: false\n")
+        )
+        assert not config.http.enabled
+
+    def test_the_platform_port_is_used(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PORT", "10000")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.http.port == 10000
+
+    def test_an_explicit_port_wins_over_the_platform(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PORT", "10000")
+        monkeypatch.setenv("HTTP_PORT", "9999")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.http.port == 9999
+
+    def test_no_platform_means_the_default_port(self, tmp_path):
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.http.port == 8080
+        assert not config.http.enabled
