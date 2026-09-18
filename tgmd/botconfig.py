@@ -25,7 +25,9 @@ log = logging.getLogger(__name__)
 # fit on one line on a phone, so they are terse by necessity.
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("help", "What I take and what I can do"),
+    ("claim", "Become the admin of a freshly deployed bot"),
     ("setup", "Finish setup: sign in an account or PikPak"),
+    ("cache", "Use a channel as the upload cache"),
     ("mode", "Where files go: telegram, local or pikpak"),
     ("status", "What I am working on"),
     ("cancel", "Stop one job, or all of them"),

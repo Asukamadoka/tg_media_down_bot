@@ -192,9 +192,12 @@ class Config:
                 "chat your user account can see."
             )
         elif not self.access.admin_user_ids and not self.access.allowed_user_ids:
+            # Not fatal: the bot prints a claim code at startup, and /claim
+            # makes the first holder of that code an admin without a redeploy.
             warnings.append(
-                "no admin or allowed user ids configured, so the bot will refuse "
-                "every request. Set ADMIN_USER_IDS."
+                "no admin configured yet. The bot will print a claim code to "
+                "this log and refuse everyone until someone sends /claim with "
+                "it. Set ADMIN_USER_IDS to skip that step."
             )
         if self.delivery.default_mode == "pikpak" and not self.pikpak.configured:
             if self.pikpak.allow_user_login and self.http.usable:

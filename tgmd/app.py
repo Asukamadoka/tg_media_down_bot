@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-from . import botconfig
+from . import bootstrap, botconfig
 from .clients import start_clients
 from .config import Config, ConfigError, load_config
 from .db import Database
@@ -66,6 +66,10 @@ class Application:
 
         await self.db.connect()
         secret = await self.db.get_or_create_secret()
+
+        # An admin claimed, or a cache channel chosen, on a previous run is
+        # merged into the live config before anything reads it.
+        await bootstrap.load_runtime_settings(self.db, config)
 
         # PikPak and its login portal come first: the portal registers its
         # routes on the same HTTP server that serves files to PikPak.
@@ -129,6 +133,13 @@ class Application:
         # Write the command menu and profile text ourselves, so nobody has to
         # paste them into @BotFather.
         await botconfig.apply(self.bot)
+
+        # With no admin the bot refuses everyone, so tell the operator how to
+        # claim it right where they are already looking: the deploy log.
+        me = await self.bot.get_me()
+        await bootstrap.announce_claim(
+            self.db, config, getattr(me, "username", None)
+        )
 
         log.info(
             "ready — mode %s, %d worker(s), cache chat %s, shared PikPak %s, "

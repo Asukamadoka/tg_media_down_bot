@@ -18,8 +18,8 @@
       "required": true
     },
     "ADMIN_USER_IDS": {
-      "description": "Your numeric Telegram user id. The bot answers /id to anyone if you do not know it. Access is closed to everyone else.",
-      "required": true
+      "description": "Optional. Leave blank: the bot prints a claim code to its log, and sending /claim <code> in Telegram makes you the admin with no second deploy. Set it only if you would rather skip that step.",
+      "required": false
     },
     "HTTP_ENABLED": {
       "description": "Serve the PikPak file endpoint and the Telegram Mini App login page.",
