@@ -135,11 +135,14 @@ class TestValidation:
         with pytest.raises(ConfigError, match="public_base_url"):
             config.validate()
 
-    def test_no_allowed_users_is_a_warning(self, tmp_path):
+    def test_no_admin_is_a_warning_that_points_at_claim(self, tmp_path):
+        # Not fatal: an unclaimed bot is a normal bootstrap state now, so the
+        # warning has to explain the way out rather than just the symptom.
         body = MINIMAL_YAML.replace("admin_user_ids: [42]", "admin_user_ids: []")
         config = load_config(write_config(tmp_path, body))
         warnings = config.validate()
-        assert any("refuse every request" in warning for warning in warnings)
+        assert any("/claim" in warning for warning in warnings)
+        assert any("claim code" in warning for warning in warnings)
 
     def test_open_access_is_a_warning(self, tmp_path):
         config = load_config(

@@ -8,16 +8,37 @@ entirely inside Telegram.
 | Step | Where | What |
 | --- | --- | --- |
 | 1 | Telegram | create the bot, get its token |
-| 2 | a host | deploy this repo with three secrets |
-| 3 | Telegram | `/setup` connects the reading account and PikPak |
+| 2 | a host | deploy this repo with three values |
+| 3 | Telegram | `/claim`, then `/setup` for the account and PikPak |
 
 Step 2 is the only part that cannot be done in the Telegram app, because the
-secrets have to reach the process before it can start.
+values have to reach the process before it can start. Everything else is
+either automatic or a command you send in a chat.
 
-## Step 1 — the four values you need
+What the bot does for itself, so you do not have to:
+
+| Chore | How it is avoided |
+| --- | --- |
+| `/setcommands` in BotFather | written over the API at startup |
+| bot description and about text | same |
+| finding your own user id | `/claim <code>` from the log |
+| finding a channel's `-100…` id | post `/cache` in the channel |
+| the public URL and port | read from the platform's own environment |
+| generating a session string | `/setup telegram` signs in, in chat |
+
+Only `/setprivacy` is left in BotFather, because Telegram exposes no API for
+it, and it is optional.
+
+## Step 1 — the three values you need
 
 Collect these first. Paste them into your host's environment-variable form,
 never into a chat.
+
+Three, not four: the admin id used to be a variable, which meant deploying,
+sending `/id`, reading the number back and deploying again. The bot now prints
+a claim code to its own log, and `/claim <code>` makes you the admin with no
+second deploy. Same for the upload cache: post `/cache` in the channel and the
+bot takes the id from there.
 
 ### `TG_API_ID` and `TG_API_HASH`
 
@@ -42,14 +63,32 @@ so a token from the wrong bot is caught at startup rather than later.
 While you are there, `/setprivacy` → **Disable** lets the bot see links posted
 in groups it is in. Skip it if you only ever message the bot directly.
 
-### `ADMIN_USER_IDS`
+### `ADMIN_USER_IDS` — optional, skip it
 
-Your numeric Telegram user id. If you do not know it, deploy first, open your
-bot and send `/id` — it answers that to anyone. Then set the variable and
-redeploy.
+Leave it blank. On startup with no admin the bot writes a block like this to
+its log:
+
+```
+====================================================================
+  NO ADMIN YET. Open @your_bot in Telegram and send:
+
+      /claim 5isJppLOdTc
+
+  That makes you the admin. No redeploy needed, and this code stops
+  working straight afterwards.
+====================================================================
+```
+
+You are already looking at that log, having just deployed. Send the command
+and you own the bot, stored in the database so it survives restarts.
+
+The code is required rather than trusting whoever messages first, because bot
+usernames are searchable: first-sender-wins would hand the bot to whoever
+found it. It is single-use and stops working the moment an admin exists.
 
 This is a real gate, not a formality: the bot reads whatever the connected
-account can see, so it refuses everyone who is not listed.
+account can see, so it refuses everyone who is not an admin or on
+`ALLOWED_USER_IDS`.
 
 ## Step 2 — deploy
 
@@ -117,8 +156,12 @@ docker compose up -d
 
 ## Step 3 — finish inside Telegram
 
-Open your bot and send `/setup`. It shows a checklist and fills it in without
-you touching the host again:
+First, `/claim <code>` with the code from the log, unless you set
+`ADMIN_USER_IDS` yourself. Until that happens the bot refuses everyone,
+including you, and says so with the instructions.
+
+Then send `/setup`. It shows a checklist and fills it in without you touching
+the host again:
 
 ```
 ✅ Bot account      — connected, you are talking to it
@@ -145,10 +188,12 @@ both, and keeps only the access token. If the HTTP server is running on HTTPS,
 `/pikpak login` is nicer: it opens the same form as a Mini App inside the
 Telegram app, where Telegram signs your identity so there is no link to leak.
 
-**The upload cache** is optional. Create a private channel, add the bot as an
-administrator, and set `CACHE_CHAT_ID` to the channel's id. A link requested
-twice is then re-sent from Telegram's servers instead of being downloaded
-again.
+**The upload cache** is optional and needs no id hunting. Create a private
+channel, add the bot as an administrator, then post `/cache` **in that
+channel**. The bot checks it really can post there, takes the id from the
+message itself, and stores it. A link requested twice is then re-sent from
+Telegram's servers instead of being downloaded again. `/cache off` disables
+it.
 
 Then run `/verify` to confirm the whole thing, or `python -m tgmd.verify` on
 the host for the same report with an exit code.

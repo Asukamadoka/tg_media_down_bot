@@ -24,18 +24,19 @@ services:
       sizeGB: 10
     envVars:
       # Asked for at deploy time: sync: false means "prompt, do not inherit".
+      # These three are the whole list. ADMIN_USER_IDS is deliberately absent:
+      # the bot prints a claim code to this service's log, and /claim makes
+      # you the admin without a second deploy.
       - key: TG_API_ID
         sync: false
       - key: TG_API_HASH
         sync: false
       - key: TG_BOT_TOKEN
         sync: false
-      - key: ADMIN_USER_IDS
-        sync: false
 
-      # Everything below has a working default. PikPak and the reading account
-      # are connected from inside Telegram with /setup, so they are not asked
-      # for here.
+      # Everything below has a working default. PikPak, the reading account
+      # and the upload cache are all connected from inside Telegram, so they
+      # are not asked for here.
       - key: HTTP_ENABLED
         value: "true"
       - key: DEFAULT_MODE

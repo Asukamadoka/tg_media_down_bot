@@ -72,12 +72,15 @@ plan to use the bot inside a group, otherwise it only sees commands.
 
 1. `TG_API_ID` and `TG_API_HASH` from <https://my.telegram.org/apps>.
 2. `TG_BOT_TOKEN` from the step above.
-3. `ADMIN_USER_IDS` — your numeric id. Send `/id` to the bot if you do not
-   know it; it answers that command to anyone.
 
-That is everything the process needs to start. The reading account and PikPak
-are connected afterwards from inside Telegram with `/setup`, so they are not
-environment variables unless you want them to be.
+That is everything the process needs to start. Who the admin is, the reading
+account, PikPak and the upload cache are all established afterwards from
+inside Telegram, so none of them is an environment variable unless you want
+it to be.
+
+On first start with no admin the bot writes a claim code to its log; sending
+`/claim <code>` makes you the admin, stored in the database. Setting
+`ADMIN_USER_IDS` skips that step if you prefer.
 
 If you would rather pin the reading account in the environment, generate a
 session string once:
@@ -275,7 +278,9 @@ the credentials are discarded as soon as they have been exchanged for one.
 | `/pikpak logout` | disconnect your account and delete the stored token |
 | `/pikpak dir <path>` | change where your transfers land |
 | `/id` | your user id and the current chat id |
+| `/claim <code>` | become the admin of a freshly deployed bot |
 | `/setup` | admins only: the setup checklist, and finish it here |
+| `/cache` | admins only: use a channel as the upload cache |
 | `/verify` | admins only: identity and configuration report |
 
 Progress is reported in a single message that is edited as the transfer runs,
@@ -309,10 +314,14 @@ moment a download finishes.
 
 ### Upload cache
 
-Set `CACHE_CHAT_ID` to a channel the bot is an administrator of. Each file the
-bot uploads is also stored there, keyed by its source message, so the same
-link requested twice is re-sent from Telegram's own servers instead of being
-downloaded and uploaded again.
+Create a private channel, add the bot as an administrator, then post `/cache`
+in that channel. The bot verifies it can post there, takes the id from the
+message, and remembers it. Each file it uploads is also stored there, keyed by
+its source message, so the same link requested twice is re-sent from
+Telegram's own servers instead of being downloaded and uploaded again.
+
+`CACHE_CHAT_ID` does the same thing from the environment and outranks the
+runtime choice, for anyone who prefers declaring it.
 
 ## Limitations
 
