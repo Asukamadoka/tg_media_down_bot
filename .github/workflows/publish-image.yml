@@ -1,0 +1,70 @@
+name: Publish container image
+
+# 构建镜像并推到 GHCR，NAS / 任何 Docker 宿主直接 pull，不需要源码也不需要本地构建。
+# 用内置的 GITHUB_TOKEN，不需要额外配任何 secret。
+
+on:
+  push:
+    branches:
+      - claude/telegram-media-downloader-bot-samm1v
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # NAS 可能是 x86 也可能是 ARM，两个架构都构一份。
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # metadata-action 会把镜像名自动转小写，GHCR 不接受大写仓库名。
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 告知镜像地址
+        run: |
+          echo "### 镜像已发布" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "默认为私有包。NAS 匿名拉取需在 Packages 页面改成 public，" >> "$GITHUB_STEP_SUMMARY"
+          echo "否则需在 NAS 上用 PAT 登录 ghcr.io。" >> "$GITHUB_STEP_SUMMARY"
