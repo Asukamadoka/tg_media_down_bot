@@ -174,8 +174,16 @@ class Application:
         running keep the client they started with; everything after this uses
         the new one.
         """
+        try:
+            session = StringSession(session_string)
+        except ValueError as exc:
+            # Telethon's own message here is just "Not a valid string".
+            raise RuntimeError(
+                f"that is not a Telegram session string: {exc}"
+            ) from exc
+
         client = TelegramClient(
-            StringSession(session_string),
+            session,
             self.config.telegram.api_id,
             self.config.telegram.api_hash,
             flood_sleep_threshold=60,
