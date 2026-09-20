@@ -1,0 +1,56 @@
+# 拉取已构建镜像的部署方式。适用于 NAS 、轻量 VPS 等不想（或不能）本地构建的宿主。
+#
+#   docker compose -f docker-compose.ghcr.yml up -d
+#
+# 镜像由 .github/workflows/publish-image.yml 在每次 push 时构建，
+# 同时产出 linux/amd64 与 linux/arm64，x86 和 ARM 的 NAS 都能直接用。
+#
+# 本机开发仍用 docker-compose.yml（build: .），那份没动。
+#
+# 三个必填值从同目录的 .env 读。没有 .env 时 compose 会直接报错并
+# 指出缺哪一项，好过启动后才在日志里发现。
+#
+# ADMIN_USER_IDS 故意不设：首次启动时 bot 会在日志里打印一段认领码，
+# 在 Telegram 里发 /claim <码> 即成为管理员，不需要重新部署。
+
+services:
+  bot:
+    image: ghcr.io/asukamadoka/tg_media_down_bot:latest
+    container_name: tg-media-down-bot
+    restart: unless-stopped
+
+    environment:
+      # 来自 https://my.telegram.org/apps
+      TG_API_ID: "${TG_API_ID:?缺 TG_API_ID，到 my.telegram.org/apps 取}"
+      TG_API_HASH: "${TG_API_HASH:?缺 TG_API_HASH，到 my.telegram.org/apps 取}"
+      # 来自 @BotFather，形如 123456789:AAH...，包含冒号
+      TG_BOT_TOKEN: "${TG_BOT_TOKEN:?缺 TG_BOT_TOKEN，向 BotFather 要}"
+
+      # PikPak 靠 URL 拉文件，所以 HTTP 服务得开。
+      HTTP_ENABLED: "true"
+      DEFAULT_MODE: "telegram"
+      LOG_LEVEL: "INFO"
+
+      # 有公网 HTTPS（反向代理 / Cloudflare Tunnel）后再填，
+      # Telegram -> PikPak 转存和内嵌登录页依赖它。
+      # PUBLIC_BASE_URL: "https://你的域名"
+
+    volumes:
+      # 会话、SQLite 数据库、下载文件全在这一个卷里，
+      # 重建容器不会丢 /setup 的成果。
+      - ./data:/data
+
+    ports:
+      - "8080:8080"
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz',
+          timeout=3).status==200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
