@@ -1,0 +1,78 @@
+# mihomo 配置模板 —— 复制成 config.yaml 后填入你自己的节点。
+#
+# 刻意的取舍，改之前先读：
+#
+# 1. 规则里只用 IP-CIDR，**不引用 GEOIP / GEOSITE**。
+#    那两个数据库要在启动时从 GitHub 下载；而典型的受限网络里
+#    github.com 本身就不通，一引用就是启动即卡死。
+#
+# 2. external-controller 只绑 127.0.0.1。不要往局域网发布 ——
+#    mihomo 的控制面默认无鉴权，暴露出去等于把代理白送人。
+#
+# 3. TUN 的 dns-hijack 顺带解决 DNS 污染：受限网络里
+#    api.telegram.org 经常被解析到无关的 IP 段。
+
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: false
+external-controller: 127.0.0.1:9090
+
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  default-nameserver: ["223.5.5.5", "119.29.29.29"]
+  nameserver: ["223.5.5.5", "119.29.29.29"]
+
+tun:
+  enable: true
+  stack: system
+  auto-route: true
+  auto-detect-interface: true
+  dns-hijack: ["any:53"]
+
+# —— 二选一 ——
+
+# A) 订阅（机场给的 Clash/mihomo 格式链接）
+proxy-providers:
+  main:
+    type: http
+    url: "REPLACE_WITH_YOUR_SUBSCRIPTION_URL"
+    interval: 86400
+    path: ./providers/main.yaml
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+
+# B) 直写单个节点（用这种就把上面的 proxy-providers 整段删掉，
+#    并把 proxy-groups 里的 `use: ["main"]` 换成 `proxies: ["node-1"]`）
+# proxies:
+#   - name: "node-1"
+#     type: vless
+#     server: your.server.example
+#     port: 443
+#     uuid: 00000000-0000-0000-0000-000000000000
+#     tls: true
+#     network: ws
+#     ws-opts:
+#       path: /path
+
+proxy-groups:
+  - name: PROXY
+    type: url-test
+    use: ["main"]
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 100
+
+rules:
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - MATCH,PROXY
