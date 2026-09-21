@@ -1,0 +1,54 @@
+# 受限网络环境下的部署：mihomo 旁车 + 共享网络栈
+#
+# 适用场景：部署机所在网络无法直连 Telegram 的 MTProto 端点
+# （表现为 ConnectionError: Connection to Telegram failed 5 time(s)）。
+#
+# 用法：
+#   1. cp mihomo/config.example.yaml mihomo/config.yaml
+#   2. 编辑 mihomo/config.yaml，填入你自己的节点或订阅地址
+#   3. chmod 600 mihomo/config.yaml     # 里面有你的凭据
+#   4. cp ../../.env.example .env && 填好 TG_API_ID / TG_API_HASH / TG_BOT_TOKEN
+#   5. mkdir -p data/sessions data/db data/downloads && chown -R 10001:10001 data
+#      （镜像里跑的是 uid 10001，root 建的目录它写不进去）
+#   6. docker compose up -d
+
+services:
+  proxy:
+    image: metacubex/mihomo:latest
+    container_name: tg-bot-proxy
+    restart: unless-stopped
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    # 必须是非 127.x 的地址，这样 DNS 查询才会走 TUN 被 mihomo 劫持。
+    # 指向 127.0.0.11（Docker 内建 DNS）会绕过 TUN，DNS 污染就治不了。
+    dns: ["1.1.1.1", "8.8.8.8"]
+    volumes:
+      - ./mihomo:/root/.config/mihomo
+    # bot 共享本服务的 netns，所以端口只能声明在这里
+    ports:
+      - "8080:8080"
+
+  bot:
+    image: ghcr.io/asukamadoka/tg_media_down_bot:latest
+    container_name: tg-media-down-bot
+    restart: unless-stopped
+    network_mode: "service:proxy"
+    depends_on: [proxy]
+    env_file: .env
+    environment:
+      # 没有公网 HTTPS 地址时必须关掉，否则启动即 exit 2：
+      #   http.enabled is set but http.public_base_url is empty
+      # 代价：Telegram→PikPak 转存和内嵌 PikPak 登录页不可用。
+      # 有了公网地址后，设 PUBLIC_BASE_URL 并把这里翻回 "true"。
+      HTTP_ENABLED: "false"
+      DEFAULT_MODE: "telegram"
+      LOG_LEVEL: "INFO"
+    volumes:
+      - ./data:/data
+
+# 注意：bot 挂在 proxy 的网络栈上，重启 proxy 会掐断 bot 的连接。
+#       改完 mihomo 配置后要两个一起重启：
+#         docker compose restart proxy && docker compose restart bot
