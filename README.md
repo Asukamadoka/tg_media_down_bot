@@ -307,6 +307,7 @@ The settings worth knowing about:
 | `access.allow_all_users` | false | open the bot to everyone |
 | `pikpak.allow_user_login` | true | users may connect their own account |
 | `pikpak.login_link_ttl` | 900 | login link lifetime, seconds |
+| `language` | `en` | which message catalogue replies come from: `en` or `zh` |
 
 Template fields: `chat`, `chat_id`, `message_id`, `topic_id`, `name`, `stem`,
 `ext`, `date`. An unknown field is rejected at startup rather than at the
@@ -333,7 +334,11 @@ runtime choice, for anyone who prefers declaring it.
   pushing through them, so a large batch is deliberately not fast.
 - `download.max_batch` caps range links. A wider range is truncated and the
   bot reports it.
-- Bot messages are in English.
+- Bot messages are English by default. `TGMD_LANG=zh` (or `language: zh`)
+  switches the catalogue in `tgmd/i18n.py`; `/help`, `/mode`, `/status`,
+  `/stats`, `/pikpak`, `/cache`, `/claim`, the queue and progress messages and
+  the command menu are translated. `/setup`, `/verify` and the PikPak login
+  page are not yet.
 
 ## Development
 

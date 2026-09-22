@@ -41,6 +41,10 @@ ENV_VARS = (
     "PUBLIC_BASE_URL",
     "HTTP_URL_TTL",
     "LOG_LEVEL",
+    # Which message catalogue tgmd.i18n reads. POSIX LANG is deliberately not
+    # one of these: images set it to C.UTF-8 for unrelated reasons.
+    "TGMD_LANG",
+    "BOT_LANG",
     # Hosting platforms export these; they must not leak into tests.
     "PORT",
     "RENDER_EXTERNAL_URL",

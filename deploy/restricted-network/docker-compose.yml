@@ -46,9 +46,12 @@ services:
       HTTP_ENABLED: "false"
       DEFAULT_MODE: "telegram"
       LOG_LEVEL: "INFO"
+      # en | zh — what people read. Command names, their arguments and the
+      # deployment log stay English either way.
+      TGMD_LANG: "en"
     volumes:
       - ./data:/data
 
-# 注意：bot 挂在 proxy 的网络栈上，重启 proxy 会掐断 bot 的连接。
+# 注意：bot 挂在 proxy 的网络栈上，重启 proxy 会排断 bot 的连接。
 #       改完 mihomo 配置后要两个一起重启：
 #         docker compose restart proxy && docker compose restart bot
