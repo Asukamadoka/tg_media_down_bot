@@ -1,6 +1,9 @@
 # Copy to config.yaml and edit. Anything set in the environment (or .env)
 # overrides the value here, so secrets are usually better kept in .env.
 
+# Which message catalogue the bot replies in: en or zh. Overridden by TGMD_LANG.
+language: en
+
 telegram:
   api_id: 0                 # https://my.telegram.org/apps
   api_hash: ""
