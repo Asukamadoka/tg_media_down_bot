@@ -11,6 +11,7 @@ from .buttons import url_button, webview_button
 from .config import MODES, Config
 from .db import Database
 from .downloader import has_downloadable_media
+from .i18n import display_mode, display_state, t
 from .links import LinkBundle, extract_links
 from .pikpak import PikPakError, PikPakService
 from .portal import PikPakLoginPortal, PortalError
@@ -20,45 +21,7 @@ from .verify import run_live_checks
 
 log = logging.getLogger(__name__)
 
-HELP = """<b>Telegram media downloader</b>
-
-Send me a Telegram message link and I will fetch the media behind it — even
-from channels that block saving, as long as the reading account is a member.
-
-<b>Links I understand</b>
-• <code>https://t.me/channel/123</code> — public channel or group
-• <code>https://t.me/c/1234567890/123</code> — private chat
-• <code>https://t.me/channel/12/123</code> — a forum topic
-• <code>https://t.me/channel/100-120</code> — a range of messages
-• <code>?single</code> to take one album item, <code>?comment=45</code> for a comment
-• a magnet link or direct URL — handed straight to PikPak
-• a PikPak share link — saved into your drive
-• media sent or forwarded to me directly
-
-<b>Commands</b>
-/mode — where files should go: telegram, local or pikpak
-/status — what I am working on
-/cancel [id] — stop one job, or everything
-/stats — your recent jobs
-/pikpak — PikPak account, quota and target folder
-/pikpak login — connect your own PikPak account
-/id — your Telegram user id
-/help — this message"""
-
-ADMIN_HELP = (
-    "\n/setup — finish setup here: sign in a reading account or PikPak"
-    "\n/cache — use a channel as the upload cache"
-    "\n/verify — check the bot's identity and configuration"
-)
-
-UNCLAIMED_HELP = """<b>This bot has no admin yet</b>
-
-Whoever deployed me left a claim code in my startup log. Send it here:
-
-<code>/claim &lt;code&gt;</code>
-
-That makes you the admin, with no redeploy. Until then I refuse every
-request, including yours."""
+# Every user-facing string now lives in :mod:`tgmd.i18n`.
 
 
 class BotHandlers:
@@ -132,13 +95,13 @@ class BotHandlers:
         # An unclaimed bot refuses everyone, including the person who just
         # deployed it, so say how to fix that rather than just saying no.
         if await bootstrap.claim_available(self._db, self._config):
-            await event.reply(UNCLAIMED_HELP, parse_mode="html", link_preview=False)
+            await event.reply(
+                t("help.unclaimed"), parse_mode="html", link_preview=False
+            )
             return False
 
         await event.reply(
-            "You are not allowed to use this bot.\n\n"
-            f"Your user id is <code>{user_id}</code>. An admin can add it to "
-            "<code>ALLOWED_USER_IDS</code>.",
+            t("access.denied", user_id=user_id),
             parse_mode="html",
         )
         return False
@@ -161,22 +124,18 @@ class BotHandlers:
     async def on_help(self, event) -> None:
         if not await self._authorized(event):
             return
-        text = HELP
+        text = t("help.body")
         if self._config.access.is_admin(event.sender_id):
-            text += ADMIN_HELP
+            text += t("help.admin")
         if not self._has_user_client:
-            text += (
-                "\n\n⚠️ No reading account is connected yet, so private and "
-                "save-restricted chats will not work."
-            )
+            text += t("help.no_reading_account")
             if self._config.access.is_admin(event.sender_id):
-                text += " Send <code>/setup</code> to finish that here."
+                text += t("help.no_reading_account_admin")
         await event.reply(text, parse_mode="html", link_preview=False)
 
     async def on_id(self, event) -> None:
         await event.reply(
-            f"Your user id: <code>{event.sender_id}</code>\n"
-            f"This chat id: <code>{event.chat_id}</code>",
+            t("id.reply", user_id=event.sender_id, chat_id=event.chat_id),
             parse_mode="html",
         )
 
@@ -188,10 +147,7 @@ class BotHandlers:
 
         if len(parts) < 2:
             await event.reply(
-                f"Current mode: <b>{current}</b>\n\n"
-                "<code>/mode telegram</code> — send the file back to you\n"
-                "<code>/mode local</code> — keep it on the server's disk\n"
-                "<code>/mode pikpak</code> — transfer it into PikPak",
+                t("mode.current", current=display_mode(current)),
                 parse_mode="html",
             )
             return
@@ -199,42 +155,44 @@ class BotHandlers:
         choice = parts[1].lower()
         if choice not in MODES:
             await event.reply(
-                f"Unknown mode {escape_html(choice)}. Pick one of: "
-                + ", ".join(MODES)
+                t(
+                    "mode.unknown",
+                    choice=escape_html(choice),
+                    modes=", ".join(MODES),
+                )
             )
             return
         if choice == "pikpak" and not await self._pikpak.available_for(event.sender_id):
             if self._portal.unavailable_reason() is None:
                 await event.reply(
-                    "No PikPak account is connected yet. Send "
-                    "<code>/pikpak login</code> first and I will send you a "
-                    "login link.",
+                    t("mode.pikpak_none"),
                     parse_mode="html",
                 )
             else:
                 await event.reply(
-                    "PikPak is not available on this server. Ask the operator "
-                    "to set PIKPAK_USERNAME and PIKPAK_PASSWORD, or to enable "
-                    "login links."
+                    t("mode.pikpak_unavailable")
                 )
             return
 
         await self._db.set_user_mode(event.sender_id, choice)
-        await event.reply(f"Mode set to <b>{choice}</b>.", parse_mode="html")
+        await event.reply(
+            t("mode.set", choice=display_mode(choice)), parse_mode="html"
+        )
 
     async def on_status(self, event) -> None:
         if not await self._authorized(event):
             return
         jobs = self._queue.snapshot(event.sender_id)
         if not jobs:
-            await event.reply("Nothing in your queue.")
+            await event.reply(t("status.empty"))
             return
         lines = [
-            f"<code>#{job.id}</code> {job.state.value} — {escape_html(truncate(job.label, 60))}"
+            f"<code>#{job.id}</code> {display_state(job.state.value)} — "
+            f"{escape_html(truncate(job.label, 60))}"
             for job in jobs
         ]
         await event.reply(
-            f"<b>{len(jobs)} item(s) in your queue</b>\n" + "\n".join(lines),
+            t("status.header", count=len(jobs)) + "\n" + "\n".join(lines),
             parse_mode="html",
         )
 
@@ -249,11 +207,11 @@ class BotHandlers:
         cancelled = self._queue.cancel(event.sender_id, job_id)
         if not cancelled:
             await event.reply(
-                "No matching job found." if job_id else "Nothing to cancel."
+                t("cancel.no_match") if job_id else t("cancel.nothing")
             )
             return
         ids = ", ".join(f"#{job.id}" for job in cancelled)
-        await event.reply(f"Cancelling {ids}.")
+        await event.reply(t("cancel.cancelling", ids=ids))
 
     async def on_stats(self, event) -> None:
         if not await self._authorized(event):
@@ -262,22 +220,28 @@ class BotHandlers:
         recent = await self._db.recent_jobs(event.sender_id, limit=8)
 
         if not stats and not recent:
-            await event.reply("You have not downloaded anything yet.")
+            await event.reply(t("stats.empty"))
             return
 
         totals = " · ".join(
-            f"{status}: {values['count']}" for status, values in sorted(stats.items())
+            f"{display_state(str(status))}: {values['count']}"
+            for status, values in sorted(stats.items())
         )
         transferred = sum(values["bytes"] for values in stats.values())
         lines = [
-            f"<b>Totals</b>\n{totals or 'none'}\nTransferred: {human_size(transferred)}"
+            t(
+                "stats.totals",
+                totals=totals or t("stats.none"),
+                transferred=human_size(transferred),
+            )
         ]
         if recent:
-            lines.append("\n<b>Recent</b>")
+            lines.append(t("stats.recent_header"))
             for job in recent:
                 label = job.get("file_name") or job.get("link") or ""
                 lines.append(
-                    f"<code>#{job['id']}</code> {job['status']} — "
+                    f"<code>#{job['id']}</code> "
+                    f"{display_state(str(job['status']))} — "
                     f"{escape_html(truncate(str(label), 48))}"
                 )
         await event.reply("\n".join(lines), parse_mode="html", link_preview=False)
@@ -302,26 +266,20 @@ class BotHandlers:
     async def _pikpak_login(self, event) -> None:
         """Offer every way of connecting PikPak that this deployment supports."""
         if not self._pikpak.user_login_allowed:
-            await event.reply("The operator has disabled per-user PikPak logins.")
+            await event.reply(t("pikpak.login.disabled"))
             return
 
         already = await self._pikpak.has_user_session(event.sender_id)
-        replacing = (
-            "\n\nThis replaces the account you have connected now." if already else ""
-        )
+        replacing = t("pikpak.login.replacing") if already else ""
 
         # Best case: a Mini App, which opens inside Telegram and needs no link
         # at all, because Telegram signs the visitor's identity for us.
         miniapp = self._portal.miniapp_url
         if miniapp is not None:
             await event.reply(
-                "<b>Connect your PikPak account</b>\n\n"
-                "Tap below to open the form inside Telegram. There is no link "
-                "to leak: Telegram tells me who you are.\n\n"
-                "Your password goes to PikPak once, in exchange for an access "
-                f"token. Only the token is stored.{replacing}",
+                t("pikpak.login.miniapp", replacing=replacing),
                 parse_mode="html",
-                buttons=webview_button("🔐 Connect PikPak", miniapp),
+                buttons=webview_button(t("pikpak.login.button_miniapp"), miniapp),
                 link_preview=False,
             )
             return
@@ -331,16 +289,16 @@ class BotHandlers:
             try:
                 link = self._portal.create_link(event.sender_id)
             except PortalError as exc:
-                await event.reply(f"❌ {escape_html(str(exc))}", parse_mode="html")
+                await event.reply(
+                    t("error.generic", error=escape_html(str(exc))),
+                    parse_mode="html",
+                )
                 return
             ttl = human_duration(self._config.pikpak.login_link_ttl)
             await event.reply(
-                "<b>Connect your PikPak account</b>\n\n"
-                f"The link works once and expires in {ttl}. It opens a page "
-                "served by this bot, not by PikPak. Your password is used once "
-                f"to get an access token, and only the token is stored.{replacing}",
+                t("pikpak.login.link", ttl=ttl, replacing=replacing),
                 parse_mode="html",
-                buttons=url_button("🔐 Open the login page", link),
+                buttons=url_button(t("pikpak.login.button_link"), link),
                 link_preview=False,
             )
             return
@@ -348,10 +306,11 @@ class BotHandlers:
         # No usable web server: the in-chat conversation still works, and
         # needs no public address or TLS at all.
         await event.reply(
-            "<b>Connect your PikPak account</b>\n\n"
-            "Send <code>/setup pikpak</code> and I will ask for your email and "
-            "password here, deleting each message as I read it.\n\n"
-            f"<i>A web form is not available: {escape_html(reason)}</i>{replacing}",
+            t(
+                "pikpak.login.chat_fallback",
+                reason=escape_html(reason),
+                replacing=replacing,
+            ),
             parse_mode="html",
         )
 
@@ -360,35 +319,36 @@ class BotHandlers:
         scope = parts[2].strip().lower() if len(parts) >= 3 else ""
         if scope == "shared":
             if not self._config.access.is_admin(event.sender_id):
-                await event.reply("Only an admin can clear the shared session.")
+                await event.reply(t("pikpak.logout.only_admin_shared"))
                 return
             await self._pikpak.logout()
-            await event.reply("Shared PikPak session cleared.")
+            await event.reply(t("pikpak.logout.shared_cleared"))
             return
 
         if not await self._pikpak.has_user_session(event.sender_id):
-            await event.reply("You have no PikPak account connected.")
+            await event.reply(t("pikpak.logout.none"))
             return
         await self._pikpak.logout(event.sender_id)
         self._portal.revoke(event.sender_id)
         await event.reply(
-            "Your PikPak account is disconnected and the stored token is gone."
+            t("pikpak.logout.done")
         )
 
     async def _pikpak_dir(self, event, parts: list[str]) -> None:
         if len(parts) < 3:
             current = await self._pikpak_folder_for(event.sender_id)
             await event.reply(
-                "Your PikPak folder: "
-                f"<code>{escape_html(current or self._config.pikpak.folder)}</code>\n"
-                "Change it with <code>/pikpak dir /Movies/Anime</code>.",
+                t(
+                    "pikpak.dir.current",
+                    folder=escape_html(current or self._config.pikpak.folder),
+                ),
                 parse_mode="html",
             )
             return
         folder = "/" + parts[2].strip().strip("/")
         await self._db.set_user_pikpak_dir(event.sender_id, folder)
         await event.reply(
-            f"PikPak folder set to <code>{escape_html(folder)}</code>.",
+            t("pikpak.dir.set", folder=escape_html(folder)),
             parse_mode="html",
         )
 
@@ -400,14 +360,12 @@ class BotHandlers:
             reason = self._portal.unavailable_reason()
             if reason is None:
                 await event.reply(
-                    "No PikPak account is connected. Send "
-                    "<code>/pikpak login</code> and I will send you a login link.",
+                    t("pikpak.status.none"),
                     parse_mode="html",
                 )
             else:
                 await event.reply(
-                    "PikPak is not available on this server.\n"
-                    f"Login links: {escape_html(reason)}",
+                    t("pikpak.status.unavailable", reason=escape_html(reason)),
                     parse_mode="html",
                 )
             return
@@ -415,33 +373,39 @@ class BotHandlers:
         try:
             quota = await self._pikpak.quota(user_id=user_id)
         except PikPakError as exc:
-            await event.reply(f"❌ {escape_html(str(exc))}", parse_mode="html")
+            await event.reply(
+                t("error.generic", error=escape_html(str(exc))), parse_mode="html"
+            )
             return
 
         folder = await self._pikpak_folder_for(user_id)
-        transfers = (
-            "magnet links, URLs, share links and Telegram media"
+        transfers = t(
+            "pikpak.status.transfers_full"
             if self._config.http.usable
-            else "magnet links, URLs and share links"
+            else "pikpak.status.transfers_limited"
         )
         account = (
-            "your own account"
+            t("pikpak.status.account_own")
             if own
-            else f"the shared account ({escape_html(self._config.pikpak.username)})"
+            else t(
+                "pikpak.status.account_shared",
+                username=escape_html(self._config.pikpak.username),
+            )
         )
-        footer = (
-            "\n\n<code>/pikpak logout</code> disconnects your account."
-            if own
-            else "\n\n<code>/pikpak login</code> connects your own account instead."
+        footer = t(
+            "pikpak.status.footer_own" if own else "pikpak.status.footer_shared"
         )
         await event.reply(
-            "<b>PikPak</b>\n"
-            f"Account: {account}\n"
-            f"Storage: {human_size(quota.used)} of {human_size(quota.limit)} used "
-            f"({quota.fraction * 100:.0f}%)\n"
-            f"Folder: <code>{escape_html(folder or self._config.pikpak.folder)}</code>\n"
-            f"Supported transfers: {transfers}"
-            f"{footer}",
+            t(
+                "pikpak.status.body",
+                account=account,
+                used=human_size(quota.used),
+                limit=human_size(quota.limit),
+                percent=f"{quota.fraction * 100:.0f}",
+                folder=escape_html(folder or self._config.pikpak.folder),
+                transfers=transfers,
+                footer=footer,
+            ),
             parse_mode="html",
         )
 
@@ -452,12 +416,14 @@ class BotHandlers:
         admins, so requiring one would make the bot unclaimable.
         """
         if not await bootstrap.claim_available(self._db, self._config):
-            await event.reply("This bot already has an admin.")
+            await event.reply(t("claim.already"))
             return
 
         parts = (event.raw_text or "").split()
         if len(parts) < 2:
-            await event.reply(UNCLAIMED_HELP, parse_mode="html", link_preview=False)
+            await event.reply(
+                t("help.unclaimed"), parse_mode="html", link_preview=False
+            )
             return
 
         try:
@@ -466,22 +432,19 @@ class BotHandlers:
             )
         except bootstrap.ClaimError as exc:
             log.info("failed claim attempt by %s: %s", event.sender_id, exc)
-            await event.reply(f"❌ {escape_html(str(exc))}", parse_mode="html")
+            await event.reply(
+                t("error.generic", error=escape_html(str(exc))), parse_mode="html"
+            )
             return
 
-        await event.reply(
-            "✅ <b>You are now the admin.</b>\n\n"
-            "Nothing else needs deploying. Send <code>/setup</code> to sign in "
-            "a reading account and connect PikPak, both from here.",
-            parse_mode="html",
-        )
+        await event.reply(t("claim.success"), parse_mode="html")
 
     async def on_cache(self, event) -> None:
         """Choose the upload cache channel without hunting for its id."""
         if not await self._authorized(event):
             return
         if not self._config.access.is_admin(event.sender_id):
-            await event.reply("Only an admin can change the upload cache.")
+            await event.reply(t("cache.only_admin"))
             return
 
         parts = (event.raw_text or "").split()
@@ -489,9 +452,7 @@ class BotHandlers:
 
         if argument in ("off", "none", "clear"):
             await bootstrap.clear_cache_chat(self._db, self._config)
-            await event.reply(
-                "Upload cache disabled. Every request downloads again."
-            )
+            await event.reply(t("cache.disabled"))
             return
 
         # Sent inside the channel itself: no id to look up at all.
@@ -502,29 +463,18 @@ class BotHandlers:
         if argument:
             ids = parse_id_list(argument)
             if not ids:
-                await event.reply(
-                    "That does not look like a chat id. Ids look like "
-                    "<code>-1001234567890</code>.",
-                    parse_mode="html",
-                )
+                await event.reply(t("cache.bad_id"), parse_mode="html")
                 return
             await self._use_cache_chat(event, ids[0])
             return
 
         current = self._config.delivery.cache_chat_id
         state = (
-            f"Currently using <code>{current}</code>."
+            t("cache.state_current", chat_id=current)
             if current
-            else "No upload cache is set, so every request downloads again."
+            else t("cache.state_none")
         )
-        await event.reply(
-            f"<b>Upload cache</b>\n\n{state}\n\n"
-            "To set one: create a private channel, add me as an "
-            "<b>administrator</b>, then post <code>/cache</code> "
-            "<b>in that channel</b>. I will pick up its id myself.\n\n"
-            "<code>/cache off</code> disables it.",
-            parse_mode="html",
-        )
+        await event.reply(t("cache.help", state=state), parse_mode="html")
 
     async def _use_cache_chat(self, event, chat_id: int) -> None:
         """Verify the bot can really use a chat as a cache, then store it."""
@@ -532,24 +482,20 @@ class BotHandlers:
             permissions = await self._bot.get_permissions(chat_id, "me")
         except Exception as exc:
             await event.reply(
-                "I cannot see that chat. Add me to it as an administrator "
-                f"first.\n\n<i>{escape_html(str(exc))}</i>",
+                t("cache.cannot_see", error=escape_html(str(exc))),
                 parse_mode="html",
             )
             return
 
         if not getattr(permissions, "is_admin", False):
             await event.reply(
-                "I am in that chat but not an administrator, so I could not "
-                "store uploads there. Promote me and try again."
+                t("cache.not_admin")
             )
             return
 
         await bootstrap.set_cache_chat(self._db, self._config, chat_id)
         await event.reply(
-            f"✅ Upload cache set to <code>{chat_id}</code>.\n\n"
-            "A link requested twice is now re-sent from Telegram instead of "
-            "being downloaded again. This survives restarts, no redeploy.",
+            t("cache.set", chat_id=chat_id),
             parse_mode="html",
         )
 
@@ -558,7 +504,7 @@ class BotHandlers:
         if not await self._authorized(event):
             return
         if self._wizard is None:  # pragma: no cover - always attached in practice
-            await event.reply("Setup is not available in this build.")
+            await event.reply(t("setup.unavailable"))
             return
 
         parts = (event.raw_text or "").split()
@@ -566,14 +512,16 @@ class BotHandlers:
 
         if action == "cancel":
             stopped = await self._wizard.cancel(event.sender_id)
-            await event.reply("Setup cancelled." if stopped else "Nothing to cancel.")
+            await event.reply(
+                t("setup.cancelled") if stopped else t("setup.nothing_to_cancel")
+            )
             return
 
         if action in ("pikpak", "telegram", "tg"):
             # Signing an account in to the bot is an operator action: it
             # decides what the whole bot can read, or where files land.
             if not self._config.access.is_admin(event.sender_id):
-                await event.reply("Only an admin can run setup.")
+                await event.reply(t("setup.only_admin"))
                 return
             if action == "pikpak":
                 await self._wizard.begin_pikpak(event)
@@ -586,9 +534,7 @@ class BotHandlers:
             await event.reply(text, parse_mode="html", link_preview=False)
             return
         await event.reply(
-            text
-            + "\n\n<code>/setup telegram</code> · <code>/setup pikpak</code> · "
-            "<code>/setup cancel</code>",
+            text + t("setup.footer"),
             parse_mode="html",
             link_preview=False,
         )
@@ -598,10 +544,10 @@ class BotHandlers:
         if not await self._authorized(event):
             return
         if not self._config.access.is_admin(event.sender_id):
-            await event.reply("Only an admin can run /verify.")
+            await event.reply(t("verify.only_admin"))
             return
 
-        notice = await event.reply("Checking…")
+        notice = await event.reply(t("verify.checking"))
         try:
             report = await run_live_checks(
                 self._config,
@@ -613,8 +559,9 @@ class BotHandlers:
             )
         except Exception as exc:
             log.exception("/verify failed")
-            await notice.edit(f"❌ Verification failed: {escape_html(str(exc))}",
-                              parse_mode="html")
+            await notice.edit(
+                t("verify.failed", error=escape_html(str(exc))), parse_mode="html"
+            )
             return
 
         await notice.edit(report.render_html(), parse_mode="html", link_preview=False)
@@ -623,16 +570,23 @@ class BotHandlers:
 
     async def on_message(self, event) -> None:
         """Handle anything that is not a command: links, or attached media."""
+        text = event.raw_text or ""
+        if text.startswith("/"):
+            # Telethon runs every matching handler, so this one also sees the
+            # command that a command handler is already dealing with. A
+            # command aborts an open setup conversation, so nobody is ever
+            # trapped in the wizard — but /setup must not cancel the
+            # conversation it has just opened, which is what made every
+            # /setup telegram die before the first answer arrived.
+            if self._wizard is not None and not text.startswith("/setup"):
+                await self._wizard.cancel(event.sender_id)
+            return  # handled by a command handler, or simply unknown
+
         # A setup conversation owns the next message the admin sends, so it
-        # gets first refusal. It declines commands, which then fall through to
-        # their own handlers.
+        # gets first refusal.
         if self._wizard is not None and self._wizard.active(event.sender_id):
             if await self._wizard.handle(event):
                 return
-
-        text = event.raw_text or ""
-        if text.startswith("/"):
-            return  # handled by a command handler, or simply unknown
 
         bundle = extract_links(text)
         has_media = has_downloadable_media(event.message)
@@ -654,8 +608,7 @@ class BotHandlers:
                 await self._report_errors(event, bundle)
                 return
             await event.reply(
-                "Send me a Telegram message link, a magnet link, or media to "
-                "download. /help lists everything I understand."
+                t("dispatch.prompt")
             )
             return
 
@@ -664,7 +617,7 @@ class BotHandlers:
     async def _report_errors(self, event, bundle: LinkBundle) -> None:
         lines = "\n".join(f"• {escape_html(item)}" for item in bundle.errors[:5])
         await event.reply(
-            f"I could not use those links:\n{lines}", parse_mode="html"
+            t("dispatch.errors_header") + "\n" + lines, parse_mode="html"
         )
 
     async def _submit_inbound(self, event) -> None:
@@ -674,7 +627,7 @@ class BotHandlers:
         if mode == "telegram":
             # Sending the file back to the person who just sent it is pointless.
             mode = "local"
-            note = " (mode <b>telegram</b> makes no sense here, saving locally)"
+            note = t("inbound.note_local")
 
         job_id = await self._db.record_job(event.sender_id, "<attached media>", mode)
         job = Job(
@@ -692,9 +645,11 @@ class BotHandlers:
             await self._queue.submit(job)
         except QueueFull as exc:
             await self._db.finish_job(job_id, "failed", error=str(exc))
-            await event.reply(f"❌ {exc}")
+            await event.reply(t("error.generic", error=escape_html(str(exc))))
             return
-        await event.reply(f"Queued <code>#{job_id}</code>{note}.", parse_mode="html")
+        await event.reply(
+            t("inbound.queued", job_id=job_id, note=note), parse_mode="html"
+        )
 
     async def _submit_bundle(self, event, bundle: LinkBundle) -> None:
         """Queue every actionable item found in one incoming message."""
@@ -715,7 +670,7 @@ class BotHandlers:
         for ref in bundle.messages:
             if not self._has_user_client and ref.is_private:
                 rejected.append(
-                    f"{ref.describe()} needs a user session; none is configured"
+                    t("bundle.needs_user_session", ref=ref.describe())
                 )
                 continue
             job_id = await self._db.record_job(user_id, ref.raw or ref.describe(), mode)
@@ -770,7 +725,14 @@ class BotHandlers:
         pieces: list[str] = []
         if queued:
             ids = ", ".join(f"#{job_id}" for job_id in queued)
-            pieces.append(f"Queued {len(queued)} job(s): <code>{ids}</code> → <b>{mode}</b>")
+            pieces.append(
+                t(
+                    "bundle.queued",
+                    count=len(queued),
+                    ids=ids,
+                    mode=display_mode(mode),
+                )
+            )
         for problem in bundle.errors[:5] + rejected[:5]:
             pieces.append(f"• {escape_html(problem)}")
 

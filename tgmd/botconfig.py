@@ -19,57 +19,70 @@ from telethon import TelegramClient
 from telethon.tl.functions.bots import SetBotCommandsRequest, SetBotInfoRequest
 from telethon.tl.types import BotCommand, BotCommandScopeDefault
 
+from .i18n import DEFAULT_LANGUAGE, t
+
 log = logging.getLogger(__name__)
 
 # Shown in the "/" menu inside Telegram, in this order. Descriptions have to
 # fit on one line on a phone, so they are terse by necessity.
-COMMANDS: tuple[tuple[str, str], ...] = (
-    ("help", "What I take and what I can do"),
-    ("claim", "Become the admin of a freshly deployed bot"),
-    ("setup", "Finish setup: sign in an account or PikPak"),
-    ("cache", "Use a channel as the upload cache"),
-    ("mode", "Where files go: telegram, local or pikpak"),
-    ("status", "What I am working on"),
-    ("cancel", "Stop one job, or all of them"),
-    ("stats", "Your recent jobs"),
-    ("pikpak", "PikPak account, quota and folder"),
-    ("verify", "Check my identity and configuration"),
-    ("id", "Your Telegram user id"),
+# Command NAMES are never translated: Telegram requires ^[a-z0-9_]{1,32}$, and
+# handlers.register() matches them literally. Only the descriptions move.
+COMMAND_NAMES: tuple[str, ...] = (
+    "help",
+    "claim",
+    "setup",
+    "cache",
+    "mode",
+    "status",
+    "cancel",
+    "stats",
+    "pikpak",
+    "verify",
+    "id",
 )
+
+
+def commands(lang: str | None = None) -> tuple[tuple[str, str], ...]:
+    """The menu, as (name, description) pairs in the requested language."""
+    return tuple((name, t(f"menu.{name}", lang=lang)) for name in COMMAND_NAMES)
+
+
+COMMANDS: tuple[tuple[str, str], ...] = commands(DEFAULT_LANGUAGE)
+"""The English menu, kept as a module constant for callers that expect it."""
 
 # Telegram's own limits. Exceeding either is rejected outright.
 ABOUT_LIMIT = 120
 DESCRIPTION_LIMIT = 512
 
-ABOUT = (
-    "Send me a Telegram message link and I fetch the media behind it, "
-    "or transfer it to PikPak."
-)
+ABOUT = t("profile.about", lang=DEFAULT_LANGUAGE)
 
-DESCRIPTION = (
-    "Send me any Telegram message link and I fetch the media behind it, "
-    "even from channels that block saving. I can send the file back to you, "
-    "keep it on the server, or transfer it into PikPak. Magnet links, direct "
-    "URLs and PikPak share links go straight to PikPak.\n\n"
-    "Send /setup to finish signing in, or /help to see everything I take."
-)
+DESCRIPTION = t("profile.description", lang=DEFAULT_LANGUAGE)
 
-MANUAL_STEPS: tuple[tuple[str, str], ...] = (
-    (
-        "/setprivacy → Disable",
-        "lets me see links posted in groups I am in. Skip it if you will only "
-        "message me directly. There is no API for this setting, so it has to "
-        "be done in @BotFather.",
-    ),
-)
+
+def manual_steps(lang: str | None = None) -> tuple[tuple[str, str], ...]:
+    """Things only a human can do in @BotFather, with why each matters."""
+    return (
+        (
+            t("manual.setprivacy.label", lang=lang),
+            t("manual.setprivacy.why", lang=lang),
+        ),
+    )
+
+
+MANUAL_STEPS: tuple[tuple[str, str], ...] = manual_steps(DEFAULT_LANGUAGE)
 """Things only a human can do in @BotFather, with why each matters."""
 
 
-def command_list() -> list[BotCommand]:
-    """The menu as Telegram's own objects."""
+def command_list(lang: str | None = None) -> list[BotCommand]:
+    """The menu as Telegram's own objects, in the requested language.
+
+    ``lang`` defaults to whatever :mod:`tgmd.i18n` is set to, so the menu
+    follows the rest of the bot rather than the viewer's client language: an
+    operator who runs the bot in Chinese wants a Chinese menu for everyone.
+    """
     return [
         BotCommand(command=command, description=description)
-        for command, description in COMMANDS
+        for command, description in commands(lang)
     ]
 
 
@@ -82,6 +95,8 @@ async def apply(client: TelegramClient) -> list[str]:
     """
     applied: list[str] = []
 
+    # The empty lang_code is the menu every client falls back to, which is
+    # what we want: the bot speaks one language, chosen by its operator.
     try:
         await client(
             SetBotCommandsRequest(
@@ -90,14 +105,14 @@ async def apply(client: TelegramClient) -> list[str]:
                 commands=command_list(),
             )
         )
-        applied.append(f"command menu ({len(COMMANDS)} commands)")
+        applied.append(f"command menu ({len(COMMAND_NAMES)} commands)")
     except Exception as exc:
         log.warning("could not set the command menu: %s", exc)
 
     # Both texts are capped by Telegram; truncating loses less than being
     # rejected outright would.
-    about = ABOUT[:ABOUT_LIMIT]
-    description = DESCRIPTION[:DESCRIPTION_LIMIT]
+    about = t("profile.about")[:ABOUT_LIMIT]
+    description = t("profile.description")[:DESCRIPTION_LIMIT]
     try:
         await client(
             SetBotInfoRequest(lang_code="", about=about, description=description)

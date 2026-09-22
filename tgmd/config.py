@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from . import i18n
 from .utils import ALLOWED_TEMPLATE_FIELDS, parse_bool, parse_id_list, template_fields
 
 MODES = ("telegram", "local", "pikpak")
@@ -127,6 +128,8 @@ class Config:
     pikpak: PikPakConfig = field(default_factory=PikPakConfig)
     http: HttpConfig = field(default_factory=HttpConfig)
     log_level: str = "INFO"
+    language: str = i18n.DEFAULT_LANGUAGE
+    """Which catalogue :func:`tgmd.i18n.t` reads. Never affects stored values."""
 
     def ensure_directories(self) -> None:
         """Create every directory the bot writes to."""
@@ -436,4 +439,10 @@ def load_config(path: Path | None = None) -> Config:
         pikpak=pikpak,
         http=http,
         log_level=_env_str("LOG_LEVEL", str(_get(data, "log_level", default="INFO"))).upper(),
+        # POSIX LANG is deliberately not consulted: images set it to C.UTF-8
+        # for unrelated reasons, and that is not a UI decision.
+        language=i18n.normalize(
+            i18n.language_from_environment()
+            or str(_get(data, "language", default=i18n.DEFAULT_LANGUAGE))
+        ),
     )

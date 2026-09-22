@@ -22,6 +22,7 @@ from .downloader import (
     describe_media,
     has_downloadable_media,
 )
+from .i18n import t
 from .links import MessageRef
 from .pikpak import PikPakError, PikPakService
 from .reporter import Reporter
@@ -157,7 +158,7 @@ class JobQueue:
         limit = self._config.download.max_queue_per_user
         if len(self.pending_for(job.user_id)) >= limit:
             raise QueueFull(
-                f"you already have {limit} items queued; wait for them or use /cancel"
+                t("job.queue_full", limit=limit)
             )
         self._jobs[job.id] = job
         await self._queue.put(job)
@@ -230,13 +231,14 @@ class JobQueue:
 
     async def _run_url_job(self, job: Job, reporter: Reporter) -> None:
         """Hand a magnet link or direct URL straight to PikPak."""
-        await reporter.open(f"⏳ Sending to PikPak: <code>{escape_html(job.label)}</code>")
+        await reporter.open(
+            t("job.pikpak.sending", label=escape_html(job.label))
+        )
         if not await self._pikpak.available_for(job.user_id):
             job.state = JobState.FAILED
             job.detail = "no PikPak account connected"
             await reporter.close(
-                "❌ No PikPak account is connected, and a magnet link or URL "
-                "has nowhere else to go. Use /pikpak login to connect yours."
+                t("job.pikpak.no_account")
             )
             await self._db.finish_job(job.id, "failed", error=job.detail)
             return
@@ -248,7 +250,9 @@ class JobQueue:
         except (DeliveryError, PikPakError) as exc:
             job.state = JobState.FAILED
             job.detail = str(exc)
-            await reporter.close(f"❌ {escape_html(str(exc))}")
+            await reporter.close(
+                t("error.generic", error=escape_html(str(exc)))
+            )
             await self._db.finish_job(job.id, "failed", error=str(exc))
             return
 
@@ -258,7 +262,7 @@ class JobQueue:
 
     async def _run_share_job(self, job: Job, reporter: Reporter) -> None:
         """Save a PikPak share link into the account."""
-        await reporter.open("⏳ Saving the PikPak share…")
+        await reporter.open(t("job.share.saving"))
         try:
             names = await self._pikpak.restore_share(
                 job.url or "", user_id=job.user_id
@@ -266,15 +270,19 @@ class JobQueue:
         except PikPakError as exc:
             job.state = JobState.FAILED
             job.detail = str(exc)
-            await reporter.close(f"❌ {escape_html(str(exc))}")
+            await reporter.close(
+                t("error.generic", error=escape_html(str(exc)))
+            )
             await self._db.finish_job(job.id, "failed", error=str(exc))
             return
 
         listing = "\n".join(f"• <code>{escape_html(name)}</code>" for name in names[:20])
         if len(names) > 20:
-            listing += f"\n… and {len(names) - 20} more"
+            listing += t("job.share.more", count=len(names) - 20)
         job.state = JobState.DONE
-        await reporter.close(f"✅ Saved {len(names)} item(s) to PikPak:\n{listing}")
+        await reporter.close(
+            t("job.share.saved", count=len(names), listing=listing)
+        )
         await self._db.finish_job(job.id, "done", file_name=", ".join(names[:5]))
 
     # ----------------------------------------------------- directly sent media
@@ -289,14 +297,17 @@ class JobQueue:
         message = job.message
         if message is None or not has_downloadable_media(message):
             job.state = JobState.FAILED
-            await reporter.open("❌ That message has no media to download.")
+            await reporter.open(t("job.message.no_media"))
             await self._db.finish_job(job.id, "failed", error="no media")
             return
 
         info = describe_media(message)
         await reporter.open(
-            f"⬇️ <code>{escape_html(truncate(info.file_name, 48))}</code> "
-            f"({human_size(info.size)})"
+            t(
+                "job.inbound.downloading",
+                name=escape_html(truncate(info.file_name, 48)),
+                size=human_size(info.size),
+            )
         )
 
         try:
@@ -311,13 +322,15 @@ class JobQueue:
             )
         except DownloadCancelled:
             job.state = JobState.CANCELLED
-            await reporter.close("🚫 Cancelled.")
+            await reporter.close(t("job.cancelled"))
             await self._db.finish_job(job.id, "cancelled")
             return
         except (DownloadError, DeliveryError) as exc:
             job.state = JobState.FAILED
             job.detail = str(exc)
-            await reporter.close(f"❌ {escape_html(str(exc))}")
+            await reporter.close(
+                t("error.generic", error=escape_html(str(exc)))
+            )
             await self._db.finish_job(job.id, "failed", error=str(exc))
             return
 
@@ -331,14 +344,16 @@ class JobQueue:
     async def _run_message_job(self, job: Job, reporter: Reporter) -> None:
         ref = job.ref
         assert ref is not None  # guaranteed by JobKind.MESSAGE
-        await reporter.open(f"🔍 Looking up <code>{escape_html(ref.describe())}</code>…")
+        await reporter.open(t("job.lookup", ref=escape_html(ref.describe())))
 
         try:
             entity, messages = await self._resolver.resolve(ref)
         except ResolveError as exc:
             job.state = JobState.FAILED
             job.detail = str(exc)
-            await reporter.close(f"❌ {escape_html(str(exc))}")
+            await reporter.close(
+                t("error.generic", error=escape_html(str(exc)))
+            )
             await self._db.finish_job(job.id, "failed", error=str(exc))
             return
 
@@ -409,8 +424,11 @@ class JobQueue:
         if job.mode == "telegram":
             if await self._delivery.send_from_cache(job.chat_id, key, caption):
                 await reporter.update(
-                    f"♻️ {prefix}<code>{escape_html(info.file_name)}</code> "
-                    "served from cache",
+                    t(
+                        "job.cached",
+                        prefix=prefix,
+                        name=escape_html(info.file_name),
+                    ),
                     force=True,
                 )
                 return
@@ -432,16 +450,26 @@ class JobQueue:
         async def on_download(received: int, total: int) -> None:
             fraction = received / total if total else 0.0
             await reporter.update(
-                f"⬇️ {prefix}<code>{escape_html(label)}</code>\n"
-                f"{progress_bar(fraction)} {fraction * 100:.0f}% "
-                f"({human_size(received)} / {human_size(total)})\n"
-                f"{human_rate(tracker.rate(received))} · "
-                f"ETA {human_duration(tracker.eta(received, total))}"
+                t(
+                    "job.downloading_progress",
+                    prefix=prefix,
+                    label=escape_html(label),
+                    bar=progress_bar(fraction),
+                    percent=f"{fraction * 100:.0f}",
+                    received=human_size(received),
+                    total=human_size(total),
+                    rate=human_rate(tracker.rate(received)),
+                    eta=human_duration(tracker.eta(received, total)),
+                )
             )
 
         await reporter.update(
-            f"⬇️ {prefix}<code>{escape_html(label)}</code> "
-            f"({human_size(info.size)})",
+            t(
+                "job.downloading",
+                prefix=prefix,
+                label=escape_html(label),
+                size=human_size(info.size),
+            ),
             force=True,
         )
         path = await downloader.download(
@@ -457,7 +485,12 @@ class JobQueue:
                 log.debug("could not remove %s: %s", path, exc)
 
         await reporter.update(
-            f"✅ {prefix}<code>{escape_html(label)}</code> — {result.summary}",
+            t(
+                "job.delivered",
+                prefix=prefix,
+                label=escape_html(label),
+                summary=result.summary,
+            ),
             force=True,
         )
 
@@ -468,10 +501,16 @@ class JobQueue:
         async def on_upload(sent: int, total: int) -> None:
             fraction = sent / total if total else 0.0
             await reporter.update(
-                f"⬆️ {prefix}<code>{escape_html(truncate(info.file_name, 48))}</code>\n"
-                f"{progress_bar(fraction)} {fraction * 100:.0f}% "
-                f"({human_size(sent)} / {human_size(total)})\n"
-                f"{human_rate(upload_tracker.rate(sent))}"
+                t(
+                    "job.uploading",
+                    prefix=prefix,
+                    name=escape_html(truncate(info.file_name, 48)),
+                    bar=progress_bar(fraction),
+                    percent=f"{fraction * 100:.0f}",
+                    sent=human_size(sent),
+                    total=human_size(total),
+                    rate=human_rate(upload_tracker.rate(sent)),
+                )
             )
 
         if job.mode == "local":
@@ -479,8 +518,11 @@ class JobQueue:
 
         if job.mode == "pikpak":
             await reporter.update(
-                f"☁️ {prefix}handing <code>{escape_html(info.file_name)}</code> "
-                "to PikPak…",
+                t(
+                    "job.handing_to_pikpak",
+                    prefix=prefix,
+                    name=escape_html(info.file_name),
+                ),
                 force=True,
             )
             return await self._delivery.to_pikpak(
@@ -518,23 +560,20 @@ class JobQueue:
         """Set the job's final state and post a summary when it is worth one."""
         if job.cancel.is_set():
             job.state = JobState.CANCELLED
-            await reporter.close(f"🚫 Cancelled after {succeeded} file(s).")
+            await reporter.close(t("job.cancelled_after", count=succeeded))
             await self._db.finish_job(job.id, "cancelled")
             return
 
         notes: list[str] = []
         if skipped:
-            notes.append(f"{skipped} message(s) had no media")
+            notes.append(t("job.note_skipped", count=skipped))
         if truncated:
-            notes.append(
-                f"only the first {cap} message(s) were processed "
-                "(download.max_batch)"
-            )
+            notes.append(t("job.note_truncated", cap=cap))
         if failures:
             shown = "\n".join(f"• {escape_html(item)}" for item in failures[:5])
             if len(failures) > 5:
-                shown += f"\n… and {len(failures) - 5} more"
-            notes.append(f"{len(failures)} failed:\n{shown}")
+                shown += t("job.note_more", count=len(failures) - 5)
+            notes.append(t("job.note_failed", count=len(failures), shown=shown))
 
         if succeeded and not failures:
             job.state = JobState.DONE
@@ -547,12 +586,17 @@ class JobQueue:
             status = "failed"
 
         if total > 1 or notes:
-            summary = f"{'✅' if succeeded else '❌'} {succeeded}/{total} delivered"
+            summary = t(
+                "job.summary",
+                icon="✅" if succeeded else "❌",
+                succeeded=succeeded,
+                total=total,
+            )
             if notes:
                 summary += "\n" + "\n".join(notes)
             await reporter.close(summary)
         elif not succeeded:
-            await reporter.close("❌ Nothing was delivered.")
+            await reporter.close(t("job.nothing_delivered"))
 
         await self._db.finish_job(
             job.id, status, error="; ".join(failures[:3]) or None
