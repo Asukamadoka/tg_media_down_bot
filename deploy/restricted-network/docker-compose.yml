@@ -52,6 +52,6 @@ services:
     volumes:
       - ./data:/data
 
-# 注意：bot 挂在 proxy 的网络栈上，重启 proxy 会掉断 bot 的连接。
+# 注意：bot 挂在 proxy 的网络栈上，重启 proxy 会掐断 bot 的连接。
 #       改完 mihomo 配置后要两个一起重启：
 #         docker compose restart proxy && docker compose restart bot
