@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-from . import bootstrap, botconfig
+from . import bootstrap, botconfig, i18n
 from .clients import start_clients
 from .config import Config, ConfigError, load_config
 from .db import Database
@@ -239,6 +239,8 @@ async def run_app(config_path: Path | None = None) -> None:
     load_dotenv()
     config = load_config(config_path)
     setup_logging(config.log_level)
+    # Before anything can produce a user-facing string.
+    i18n.set_language(config.language)
 
     for warning in config.validate():
         log.warning(warning)
