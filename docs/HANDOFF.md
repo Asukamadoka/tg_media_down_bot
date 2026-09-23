@@ -59,6 +59,16 @@ docker pull ghcr.io/asukamadoka/tg_media_down_bot:sha-<上一个>
 
 即使门禁失效，这次运行也只会用当前的好代码重建一次，不会发布坏东西。所以这个验收可以随时重复。
 
+### 线上验收结果（Claude Code 已跑过，均在提交 `2424ad2` 上）
+
+| 运行 | 触发 | lint | test 3.11 | test 3.12 | build-and-push |
+|---|---|---|---|---|---|
+| [35879176176](https://github.com/Asukamadoka/tg_media_down_bot/actions/runs/35879176176) | push | 通过 | 通过 | 通过 | **运行并推送**（`checks` 全部完成后才开始） |
+| [35879362757](https://github.com/Asukamadoka/tg_media_down_bot/actions/runs/35879362757) | 手动，`simulate_test_failure: true` | 通过 | **失败** | **失败** | **skipped** |
+| [35879183825](https://github.com/Asukamadoka/tg_media_down_bot/actions/runs/35879183825) | PR #1 的 CI | 通过 | 通过 | 通过 | （CI 不构建镜像） |
+
+第二行就是简报要求的「故意弄挂一个测试，确认镜像不会被构建」。
+
 ### 待决问题
 
 1. **`ruff format` 没有强制。** 按它的默认风格会重排 32 个文件。简报只要求 `ruff check`，而一次纯排版的大 diff 会淹没阶段 1 的审计改动。建议：阶段 1 审计完成、模块合并之后，再决定是否在 CI 里加 `ruff format --check`。
