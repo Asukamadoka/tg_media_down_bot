@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
@@ -16,8 +17,8 @@ from .db import Database, cache_key
 from .delivery import Delivery, DeliveryError, TooLargeToUpload
 from .downloader import (
     DownloadCancelled,
-    DownloadError,
     Downloader,
+    DownloadError,
     RateTracker,
     describe_media,
     has_downloadable_media,
@@ -142,10 +143,8 @@ class JobQueue:
         for worker in self._workers:
             worker.cancel()
         for worker in self._workers:
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await worker
-            except asyncio.CancelledError:
-                pass
         self._workers.clear()
 
     # ------------------------------------------------------------ submission
@@ -420,18 +419,20 @@ class JobQueue:
         key = cache_key(peer_id, message.id)
         caption = _build_caption(message, chat_title)
 
-        # The cheapest path: a file we have already uploaded once.
-        if job.mode == "telegram":
-            if await self._delivery.send_from_cache(job.chat_id, key, caption):
-                await reporter.update(
-                    t(
-                        "job.cached",
-                        prefix=prefix,
-                        name=escape_html(info.file_name),
-                    ),
-                    force=True,
-                )
-                return
+        # The cheapest path: a file we have already uploaded once. The cache is
+        # only consulted in telegram mode; `and` short-circuits before the await.
+        if job.mode == "telegram" and await self._delivery.send_from_cache(
+            job.chat_id, key, caption
+        ):
+            await reporter.update(
+                t(
+                    "job.cached",
+                    prefix=prefix,
+                    name=escape_html(info.file_name),
+                ),
+                force=True,
+            )
+            return
 
         relative = build_relative_path(
             self._config.download.filename_template,

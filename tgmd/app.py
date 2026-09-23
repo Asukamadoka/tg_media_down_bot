@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import signal
 import sys
@@ -248,10 +249,9 @@ async def run_app(config_path: Path | None = None) -> None:
     app = Application(config)
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
+        # Windows has no add_signal_handler; Ctrl-C still stops the loop there.
+        with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, app.request_stop)
-        except NotImplementedError:  # pragma: no cover - Windows
-            pass
 
     await app.start()
     try:

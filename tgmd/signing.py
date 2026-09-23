@@ -38,7 +38,7 @@ def make_token(secret: str, file_id: str, expires_at: int) -> str:
     """Build a token proving ``file_id`` may be served until ``expires_at``."""
     if "|" in file_id:
         raise ValueError("file_id must not contain '|'")
-    payload = f"{file_id}|{int(expires_at)}".encode("utf-8")
+    payload = f"{file_id}|{int(expires_at)}".encode()
     return f"{_b64encode(payload)}.{_digest(secret, payload)}"
 
 

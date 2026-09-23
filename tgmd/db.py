@@ -12,8 +12,9 @@ import json
 import secrets
 import sqlite3
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (

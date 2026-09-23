@@ -51,9 +51,8 @@ def sample(tmp_path):
 
 
 async def fetch(url: str) -> tuple[int, bytes]:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            return response.status, await response.read()
+    async with aiohttp.ClientSession() as session, session.get(url) as response:
+        return response.status, await response.read()
 
 
 class TestServing:
@@ -76,16 +75,17 @@ class TestServing:
 
     async def test_content_disposition_names_the_file(self, server, sample):
         url = server.publish(sample, name="named.mp4")
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                assert "named.mp4" in response.headers["Content-Disposition"]
+        async with aiohttp.ClientSession() as session, session.get(url) as response:
+            assert "named.mp4" in response.headers["Content-Disposition"]
 
     async def test_range_requests_work(self, server, sample):
         url = server.publish(sample)
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers={"Range": "bytes=0-9"}) as response:
-                assert response.status == 206
-                assert await response.read() == CONTENT[:10]
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(url, headers={"Range": "bytes=0-9"}) as response,
+        ):
+            assert response.status == 206
+            assert await response.read() == CONTENT[:10]
 
     async def test_health_endpoint(self, server, sample):
         server.publish(sample)

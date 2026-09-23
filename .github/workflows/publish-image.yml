@@ -2,6 +2,13 @@ name: Publish container image
 
 # 构建镜像并推到 GHCR，NAS / 任何 Docker 宿主直接 pull，不需要源码也不需要本地构建。
 # 用内置的 GITHUB_TOKEN，不需要额外配任何 secret。
+#
+# 门禁：镜像只在 lint 和测试全部通过之后才构建（build-and-push 依赖 checks）。
+# checks 调用的就是 ci.yml 本身，所以门禁与 PR 检查是同一套定义，不会各自漂移。
+#
+# 为什么用 needs: 而不是 workflow_run：workflow_run 永远按“默认分支上的”
+# 工作流定义运行。PR 合并后默认分支一旦变成 base，它就会悄悄跑一份过期的定义。
+# needs: 没有这个问题，而且整条链在同一次运行里，要么全过、要么不构建。
 
 on:
   push:
@@ -10,12 +17,28 @@ on:
     paths-ignore:
       - '**.md'
   workflow_dispatch:
+    inputs:
+      simulate_test_failure:
+        description: 故意让测试失败，用来验证门禁确实会拦住镜像构建（不会推送任何东西）
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
+  # 只有这个分支允许把镜像推到 GHCR。其他分支手动触发时只构建、不推送，
+  # 否则从任意分支 dispatch 都会覆盖 NAS 正在拉取的 :latest。
+  PUBLISH_REF: refs/heads/claude/telegram-media-downloader-bot-samm1v
 
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+    with:
+      simulate_failure: ${{ inputs.simulate_test_failure == true }}
+    permissions:
+      contents: read
+
   build-and-push:
+    needs: checks
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -33,6 +56,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        if: github.ref == env.PUBLISH_REF
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -54,7 +78,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ github.ref == env.PUBLISH_REF }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -62,9 +86,14 @@ jobs:
 
       - name: 告知镜像地址
         run: |
-          echo "### 镜像已发布" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "默认为私有包。NAS 匿名拉取需在 Packages 页面改成 public，" >> "$GITHUB_STEP_SUMMARY"
-          echo "否则需在 NAS 上用 PAT 登录 ghcr.io。" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.ref }}" = "${{ env.PUBLISH_REF }}" ]; then
+            echo "### 镜像已发布" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "默认为私有包。NAS 匿名拉取需在 Packages 页面改成 public，" >> "$GITHUB_STEP_SUMMARY"
+            echo "否则需在 NAS 上用 PAT 登录 ghcr.io。" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### 仅构建，未推送" >> "$GITHUB_STEP_SUMMARY"
+            echo "当前分支 \`${{ github.ref }}\` 不是发布分支，镜像只做了构建验证。" >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -12,6 +12,7 @@ URLs and share links, which need no local download at all.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 import time
@@ -88,10 +89,8 @@ class FileServer:
     async def stop(self) -> None:
         if self._sweeper is not None:
             self._sweeper.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._sweeper
-            except asyncio.CancelledError:
-                pass
             self._sweeper = None
         if self._runner is not None:
             await self._runner.cleanup()

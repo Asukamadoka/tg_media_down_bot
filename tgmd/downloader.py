@@ -7,9 +7,9 @@ import logging
 import mimetypes
 import shutil
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
@@ -207,7 +207,7 @@ class Downloader:
                 await asyncio.sleep(exc.seconds + 1)
                 last_error = exc
                 continue
-            except (ConnectionError, asyncio.TimeoutError, OSError) as exc:
+            except (TimeoutError, ConnectionError, OSError) as exc:
                 self._cleanup(destination)
                 last_error = exc
                 log.info("download attempt %d failed: %s", attempt, exc)

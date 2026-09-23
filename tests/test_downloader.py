@@ -26,6 +26,11 @@ from tgmd.downloader import (
     has_downloadable_media,
 )
 
+# "Some media is attached." The old default was object(), evaluated once when
+# the function was defined, so every call already shared one instance; this
+# only names it.
+_ANY_MEDIA = object()
+
 
 def make_message(
     *,
@@ -33,7 +38,7 @@ def make_message(
     file=None,
     document=None,
     photo=None,
-    media=object(),
+    media=_ANY_MEDIA,
 ):
     """A stand-in for a Telethon message, carrying only what we read."""
     return SimpleNamespace(

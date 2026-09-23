@@ -31,7 +31,7 @@ class TestWebviewButton:
 
     def test_serialises(self):
         # If the layer moves again, this is where it shows up.
-        assert webview_button("Connect", URL)._bytes()
+        assert webview_button("Connect", URL)._bytes()  # noqa: SLF001 - serialising is the point of the test
 
 
 class TestUrlButton:
@@ -41,7 +41,7 @@ class TestUrlButton:
         assert button.type.url == URL
 
     def test_serialises(self):
-        assert url_button("Open", URL)._bytes()
+        assert url_button("Open", URL)._bytes()  # noqa: SLF001 - serialising is the point of the test
 
 
 class TestRows:
@@ -55,4 +55,4 @@ class TestRows:
         assert rows().rows == []
 
     def test_serialises(self):
-        assert rows(("A", URL, True), ("B", URL, False))._bytes()
+        assert rows(("A", URL, True), ("B", URL, False))._bytes()  # noqa: SLF001 - serialising is the point of the test

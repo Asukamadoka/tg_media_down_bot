@@ -583,10 +583,13 @@ class BotHandlers:
             return  # handled by a command handler, or simply unknown
 
         # A setup conversation owns the next message the admin sends, so it
-        # gets first refusal.
-        if self._wizard is not None and self._wizard.active(event.sender_id):
-            if await self._wizard.handle(event):
-                return
+        # gets first refusal. handle() is only awaited when one is active.
+        if (
+            self._wizard is not None
+            and self._wizard.active(event.sender_id)
+            and await self._wizard.handle(event)
+        ):
+            return
 
         bundle = extract_links(text)
         has_media = has_downloadable_media(event.message)

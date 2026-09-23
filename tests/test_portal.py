@@ -81,21 +81,18 @@ async def portal(service):
 
 
 async def get(url: str) -> tuple[int, str, dict]:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            return response.status, await response.text(), dict(response.headers)
+    async with aiohttp.ClientSession() as session, session.get(url) as response:
+        return response.status, await response.text(), dict(response.headers)
 
 
 async def post(url: str, data: dict) -> tuple[int, str]:
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, data=data) as response:
-            return response.status, await response.text()
+    async with aiohttp.ClientSession() as session, session.post(url, data=data) as response:
+        return response.status, await response.text()
 
 
 async def post_json(url: str, body: dict) -> tuple[int, dict]:
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=body) as response:
-            return response.status, await response.json()
+    async with aiohttp.ClientSession() as session, session.post(url, json=body) as response:
+        return response.status, await response.json()
 
 
 def signed_init_data(user_id: int) -> str:
@@ -394,9 +391,11 @@ class TestMiniApp:
 
     async def test_malformed_body(self, portal):
         url = f"{portal._http.base_url}/pikpak/app"  # noqa: SLF001
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data="not json") as response:
-                assert response.status == 400
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(url, data="not json") as response,
+        ):
+            assert response.status == 400
 
     async def test_repeated_attempts_are_throttled(self, portal, service):
         url = f"{portal._http.base_url}/pikpak/app"  # noqa: SLF001

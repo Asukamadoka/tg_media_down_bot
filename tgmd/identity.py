@@ -117,19 +117,19 @@ class Check:
     detail: str = ""
 
     @classmethod
-    def ok(cls, name: str, detail: str = "") -> "Check":
+    def ok(cls, name: str, detail: str = "") -> Check:
         return cls(name, Status.OK, detail)
 
     @classmethod
-    def warn(cls, name: str, detail: str = "") -> "Check":
+    def warn(cls, name: str, detail: str = "") -> Check:
         return cls(name, Status.WARN, detail)
 
     @classmethod
-    def fail(cls, name: str, detail: str = "") -> "Check":
+    def fail(cls, name: str, detail: str = "") -> Check:
         return cls(name, Status.FAIL, detail)
 
     @classmethod
-    def skip(cls, name: str, detail: str = "") -> "Check":
+    def skip(cls, name: str, detail: str = "") -> Check:
         return cls(name, Status.SKIP, detail)
 
 
