@@ -422,6 +422,13 @@ CATALOG: dict[str, dict[str, str]] = {
         'job.inbound.downloading': '⬇️ <code>{name}</code> ({size})',
         'job.lookup': '🔍 Looking up <code>{ref}</code>…',
         'job.cached': '♻️ {prefix}<code>{name}</code> served from cache',
+        'job.forwarded': (
+            '⚡ {prefix}<code>{name}</code> — copied by Telegram, nothing downloaded'
+        ),
+        'job.hint_cache': (
+            '\n💡 An admin can send /cache in a private channel to make files like '
+            'this instant.'
+        ),
         'job.downloading_progress': (
                                         '⬇️ {prefix}<code>{label}</code>\n'
                                         '{bar} {percent}% ({received} / {total})\n'
@@ -743,6 +750,8 @@ CATALOG: dict[str, dict[str, str]] = {
         'job.inbound.downloading': '⬇️ <code>{name}</code>（{size}）',
         'job.lookup': '🔍 正在查找 <code>{ref}</code>…',
         'job.cached': '♻️ {prefix}<code>{name}</code> 命中缓存，直接转发',
+        'job.forwarded': '⚡ {prefix}<code>{name}</code> — 由 Telegram 直接复制，未下载',
+        'job.hint_cache': '\n💡 管理员在一个私有频道里发送 /cache，这类文件就能秒转。',
         'job.downloading_progress': (
                                         '⬇️ {prefix}<code>{label}</code>\n'
                                         '{bar} {percent}%（{received} / {total}）\n'

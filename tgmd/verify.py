@@ -36,6 +36,7 @@ from . import bootstrap
 from .clients import user_session_source
 from .config import Config, ConfigError, load_config
 from .db import Database
+from .forwarder import resolve_peer
 from .identity import (
     BotToken,
     BotTokenError,
@@ -366,6 +367,55 @@ async def check_cache_chat(report: Report, config: Config, bot: TelegramClient) 
     report.add(Check.ok("cache chat", f"the bot administrates chat {cache_chat_id}"))
 
 
+async def check_forward_path(report: Report, config: Config, user) -> None:
+    """Can forwardable files skip the download? See tgmd.forwarder."""
+    name = "forward fast path"
+    if user is None:
+        report.add(
+            Check.ok(name, "the bot reads for itself and re-sends forwardable files directly")
+        )
+        return
+    cache_chat_id = config.delivery.cache_chat_id
+    if cache_chat_id is None:
+        report.add(
+            Check.warn(
+                name,
+                "no cache channel, so forwardable files are downloaded and "
+                "re-uploaded. Send /cache in a private channel to make them instant.",
+            )
+        )
+        return
+    try:
+        peer = await asyncio.wait_for(resolve_peer(user, cache_chat_id), _NETWORK_TIMEOUT)
+        channel = await user.get_entity(peer)
+        permissions = await user.get_permissions(peer, "me")
+    except Exception as exc:
+        report.add(
+            Check.warn(
+                name,
+                f"the reading account cannot see cache channel {cache_chat_id} ({exc}). "
+                "Add it to the channel, with permission to post.",
+            )
+        )
+        return
+    # Only admins with the right may post in a broadcast channel; in a group
+    # anyone not banned may.
+    if getattr(channel, "broadcast", False):
+        can_post = permissions.is_creator or permissions.post_messages
+    else:
+        can_post = not (permissions.is_banned or permissions.has_left)
+    if can_post:
+        report.add(Check.ok(name, f"the reading account can forward into {cache_chat_id}"))
+    else:
+        report.add(
+            Check.warn(
+                name,
+                f"the reading account is in {cache_chat_id} but cannot post there; "
+                "make it an admin with permission to post",
+            )
+        )
+
+
 # ---------------------------------------------------------------------- PikPak
 
 
@@ -525,6 +575,9 @@ async def run_checks(config: Config) -> Report:
         check_distinct_accounts(report, bot_me, user_me)
         if user is not None and user_me is not None:
             await check_read_access(report, user)
+            await check_forward_path(report, config, user)
+        elif bot is not None:
+            await check_forward_path(report, config, None)
         if bot is not None:
             await check_cache_chat(report, config, bot)
         else:
@@ -596,6 +649,7 @@ async def run_live_checks(
     check_distinct_accounts(report, bot_me, user_me)
     if user is not None and user_me is not None:
         await check_read_access(report, user)
+    await check_forward_path(report, config, user)
     await check_cache_chat(report, config, bot)
 
     # PikPak, from the point of view of the person who asked.

@@ -22,6 +22,7 @@ from .downloader import (
     describe_media,
     has_downloadable_media,
 )
+from .forwarder import Forwarder, Outcome
 from .i18n import t
 from .links import MessageRef
 from .pikpak import PikPakError, PikPakService
@@ -82,6 +83,8 @@ class Job:
     state: JobState = JobState.QUEUED
     detail: str = ""
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
+    cache_hint: bool = False
+    """Something could have been forwarded, had a cache channel been set."""
 
     @property
     def active(self) -> bool:
@@ -105,6 +108,7 @@ class JobQueue:
         bot_downloader: Downloader,
         delivery: Delivery,
         pikpak: PikPakService,
+        forwarder: Forwarder | None = None,
     ) -> None:
         self._config = config
         self._db = db
@@ -114,6 +118,7 @@ class JobQueue:
         self._bot_downloader = bot_downloader
         self._delivery = delivery
         self._pikpak = pikpak
+        self._forwarder = forwarder
         self._queue: asyncio.Queue[Job] = asyncio.Queue()
         self._jobs: dict[int, Job] = {}
         self._workers: list[asyncio.Task] = []
@@ -323,6 +328,7 @@ class JobQueue:
                 peer_id=job.chat_id,
                 prefix="",
                 downloader=self._bot_downloader,
+                source=None,
             )
         except DownloadCancelled:
             job.state = JobState.CANCELLED
@@ -393,6 +399,7 @@ class JobQueue:
                     peer_id=peer_id,
                     prefix=prefix,
                     downloader=self._downloader,
+                    source=entity,
                 )
                 succeeded += 1
             except DownloadCancelled:
@@ -418,8 +425,13 @@ class JobQueue:
         peer_id: int,
         prefix: str,
         downloader: Downloader,
+        source,
     ) -> None:
-        """Download and deliver a single message's media."""
+        """Deliver a single message's media, downloading only if nothing cheaper works.
+
+        ``source`` is the chat the message was read from, or None for media
+        sent straight to the bot, which is never forwarded back.
+        """
         info = describe_media(message)
         key = cache_key(peer_id, message.id)
         caption = _build_caption(message, chat_title)
@@ -438,6 +450,29 @@ class JobQueue:
                 force=True,
             )
             return
+
+        # Next cheapest: let Telegram copy it server-side. Only a restricted
+        # source, or no way to forward, falls through to the download.
+        hint = ""
+        if job.mode == "telegram" and self._forwarder is not None and source is not None:
+            attempt = await self._forwarder.deliver(
+                chat_id=job.chat_id,
+                message=message,
+                source=source,
+                caption=caption,
+                key=key,
+                info=info,
+            )
+            if attempt.delivered:
+                log.info("job %d message %s forwarded, nothing downloaded", job.id, message.id)
+                await reporter.update(
+                    t("job.forwarded", prefix=prefix, name=escape_html(info.file_name)),
+                    force=True,
+                )
+                return
+            if attempt.outcome is Outcome.NO_CACHE and not job.cache_hint:
+                job.cache_hint = True
+                hint = t("job.hint_cache")
 
         relative = build_relative_path(
             self._config.download.filename_template,
@@ -498,7 +533,8 @@ class JobQueue:
                 prefix=prefix,
                 label=escape_html(label),
                 summary=result.summary,
-            ),
+            )
+            + hint,
             force=True,
         )
 
@@ -590,6 +626,10 @@ class JobQueue:
             notes.append(t("job.note_skipped", count=skipped))
         if truncated:
             notes.append(t("job.note_truncated", cap=cap))
+        # A single file already carried the hint on its own line; a batch's
+        # summary replaces those lines, so it repeats it once here.
+        if job.cache_hint and total > 1:
+            notes.append(t("job.hint_cache").strip())
         if failures:
             shown = "\n".join(f"• {escape_html(item)}" for item in failures[:5])
             if len(failures) > 5:

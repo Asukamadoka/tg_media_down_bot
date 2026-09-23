@@ -19,6 +19,7 @@ from tgmd import bootstrap
 from tgmd.config import (
     AccessConfig,
     Config,
+    DeliveryConfig,
     DownloadConfig,
     HttpConfig,
     PikPakConfig,
@@ -31,6 +32,7 @@ from tgmd.verify import (
     check_access_control,
     check_bot_identity,
     check_directories,
+    check_forward_path,
     check_pikpak,
     check_token,
     run_checks,
@@ -99,7 +101,15 @@ class FakeClient:
         return [object()]
 
     async def get_permissions(self, chat, user):
-        return SimpleNamespace(is_admin=True)
+        return SimpleNamespace(
+            is_admin=True, is_creator=True, post_messages=True, is_banned=False, has_left=False
+        )
+
+    async def get_input_entity(self, chat_id):
+        return chat_id
+
+    async def get_entity(self, peer):
+        return SimpleNamespace(id=peer, broadcast=True)
 
     async def disconnect(self):
         self.disconnected = True
@@ -272,3 +282,65 @@ class TestLiveChecks:
         check = by_name(report, "pikpak login")
         assert check.status is Status.WARN
         assert "/setup pikpak" in check.detail
+
+
+class ForwardChecks:
+    """A reading account with a chosen standing in the cache channel."""
+
+    def __init__(self, *, sees: bool = True, creator=False, poster=False, broadcast=True):
+        self.sees = sees
+        self.permissions = SimpleNamespace(
+            is_creator=creator, post_messages=poster, is_banned=False, has_left=False
+        )
+        self.broadcast = broadcast
+
+    async def get_input_entity(self, chat_id):
+        if not self.sees:
+            raise ValueError("Could not find the input entity")
+        return chat_id
+
+    async def iter_dialogs(self):
+        for _ in ():
+            yield
+
+    async def get_entity(self, peer):
+        return SimpleNamespace(id=peer, broadcast=self.broadcast)
+
+    async def get_permissions(self, peer, user):
+        return self.permissions
+
+
+class TestForwardPath:
+    async def check(self, tmp_path, user, *, cache=-100555):
+        config = make_config(tmp_path)
+        config.delivery = DeliveryConfig(cache_chat_id=cache)
+        report = Report()
+        await check_forward_path(report, config, user)
+        return by_name(report, "forward fast path")
+
+    async def test_no_cache_channel_says_how_to_get_one(self, tmp_path):
+        check = await self.check(tmp_path, ForwardChecks(), cache=None)
+        assert check.status is Status.WARN
+        assert "/cache" in check.detail
+
+    async def test_the_owner_of_the_channel_can_forward(self, tmp_path):
+        check = await self.check(tmp_path, ForwardChecks(creator=True))
+        assert check.status is Status.OK
+
+    async def test_a_plain_subscriber_of_a_channel_cannot(self, tmp_path):
+        check = await self.check(tmp_path, ForwardChecks())
+        assert check.status is Status.WARN
+        assert "cannot post" in check.detail
+
+    async def test_any_member_of_a_group_can(self, tmp_path):
+        check = await self.check(tmp_path, ForwardChecks(broadcast=False))
+        assert check.status is Status.OK
+
+    async def test_not_a_member_is_explained(self, tmp_path):
+        check = await self.check(tmp_path, ForwardChecks(sees=False))
+        assert check.status is Status.WARN
+        assert "cannot see" in check.detail
+
+    async def test_the_bot_reading_for_itself_needs_nothing(self, tmp_path):
+        check = await self.check(tmp_path, None, cache=None)
+        assert check.status is Status.OK

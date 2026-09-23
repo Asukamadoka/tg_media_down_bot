@@ -19,6 +19,7 @@ from .config import Config, ConfigError, load_config
 from .db import Database
 from .delivery import Delivery
 from .downloader import Downloader
+from .forwarder import Forwarder
 from .handlers import BotHandlers
 from .identity import describe_account
 from .pikpak import PikPakService
@@ -108,6 +109,8 @@ class Application:
             bot_downloader=Downloader(self.bot),
             delivery=delivery,
             pikpak=self.pikpak,
+            # Follows self.user, which /setup telegram can replace at runtime.
+            forwarder=Forwarder(self.bot, config, self.db, reader=lambda: self.user),
         )
         await self.queue.start()
 
