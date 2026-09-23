@@ -313,6 +313,17 @@ Telegram's own servers instead of being downloaded and uploaded again.
 `CACHE_CHAT_ID` does the same thing from the environment and outranks the
 runtime choice, for anyone who prefers declaring it.
 
+The same channel is what makes the **forward fast path** work. When the
+source allows forwarding, the reading account forwards the message into the
+cache channel, the bot re-sends it from there with its own file reference,
+and nothing is downloaded at all: a large video arrives in seconds. For that
+the reading account has to be able to post in the channel (as its owner, or
+an admin with permission to post); `/verify` has a line saying whether it
+can. Sources that restrict saving content, and deployments without a cache
+channel, fall back to downloading and re-uploading, as tdl does. Without a
+reading account, the bot reads public chats itself and re-sends their media
+directly, no channel needed.
+
 ## Limitations
 
 - The reading account must be a member of any private chat you link to. The

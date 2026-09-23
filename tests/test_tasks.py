@@ -24,6 +24,7 @@ from tgmd.config import Config, DeliveryConfig, DownloadConfig
 from tgmd.db import Database, cache_key
 from tgmd.delivery import Delivery
 from tgmd.downloader import DownloadCancelled, DownloadError
+from tgmd.forwarder import Forwarder
 from tgmd.links import MessageRef
 from tgmd.pikpak import OfflineTask, PikPakError
 from tgmd.resolver import ResolveError
@@ -82,8 +83,10 @@ class FakeBot:
 
 
 class FakeResolver:
-    def __init__(self, messages=(), *, error: Exception | None = None) -> None:
-        self.entity = SimpleNamespace(id=CHAT_ID, title="Some Channel")
+    def __init__(
+        self, messages=(), *, error: Exception | None = None, noforwards: bool = False
+    ) -> None:
+        self.entity = SimpleNamespace(id=CHAT_ID, title="Some Channel", noforwards=noforwards)
         self.messages = list(messages)
         self.error = error
 
@@ -178,17 +181,22 @@ def text_message(message_id: int) -> SimpleNamespace:
 
 # ----------------------------------------------------------------- harness
 
+_NO_FORWARDER = object()
+
 
 class Harness:
     """A running queue plus handles on everything the tests look at."""
 
     def __init__(self, tmp_path: Path, db: Database, **options) -> None:
         self.db = db
-        self.bot = FakeBot()
+        self.bot = options.pop("bot", None) or FakeBot()
         self.resolver = options.pop("resolver", FakeResolver([media_message(1)]))
         self.downloader = options.pop("downloader", FakeDownloader())
         self.bot_downloader = options.pop("bot_downloader", FakeDownloader())
         self.pikpak = options.pop("pikpak", FakePikPak())
+        # Absent: no forwarder at all. Present: the reading account it uses,
+        # None meaning the bot reads for itself.
+        forward_with = options.pop("forward_with", _NO_FORWARDER)
         self.files = FakeFileServer()
         self.config = Config(
             download=DownloadConfig(
@@ -216,6 +224,11 @@ class Harness:
             bot_downloader=self.bot_downloader,
             delivery=self.delivery,
             pikpak=self.pikpak,
+            forwarder=(
+                None
+                if forward_with is _NO_FORWARDER
+                else Forwarder(self.bot, self.config, db, reader=lambda: forward_with)
+            ),
         )
 
     @property
@@ -549,3 +562,110 @@ class TestInbound:
         job = await harness.job("local", JobKind.INBOUND, message=text_message(9))
         row = await harness.run(job)
         assert row["status"] == "failed"
+
+
+class FakeReader:
+    """The reading account, as far as forwarding goes."""
+
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self.error = error
+        self.forwarded: list[int] = []
+
+    async def get_input_entity(self, chat_id):
+        return chat_id
+
+    async def forward_messages(self, entity, messages, from_peer=None):
+        if self.error is not None:
+            raise self.error
+        self.forwarded.append(messages)
+        return SimpleNamespace(id=7000 + messages)
+
+
+class ForwardingBot(FakeBot):
+    """Sees the copies the reading account forwards into the cache channel."""
+
+    async def get_messages(self, chat_id, ids):
+        if chat_id == CACHE_CHAT and ids and ids >= 7000:
+            return SimpleNamespace(id=ids, media=f"forwarded-{ids}")
+        return await super().get_messages(chat_id, ids)
+
+
+class TestForwardFastPath:
+    """AUDIT/CC_BRIEF 2a: forwardable media is never downloaded."""
+
+    async def make_forwarding(self, make, **options):
+        return await make(bot=ForwardingBot(), **options)
+
+    async def test_forwardable_media_is_copied_not_downloaded(self, make):
+        reader = FakeReader()
+        harness = await self.make_forwarding(
+            make, forward_with=reader, cache_chat_id=CACHE_CHAT
+        )
+        row = await harness.run(await harness.job("telegram"))
+        assert row["status"] == "done"
+        assert reader.forwarded == [1]
+        assert harness.downloader.downloaded == []
+        assert harness.bot.uploads_to(USER) == ["forwarded-7001"]
+        assert "nothing downloaded" in harness.bot.last_status
+
+    async def test_restricted_media_is_downloaded_instead(self, make):
+        reader = FakeReader()
+        harness = await self.make_forwarding(
+            make,
+            forward_with=reader,
+            cache_chat_id=CACHE_CHAT,
+            resolver=FakeResolver([media_message(1)], noforwards=True),
+        )
+        row = await harness.run(await harness.job("telegram"))
+        assert row["status"] == "done"
+        assert reader.forwarded == []
+        assert harness.downloader.downloaded == [1]
+
+    async def test_without_a_cache_channel_it_downloads_and_suggests_one(self, make):
+        harness = await self.make_forwarding(make, forward_with=FakeReader())
+        row = await harness.run(await harness.job("telegram"))
+        assert row["status"] == "done"
+        assert harness.downloader.downloaded == [1]
+        assert "/cache" in harness.bot.last_status
+
+    async def test_a_batch_suggests_it_once(self, make):
+        harness = await self.make_forwarding(
+            make,
+            forward_with=FakeReader(),
+            resolver=FakeResolver([media_message(1), media_message(2)]),
+        )
+        await harness.run(await harness.job("telegram"))
+        assert harness.bot.last_status.count("/cache") == 1
+
+    async def test_a_refused_forward_is_downloaded_instead(self, make):
+        from telethon.errors import ChatWriteForbiddenError
+
+        harness = await self.make_forwarding(
+            make,
+            forward_with=FakeReader(error=ChatWriteForbiddenError(request=None)),
+            cache_chat_id=CACHE_CHAT,
+        )
+        row = await harness.run(await harness.job("telegram"))
+        assert row["status"] == "done"
+        assert harness.downloader.downloaded == [1]
+        assert "/cache" not in harness.bot.last_status
+
+    async def test_other_modes_never_forward(self, make):
+        # Local and PikPak need the bytes, so there is nothing to skip.
+        reader = FakeReader()
+        harness = await self.make_forwarding(
+            make, forward_with=reader, cache_chat_id=CACHE_CHAT
+        )
+        await harness.run(await harness.job("local"))
+        assert reader.forwarded == []
+        assert harness.downloader.downloaded == [1]
+
+    async def test_a_second_request_comes_from_the_cache(self, make):
+        reader = FakeReader()
+        harness = await self.make_forwarding(
+            make, forward_with=reader, cache_chat_id=CACHE_CHAT
+        )
+        await harness.run(await harness.job("telegram"))
+        await harness.run(await harness.job("telegram"))
+        assert reader.forwarded == [1]  # the second one never reached the reader
+        assert "served from cache" in harness.bot.last_status
