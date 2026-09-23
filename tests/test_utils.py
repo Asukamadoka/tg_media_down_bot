@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -145,7 +145,7 @@ class TestBuildRelativePath:
             chat_id=1,
             message_id=7,
             name="a.mkv",
-            when=datetime(2026, 9, 12, tzinfo=timezone.utc),
+            when=datetime(2026, 9, 12, tzinfo=UTC),
         )
         assert path == Path("2026-09-12/chan/a.mkv")
 

@@ -1,3 +1,7 @@
 -r requirements.txt
 pytest>=8.0
 pytest-asyncio>=0.23
+# Pinned exactly: CI installs this line verbatim, so the linter the gate
+# enforces and the one a developer runs locally are the same release. The
+# rule set is listed explicitly in pyproject.toml for the same reason.
+ruff==0.16.7

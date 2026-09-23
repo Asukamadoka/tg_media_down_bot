@@ -1,0 +1,75 @@
+name: CI
+
+# Lint and tests.
+#
+# Runs on every pull request and on pushes to any branch *except* the
+# production branch. On the production branch the very same jobs run inside
+# publish-image.yml instead, called from there as the gate in front of the
+# image build, so each commit is tested exactly once and the image is built
+# only from code that passed.
+
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - claude/telegram-media-downloader-bot-samm1v
+  workflow_call:
+    inputs:
+      simulate_failure:
+        description: Fail the test job on purpose, to prove the image build is gated.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # One pin, in requirements-dev.txt, shared with local development.
+      - name: Install ruff
+        run: pip install "$(grep -E '^ruff==' requirements-dev.txt)"
+
+      - name: ruff check
+        run: ruff check --output-format=github .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is what the image runs; 3.11 is the development floor. They are
+        # not interchangeable: how a (str, Enum) member formats differs
+        # between them, and only testing one would hide that.
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # Only reachable through publish-image.yml's manual dispatch. Proves the
+      # gate without pushing broken code anywhere; see docs/HANDOFF.md.
+      - name: Simulated failure
+        if: ${{ inputs.simulate_failure }}
+        run: |
+          echo "::error::simulate_failure is set: failing on purpose to prove the image build is gated"
+          exit 1
+
+      - name: pytest
+        run: python -m pytest -q

@@ -26,8 +26,8 @@ magnet links, plain HTTP(S) URLs and PikPak share links.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable
 from urllib.parse import parse_qs, unquote, urlparse
 
 # Hard ceiling on how many message ids a single range link may expand to. The

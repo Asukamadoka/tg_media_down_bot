@@ -94,7 +94,7 @@ class TestCommandList:
     def test_objects_serialise(self):
         # Proves these are well-formed TL objects that would go on the wire.
         for command in botconfig.command_list():
-            assert command._bytes()
+            assert command._bytes()  # noqa: SLF001 - serialising is the point of the test
 
     def test_order_is_preserved(self):
         built = [command.command for command in botconfig.command_list()]

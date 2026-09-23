@@ -25,9 +25,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Awaitable, Callable
 
 from telethon import TelegramClient
 from telethon.errors import (
@@ -121,6 +121,9 @@ class SetupWizard:
         self._adopt_session = adopt_session
         self._has_user_client = has_user_client
         self._conversations: dict[int, Conversation] = {}
+        # The event loop holds only weak references to tasks, so a
+        # fire-and-forget close could be garbage-collected before it runs.
+        self._background: set[asyncio.Task] = set()
 
     # ----------------------------------------------------------------- status
 
@@ -186,9 +189,20 @@ class SetupWizard:
         if conversation is None:
             return False
         if conversation.stale:
-            asyncio.create_task(self._expire(user_id))
+            # Detach now, synchronously. Closing its client needs an await and
+            # so runs later; if that later step popped by user id instead, it
+            # would close a fresh conversation the user started in between.
+            del self._conversations[user_id]
+            log.info("setup conversation for %s expired", user_id)
+            self._close_in_background(conversation)
             return False
         return True
+
+    def _close_in_background(self, conversation: Conversation) -> None:
+        """Close a detached conversation's client without blocking the caller."""
+        task = asyncio.create_task(conversation.close())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     async def _expire(self, user_id: int) -> None:
         conversation = self._conversations.pop(user_id, None)

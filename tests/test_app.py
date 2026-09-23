@@ -18,7 +18,6 @@ import socket
 from types import SimpleNamespace
 
 import pytest
-
 from telethon.sessions import StringSession
 
 from tgmd import bootstrap

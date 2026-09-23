@@ -386,8 +386,12 @@ def load_config(path: Path | None = None) -> Config:
     pikpak = PikPakConfig(
         username=_env_str("PIKPAK_USERNAME", str(_get(data, "pikpak", "username", default=""))),
         password=_env_str("PIKPAK_PASSWORD", str(_get(data, "pikpak", "password", default=""))),
-        folder=_env_str("PIKPAK_FOLDER", str(_get(data, "pikpak", "folder", default="/TelegramMedia"))),
-        task_timeout=_env_int("PIKPAK_TASK_TIMEOUT", int(_get(data, "pikpak", "task_timeout", default=600))),
+        folder=_env_str(
+            "PIKPAK_FOLDER", str(_get(data, "pikpak", "folder", default="/TelegramMedia"))
+        ),
+        task_timeout=_env_int(
+            "PIKPAK_TASK_TIMEOUT", int(_get(data, "pikpak", "task_timeout", default=600))
+        ),
         allow_user_login=parse_bool(
             os.environ.get("PIKPAK_ALLOW_USER_LOGIN"),
             parse_bool(_get(data, "pikpak", "allow_user_login", default=True), True),

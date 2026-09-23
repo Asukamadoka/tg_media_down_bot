@@ -160,7 +160,7 @@ async def connect_bot(
             client.start(bot_token=config.telegram.bot_token),
             timeout=_NETWORK_TIMEOUT,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         report.add(
             Check.fail("bot identity", "timed out connecting to Telegram")
         )
@@ -239,7 +239,7 @@ async def connect_user(
     client = TelegramClient(session, telegram.api_id, telegram.api_hash)
     try:
         await asyncio.wait_for(client.connect(), timeout=_NETWORK_TIMEOUT)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         report.add(Check.fail("user session", "timed out connecting to Telegram"))
         return None, None
     except Exception as exc:
@@ -460,10 +460,12 @@ async def check_http(report: Report, config: Config, db: Database) -> None:
     url = f"{config.http.base_url}/healthz"
     try:
         timeout = aiohttp.ClientTimeout(total=_REACHABILITY_TIMEOUT)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as response:
-                status = response.status
-                body = await response.text()
+        async with (
+            aiohttp.ClientSession(timeout=timeout) as session,
+            session.get(url) as response,
+        ):
+            status = response.status
+            body = await response.text()
         if status == 200 and "ok" in body:
             report.add(
                 Check.ok("public reachability", f"{url} answers, so PikPak can fetch files")

@@ -9,6 +9,7 @@ user in it.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 
@@ -90,6 +91,16 @@ class FakePikPak:
 
     async def available_for(self, user_id: int) -> bool:
         return self.configured or user_id in self.sessions
+
+
+class FakeTelegramClient:
+    """Stands in for the half-authenticated client a login leaves open."""
+
+    def __init__(self) -> None:
+        self.disconnected = False
+
+    async def disconnect(self) -> None:
+        self.disconnected = True
 
 
 class FakePortal:
@@ -228,6 +239,38 @@ class TestConversationLifecycle:
         assert await wizard.handle(event) is True
         assert "timed out" in event.last
         assert not wizard.active(42)
+
+    async def test_expiry_through_active_closes_the_stale_client(self, db):
+        wizard = make_wizard(db)
+        await wizard.begin_pikpak(FakeEvent())
+        stale = wizard._conversations[42]  # noqa: SLF001
+        stale.started_at = time.monotonic() - 10_000
+        client = FakeTelegramClient()
+        stale.client = client
+
+        assert wizard.active(42) is False
+        # The close runs in the background; let it.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert client.disconnected
+        assert not wizard._background  # noqa: SLF001 - the task finished and was dropped
+
+    async def test_expiry_does_not_close_a_conversation_started_right_after(self, db):
+        """The race this guards against: an asynchronous expiry that pops by
+        user id would find, and close, the fresh conversation instead."""
+        wizard = make_wizard(db)
+        await wizard.begin_pikpak(FakeEvent())
+        wizard._conversations[42].started_at = time.monotonic() - 10_000  # noqa: SLF001
+
+        assert wizard.active(42) is False
+        # A new conversation, started before the background close has run.
+        await wizard.begin_pikpak(FakeEvent())
+        fresh = wizard._conversations[42]  # noqa: SLF001
+
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert wizard._conversations.get(42) is fresh  # noqa: SLF001
+        assert wizard.active(42)
 
     async def test_conversations_are_per_user(self, db):
         wizard = make_wizard(db)
