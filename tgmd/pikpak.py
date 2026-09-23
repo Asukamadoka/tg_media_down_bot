@@ -9,8 +9,8 @@ upload endpoint:
   bot's own HTTP server so PikPak can fetch it by URL.
 
 Sessions are per user. Each person can connect their own PikPak account
-through a login link, and the shared account from the configuration is used
-only as a fallback for anyone who has not. Stored sessions never contain a
+through the login Mini App or in chat, and the shared account from the
+configuration is used only as a fallback for anyone who has not. Stored sessions never contain a
 password: the access and refresh tokens are kept, and the credentials that
 produced them are discarded immediately after login.
 """
@@ -173,9 +173,9 @@ class PikPakService:
             return None
         client = await self._restore(user_token_key(user_id))
         if client is None:
-            # The stored session is dead; treat the user as not connected so
-            # they are told to log in again rather than silently falling back.
-            self._without_session.add(user_id)
+            # The stored session is dead. The record stays, so every transfer
+            # keeps telling the user to log in again instead of quietly
+            # switching to the shared account from the second one on.
             return None
         self._users[user_id] = client
         self._without_session.discard(user_id)
@@ -219,8 +219,14 @@ class PikPakService:
             if await self.has_user_session(user_id):
                 async with self._lock:
                     own = await self._user_client(user_id)
-                    if own is not None:
-                        return own
+                if own is not None:
+                    return own
+                # Falling back to the shared account here would put this
+                # user's files in somebody else's drive without telling them.
+                raise PikPakError(
+                    "your PikPak session has expired. Use /pikpak login to "
+                    "connect your account again."
+                )
 
         if self._shared is not None:
             return self._shared
@@ -328,17 +334,23 @@ class PikPakService:
 
         client = await self.client(user_id)
         deadline = time.monotonic() + (timeout or self._config.task_timeout)
-        last = DownloadStatus.downloading
+        # pikpakapi's get_task_status() only answers downloading, done or
+        # not_found. It returns `error` when its own request failed, which
+        # means "could not tell this time", not "PikPak gave up". Treating
+        # that as final unpublished the file PikPak was still fetching.
+        known = DownloadStatus.downloading
         while time.monotonic() < deadline:
             try:
-                last = await client.get_task_status(task.task_id, task.file_id)
+                status = await client.get_task_status(task.task_id, task.file_id)
             except PikpakException as exc:
+                status = DownloadStatus.error
                 log.info("task status check failed: %s", exc)
-                last = DownloadStatus.error
-            if last in (DownloadStatus.done, DownloadStatus.error, DownloadStatus.not_found):
-                return last
+            if status in (DownloadStatus.done, DownloadStatus.not_found):
+                return status
+            if status is not DownloadStatus.error:
+                known = status
             await asyncio.sleep(_POLL_INTERVAL)
-        return last
+        return known
 
     # ------------------------------------------------------------ share links
 
@@ -401,9 +413,3 @@ class PikPakService:
             return Quota(used=int(raw.get("usage", 0)), limit=int(raw.get("limit", 0)))
         except (TypeError, ValueError):
             return Quota(used=0, limit=0)
-
-    async def account_label(self, user_id: int | None = None) -> str:
-        """Describe whose account a transfer would use."""
-        if user_id is not None and await self.has_user_session(user_id):
-            return "your own PikPak account"
-        return f"the shared account ({self._config.username or 'unset'})"

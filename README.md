@@ -116,7 +116,7 @@ it connects and checks:
 ✓ history access       the account can list its chats
 ✓ cache chat           the bot administrates chat -1001234567890
 ✓ pikpak account       you@example.com signed in, 4.7 GiB of 10.0 TiB used
-✓ pikpak login links   /pikpak login will issue https://media.example.com/…
+✓ pikpak login         /pikpak login opens https://media.example.com/pikpak/app in Telegram
 ✓ http server          bound 0.0.0.0:8080
 ✓ public reachability  https://media.example.com/healthz answers
 
@@ -211,43 +211,32 @@ why a Telegram file cannot be transferred.
 
 ### Connecting an account
 
-Three ways, and they can coexist. The bot offers whichever its deployment
-supports, best first.
+Two ways, and they coexist. `/pikpak login` offers whichever this deployment
+supports.
 
 **A Mini App, inside Telegram.** With the HTTP server on HTTPS,
 `/pikpak login` shows a button that opens the form inside the Telegram app.
 There is no link at all: Telegram signs who is opening the page, so identity
-comes from Telegram rather than from a secret in a URL. This is the nicest
-path and the one a one-click deploy gets automatically, because the public
+comes from Telegram rather than from a secret in a URL. The form still checks
+that the person is allowed to use the bot, and throttles repeated attempts.
+This is the path a one-click deploy gets automatically, because the public
 address is read from the platform.
 
 **In chat.** `/setup pikpak` asks for the email and password as ordinary
-messages, deletes each one as it reads it, and keeps only the token. It needs
-no web server, no public address and no TLS, so it works on any deployment
-including a worker with no inbound networking.
+messages in a private chat, deletes each one as it reads it, and keeps only
+the token. It needs no web server, no public address and no TLS, so it works
+on any deployment including a worker with no inbound networking.
 
-**A one-time link.** Where the HTTP server is running but Telegram will not
-open it as a Mini App, `/pikpak login` sends a link to a page the bot serves
-at `/pikpak/login/<token>`.
+Either way, only the access token is stored, never the password, and
+`/pikpak logout` disconnects the account and deletes the token. The form says
+on its face that it belongs to your bot and not to PikPak, because a page
+that asks for someone's credentials should never look like it came from the
+service it is asking about. Set `PIKPAK_ALLOW_USER_LOGIN=false` to turn both
+off.
 
-However it is done, only the access token is stored, never the password, and
-`/pikpak logout` disconnects the account and deletes the token.
-
-The page is deliberately plain and says on its face that it belongs to your
-bot and not to PikPak, because a page that asks for someone's credentials
-should never look like it came from the service it is asking about.
-
-Four things keep the one-time link from being a liability:
-
-- it is signed, so the user id inside it cannot be swapped for another;
-- it works once, and issuing a new one invalidates the previous;
-- it expires (`pikpak.login_link_ttl`, 15 minutes by default);
-- three wrong passwords burn it, so a leaked link is not a password oracle.
-
-The bot refuses to issue a link at all unless `PUBLIC_BASE_URL` is HTTPS
-(loopback is allowed for local development), since the point is to keep the
-password off the wire as well as out of the chat transcript. Set
-`PIKPAK_ALLOW_USER_LOGIN=false` to turn the feature off.
+A third path, a one-time login link, was removed: it needed the same HTTPS
+address as the Mini App, so on a real deployment it was never the one offered.
+See `docs/AUDIT.md` (A5).
 
 **Or configure one shared account** for everyone who has not connected their
 own:
@@ -274,12 +263,12 @@ the credentials are discarded as soon as they have been exchanged for one.
 | `/cancel [id]` | cancel one job, or all of yours |
 | `/stats` | your recent jobs and total transferred |
 | `/pikpak` | which account is in use, quota, target folder |
-| `/pikpak login` | get a one-time link to connect your own account |
+| `/pikpak login` | connect your own account (Mini App, or `/setup pikpak` in chat) |
 | `/pikpak logout` | disconnect your account and delete the stored token |
 | `/pikpak dir <path>` | change where your transfers land |
 | `/id` | your user id and the current chat id |
 | `/claim <code>` | become the admin of a freshly deployed bot |
-| `/setup` | admins only: the setup checklist, and finish it here |
+| `/setup` | the setup checklist; `/setup pikpak` for anyone, `/setup telegram` for admins |
 | `/cache` | admins only: use a channel as the upload cache |
 | `/verify` | admins only: identity and configuration report |
 
@@ -306,7 +295,7 @@ The settings worth knowing about:
 | `delivery.cache_chat_id` | none | channel used to avoid re-uploading |
 | `access.allow_all_users` | false | open the bot to everyone |
 | `pikpak.allow_user_login` | true | users may connect their own account |
-| `pikpak.login_link_ttl` | 900 | login link lifetime, seconds |
+| `pikpak.login_link_ttl` | 900 | no longer used; still accepted so old configs start |
 | `language` | `en` | which message catalogue replies come from: `en` or `zh` |
 
 Template fields: `chat`, `chat_id`, `message_id`, `topic_id`, `name`, `stem`,
@@ -351,9 +340,10 @@ The suite covers link parsing, bot-token parsing, filename and path building,
 URL signing, configuration precedence and validation, platform detection for
 one-click deploys, the database layer, media inspection, per-user PikPak
 session selection, the setup conversations, Mini App signature validation, and
-both HTTP surfaces over a real socket: the file server, the one-time login
-page and the Mini App endpoint, including expiry, single use, forged tokens,
-forged user ids and attempt limits.
+both HTTP surfaces over a real socket: the file server and the Mini App
+endpoint, including expiry, forged tokens, forged user ids, the access list
+and attempt limits. The job queue, delivery, the download loop, the progress
+reporter and the verification checks run end to end against fake clients.
 
 Three of those exist to catch dependency drift rather than our own bugs:
 the `pikpakapi` methods this project calls are asserted to still take the
@@ -379,7 +369,7 @@ No credentials are needed.
 | `miniapp.py` | Telegram Mini App initData validation |
 | `buttons.py` | inline keyboards, isolated because they are layer-specific |
 | `pikpak.py` | per-user PikPak sessions, transfers, share restore |
-| `portal.py` | one-time PikPak login links and their page |
+| `portal.py` | the PikPak login Mini App and its endpoint |
 | `webserver.py` | signed URLs so PikPak can fetch local files |
 | `config.py` | YAML + environment configuration |
 | `db.py` | SQLite: preferences, upload cache, job history, tokens |

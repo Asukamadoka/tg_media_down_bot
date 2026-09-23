@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from telethon import TelegramClient
@@ -42,7 +41,7 @@ from .utils import (
 log = logging.getLogger(__name__)
 
 
-class JobKind(str, Enum):
+class JobKind(StrEnum):
     MESSAGE = "message"
     """A Telegram message link: download, then deliver."""
 
@@ -56,7 +55,7 @@ class JobKind(str, Enum):
     """Media sent or forwarded directly to the bot, downloaded by the bot."""
 
 
-class JobState(str, Enum):
+class JobState(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     DONE = "done"
@@ -142,9 +141,9 @@ class JobQueue:
     async def stop(self) -> None:
         for worker in self._workers:
             worker.cancel()
-        for worker in self._workers:
-            with contextlib.suppress(asyncio.CancelledError):
-                await worker
+        # gather collects the workers' own cancellations as results, while a
+        # cancellation aimed at whoever called stop() still propagates.
+        await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
 
     # ------------------------------------------------------------ submission
@@ -217,14 +216,20 @@ class JobQueue:
             interval=self._config.download.progress_interval,
             reply_to=job.reply_to,
         )
-        if job.kind is JobKind.MESSAGE:
-            await self._run_message_job(job, reporter)
-        elif job.kind is JobKind.INBOUND:
-            await self._run_inbound_job(job, reporter)
-        elif job.kind is JobKind.URL:
-            await self._run_url_job(job, reporter)
-        else:
-            await self._run_share_job(job, reporter)
+        runner = {
+            JobKind.MESSAGE: self._run_message_job,
+            JobKind.INBOUND: self._run_inbound_job,
+            JobKind.URL: self._run_url_job,
+            JobKind.SHARE: self._run_share_job,
+        }[job.kind]
+        try:
+            await runner(job, reporter)
+        except Exception as exc:
+            # Each runner reports the failures it expects. Anything else would
+            # leave the status message frozen mid-way, so close it here and
+            # let the worker record the failure.
+            await reporter.close(t("error.generic", error=escape_html(str(exc))))
+            raise
 
     # -------------------------------------------------------- PikPak-only jobs
 
@@ -477,13 +482,15 @@ class JobQueue:
             message, destination, progress=on_download, cancel=job.cancel
         )
 
-        result = await self._deliver(job, reporter, path, info, caption, key, prefix)
-
-        if self._config.download.delete_after_delivery and not result.kept_local:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError as exc:
-                log.debug("could not remove %s: %s", path, exc)
+        try:
+            result = await self._deliver(job, reporter, path, info, caption, key, prefix)
+        except BaseException:
+            # A failed delivery has no retry, so the file would sit on disk
+            # with nobody told where. Keep it only if files are kept anyway.
+            self._discard(path)
+            raise
+        if not result.kept_local:
+            self._discard(path)
 
         await reporter.update(
             t(
@@ -494,6 +501,15 @@ class JobQueue:
             ),
             force=True,
         )
+
+    def _discard(self, path: Path) -> None:
+        """Remove a downloaded file, unless the operator keeps them all."""
+        if not self._config.download.delete_after_delivery:
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            log.debug("could not remove %s: %s", path, exc)
 
     async def _deliver(self, job, reporter, path: Path, info, caption, key, prefix):
         """Send the downloaded file to wherever the job's mode points."""
@@ -527,7 +543,11 @@ class JobQueue:
                 force=True,
             )
             return await self._delivery.to_pikpak(
-                path, info, folder=job.pikpak_folder, user_id=job.user_id
+                path,
+                info,
+                folder=job.pikpak_folder,
+                user_id=job.user_id,
+                delete_when_done=self._config.download.delete_after_delivery,
             )
 
         try:

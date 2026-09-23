@@ -7,16 +7,16 @@ import logging
 from telethon import TelegramClient, events
 
 from . import bootstrap
-from .buttons import url_button, webview_button
+from .buttons import webview_button
 from .config import MODES, Config
 from .db import Database
 from .downloader import has_downloadable_media
 from .i18n import display_mode, display_state, t
 from .links import LinkBundle, extract_links
 from .pikpak import PikPakError, PikPakService
-from .portal import PikPakLoginPortal, PortalError
+from .portal import PikPakLoginPortal
 from .tasks import Job, JobKind, JobQueue, QueueFull
-from .utils import escape_html, human_duration, human_size, parse_id_list, truncate
+from .utils import escape_html, human_size, parse_id_list, truncate
 from .verify import run_live_checks
 
 log = logging.getLogger(__name__)
@@ -159,19 +159,17 @@ class BotHandlers:
                     "mode.unknown",
                     choice=escape_html(choice),
                     modes=", ".join(MODES),
-                )
+                ),
+                parse_mode="html",
             )
             return
         if choice == "pikpak" and not await self._pikpak.available_for(event.sender_id):
-            if self._portal.unavailable_reason() is None:
-                await event.reply(
-                    t("mode.pikpak_none"),
-                    parse_mode="html",
-                )
+            # /setup pikpak works on any deployment, so only the operator
+            # switching user logins off leaves no way in.
+            if self._pikpak.user_login_allowed:
+                await event.reply(t("mode.pikpak_none"), parse_mode="html")
             else:
-                await event.reply(
-                    t("mode.pikpak_unavailable")
-                )
+                await event.reply(t("mode.pikpak_unavailable"))
             return
 
         await self._db.set_user_mode(event.sender_id, choice)
@@ -264,16 +262,21 @@ class BotHandlers:
         await self._pikpak_status(event)
 
     async def _pikpak_login(self, event) -> None:
-        """Offer every way of connecting PikPak that this deployment supports."""
+        """Offer the Mini App where it can open, and the in-chat login otherwise."""
         if not self._pikpak.user_login_allowed:
             await event.reply(t("pikpak.login.disabled"))
+            return
+        # Telegram refuses web_app buttons outside a private chat, and a
+        # password does not belong in a group either way.
+        if not event.is_private:
+            await event.reply(t("pikpak.login.private_only"))
             return
 
         already = await self._pikpak.has_user_session(event.sender_id)
         replacing = t("pikpak.login.replacing") if already else ""
 
-        # Best case: a Mini App, which opens inside Telegram and needs no link
-        # at all, because Telegram signs the visitor's identity for us.
+        # Telegram signs the visitor's identity for a Mini App, so there is
+        # no link or secret in a URL at all.
         miniapp = self._portal.miniapp_url
         if miniapp is not None:
             await event.reply(
@@ -284,31 +287,11 @@ class BotHandlers:
             )
             return
 
-        reason = self._portal.unavailable_reason()
-        if reason is None:
-            try:
-                link = self._portal.create_link(event.sender_id)
-            except PortalError as exc:
-                await event.reply(
-                    t("error.generic", error=escape_html(str(exc))),
-                    parse_mode="html",
-                )
-                return
-            ttl = human_duration(self._config.pikpak.login_link_ttl)
-            await event.reply(
-                t("pikpak.login.link", ttl=ttl, replacing=replacing),
-                parse_mode="html",
-                buttons=url_button(t("pikpak.login.button_link"), link),
-                link_preview=False,
-            )
-            return
-
-        # No usable web server: the in-chat conversation still works, and
-        # needs no public address or TLS at all.
+        # No HTTPS address: the in-chat conversation needs none at all.
         await event.reply(
             t(
                 "pikpak.login.chat_fallback",
-                reason=escape_html(reason),
+                reason=escape_html(self._portal.unavailable_reason() or ""),
                 replacing=replacing,
             ),
             parse_mode="html",
@@ -329,10 +312,7 @@ class BotHandlers:
             await event.reply(t("pikpak.logout.none"))
             return
         await self._pikpak.logout(event.sender_id)
-        self._portal.revoke(event.sender_id)
-        await event.reply(
-            t("pikpak.logout.done")
-        )
+        await event.reply(t("pikpak.logout.done"))
 
     async def _pikpak_dir(self, event, parts: list[str]) -> None:
         if len(parts) < 3:
@@ -357,17 +337,10 @@ class BotHandlers:
         own = await self._pikpak.has_user_session(user_id)
 
         if not await self._pikpak.available_for(user_id):
-            reason = self._portal.unavailable_reason()
-            if reason is None:
-                await event.reply(
-                    t("pikpak.status.none"),
-                    parse_mode="html",
-                )
+            if self._pikpak.user_login_allowed:
+                await event.reply(t("pikpak.status.none"), parse_mode="html")
             else:
-                await event.reply(
-                    t("pikpak.status.unavailable", reason=escape_html(reason)),
-                    parse_mode="html",
-                )
+                await event.reply(t("mode.pikpak_unavailable"))
             return
 
         try:
@@ -480,7 +453,7 @@ class BotHandlers:
         """Verify the bot can really use a chat as a cache, then store it."""
         try:
             permissions = await self._bot.get_permissions(chat_id, "me")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - relay Telegram's reason, whatever it is
             await event.reply(
                 t("cache.cannot_see", error=escape_html(str(exc))),
                 parse_mode="html",
@@ -517,16 +490,18 @@ class BotHandlers:
             )
             return
 
-        if action in ("pikpak", "telegram", "tg"):
-            # Signing an account in to the bot is an operator action: it
-            # decides what the whole bot can read, or where files land.
+        if action == "pikpak":
+            # Connects the sender's own drive, exactly as the Mini App does,
+            # so any allowed user may.
+            await self._wizard.begin_pikpak(event)
+            return
+        if action in ("telegram", "tg"):
+            # The reading account decides what the whole bot can read, so
+            # signing one in is an operator action.
             if not self._config.access.is_admin(event.sender_id):
                 await event.reply(t("setup.only_admin"))
                 return
-            if action == "pikpak":
-                await self._wizard.begin_pikpak(event)
-            else:
-                await self._wizard.begin_telegram(event)
+            await self._wizard.begin_telegram(event)
             return
 
         text = await self._wizard.status_text(event.sender_id)
@@ -596,26 +571,21 @@ class BotHandlers:
 
         # In a group, only act on messages that actually carry something to
         # download. Anything else is somebody else's conversation.
-        if not event.is_private and not bundle and not has_media:
+        if not event.is_private and not bundle.actionable and not has_media:
             return
 
-        if not await self._authorized(event, quiet=not (bundle or has_media)):
+        if not await self._authorized(event, quiet=not (bundle.actionable or has_media)):
             return
 
-        if not bundle and has_media:
+        # In priority order; each branch looks at exactly one thing.
+        if bundle.actionable:
+            await self._submit_bundle(event, bundle)
+        elif has_media:
             await self._submit_inbound(event)
-            return
-
-        if not bundle:
-            if bundle.errors:
-                await self._report_errors(event, bundle)
-                return
-            await event.reply(
-                t("dispatch.prompt")
-            )
-            return
-
-        await self._submit_bundle(event, bundle)
+        elif bundle.errors:
+            await self._report_errors(event, bundle)
+        else:
+            await event.reply(t("dispatch.prompt"))
 
     async def _report_errors(self, event, bundle: LinkBundle) -> None:
         lines = "\n".join(f"• {escape_html(item)}" for item in bundle.errors[:5])
@@ -648,7 +618,9 @@ class BotHandlers:
             await self._queue.submit(job)
         except QueueFull as exc:
             await self._db.finish_job(job_id, "failed", error=str(exc))
-            await event.reply(t("error.generic", error=escape_html(str(exc))))
+            await event.reply(
+                t("error.generic", error=escape_html(str(exc))), parse_mode="html"
+            )
             return
         await event.reply(
             t("inbound.queued", job_id=job_id, note=note), parse_mode="html"

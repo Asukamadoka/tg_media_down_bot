@@ -80,10 +80,11 @@ tgmd.app      ready — mode telegram, N worker(s)
 sudo chown -R 10001:10001 data
 ```
 
-**`http.enabled is set but http.public_base_url is empty`** —— `HTTP_ENABLED`
-只有在平台会注入外部 URL 时才该开（Render / Koyeb / Railway / Fly 等，见
-`tgmd/config.py::detect_platform_base_url`）。自托管环境里先设 `"false"`，
-等有了公网 HTTPS 地址再配 `PUBLIC_BASE_URL` 并翻回 `"true"`。
+**`http.enabled is set but http.public_base_url is empty`** —— 从阶段 1 起这
+只是一条启动警告，不再退出（以前会以退出码 2 退出，容器无限重启）。HTTP 服务
+照常监听、`/healthz` 可用，只是「Telegram 媒体转存 PikPak」这一项关闭；磁力、
+直链、分享链接转存不受影响。有了公网 HTTPS 地址后配上 `PUBLIC_BASE_URL` 即可
+恢复。
 
 **改完 mihomo 配置只重启了 proxy** —— bot 共享 proxy 的 netns，proxy 一重启
 bot 的连接就断了。两个一起重启。

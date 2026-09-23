@@ -196,6 +196,31 @@ class TestClaimAnnouncement:
         finally:
             await second.stop()
 
+    async def test_no_claim_code_is_ever_logged_after_a_claim(
+        self, tmp_path, fake_clients, caplog
+    ):
+        config = make_config(tmp_path)
+        first = Application(config)
+        with caplog.at_level("DEBUG"):
+            await first.start()
+        try:
+            code = await first.db.kv_get(bootstrap.CLAIM_CODE_KEY)
+            # Proves the check below can see the line when it is there.
+            assert code in caplog.text
+            await bootstrap.claim_admin(first.db, config, code, 777)
+        finally:
+            await first.stop()
+
+        caplog.clear()
+        with caplog.at_level("DEBUG"):
+            second = Application(make_config(tmp_path))
+            await second.start()
+            await second.stop()
+        logged = caplog.text
+        assert code not in logged
+        assert "/claim" not in logged
+        assert "NO ADMIN YET" not in logged
+
 
 class TestHttpSurface:
     async def test_the_server_serves_when_enabled(self, tmp_path, fake_clients):
@@ -214,15 +239,29 @@ class TestHttpSurface:
         finally:
             await instance.stop()
 
-    async def test_the_portal_can_issue_a_link_when_https_is_absent(self, tmp_path, fake_clients):
-        # Loopback counts as secure, so a one-time link is still available.
+    async def test_plain_http_offers_no_mini_app(self, tmp_path, fake_clients):
+        # Telegram refuses web_app buttons that are not HTTPS, so /pikpak
+        # login falls back to /setup pikpak in chat.
         instance = Application(make_config(tmp_path, http=True))
         await instance.start()
         try:
-            assert instance.portal.unavailable_reason() is None
-            assert "/pikpak/login/" in instance.portal.create_link(42)
-            # Plain http, so Telegram would refuse the Mini App button.
+            assert "HTTPS" in (instance.portal.unavailable_reason() or "")
             assert instance.portal.miniapp_url is None
+        finally:
+            await instance.stop()
+
+    async def test_the_mini_app_follows_the_live_access_list(self, tmp_path, fake_clients):
+        # Bound to the same list /claim appends to, so a claim made after
+        # startup is honoured without a restart.
+        config = make_config(tmp_path)
+        instance = Application(config)
+        await instance.start()
+        try:
+            is_allowed = instance.portal._is_allowed  # noqa: SLF001 - the wiring is the point
+            assert not is_allowed(777)
+            code = await instance.db.kv_get(bootstrap.CLAIM_CODE_KEY)
+            await bootstrap.claim_admin(instance.db, config, code, 777)
+            assert is_allowed(777)
         finally:
             await instance.stop()
 

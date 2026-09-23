@@ -17,7 +17,7 @@ from .config import Config
 from .db import Database
 from .downloader import MediaInfo
 from .pikpak import PikPakError, PikPakService
-from .utils import human_size
+from .utils import escape_html, human_size
 from .webserver import FileServer
 
 log = logging.getLogger(__name__)
@@ -93,7 +93,7 @@ class Delivery:
                 caption=caption[:CAPTION_LIMIT],
                 parse_mode="html",
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - any failure means "download instead"
             log.info("cache entry %s unusable (%s), re-downloading", key, exc)
             await self._db.cache_forget(key)
             return False
@@ -198,7 +198,7 @@ class Delivery:
             shown = path
         return DeliveryResult(
             mode="local",
-            summary=f"saved to <code>{shown}</code> ({human_size(size)})",
+            summary=f"saved to <code>{escape_html(str(shown))}</code> ({human_size(size)})",
             kept_local=True,
             remote_path=str(path),
         )
@@ -212,8 +212,15 @@ class Delivery:
         *,
         folder: str | None = None,
         user_id: int | None = None,
+        delete_when_done: bool = False,
     ) -> DeliveryResult:
-        """Hand the file to PikPak by publishing it on the bot's HTTP server."""
+        """Hand the file to PikPak by publishing it on the bot's HTTP server.
+
+        If PikPak is still fetching when the wait runs out, the file has to
+        stay published, so the caller cannot delete it. ``delete_when_done``
+        hands that job to the file server, which deletes it once its URL
+        expires.
+        """
         if user_id is not None and not await self._pikpak.available_for(user_id):
             raise DeliveryError(
                 "no PikPak account is connected. Use /pikpak login to connect "
@@ -243,22 +250,25 @@ class Delivery:
                 self._files.unpublish_all(path)
 
         target = folder or self._config.pikpak.folder
+        remote = f"{target}/{info.file_name}"
         if status is DownloadStatus.done:
             return DeliveryResult(
                 mode="pikpak",
-                summary=f"saved to PikPak <code>{target}/{info.file_name}</code>",
-                remote_path=f"{target}/{info.file_name}",
+                summary=f"saved to PikPak <code>{escape_html(remote)}</code>",
+                remote_path=remote,
             )
         if status is DownloadStatus.error:
             raise DeliveryError("PikPak reported an error fetching the file")
+        if delete_when_done:
+            self._files.delete_on_expiry(path)
         return DeliveryResult(
             mode="pikpak",
             summary=(
-                f"PikPak is still fetching <code>{info.file_name}</code>; it will "
-                "appear in your drive shortly"
+                f"PikPak is still fetching <code>{escape_html(info.file_name)}</code>; "
+                "it will appear in your drive shortly"
             ),
             kept_local=True,
-            remote_path=f"{target}/{info.file_name}",
+            remote_path=remote,
         )
 
     async def url_to_pikpak(
@@ -266,10 +276,9 @@ class Delivery:
         url: str,
         *,
         folder: str | None = None,
-        wait: bool = False,
         user_id: int | None = None,
     ) -> DeliveryResult:
-        """Transfer a magnet link or direct URL without touching local disk."""
+        """Queue a magnet link or direct URL in PikPak. Nothing touches local disk."""
         try:
             task = await self._pikpak.offline_download(
                 url, folder=folder, user_id=user_id
@@ -278,25 +287,12 @@ class Delivery:
             raise DeliveryError(str(exc)) from exc
 
         target = folder or self._config.pikpak.folder
-        if not wait:
-            return DeliveryResult(
-                mode="pikpak",
-                summary=f"queued in PikPak: <code>{task.name}</code> → {target}",
-                remote_path=f"{target}/{task.name}",
-            )
-
-        status = await self._pikpak.wait_for_task(task, user_id=user_id)
-        if status is DownloadStatus.done:
-            return DeliveryResult(
-                mode="pikpak",
-                summary=f"saved to PikPak <code>{target}/{task.name}</code>",
-                remote_path=f"{target}/{task.name}",
-            )
-        if status is DownloadStatus.error:
-            raise DeliveryError(f"PikPak could not fetch {task.name}")
         return DeliveryResult(
             mode="pikpak",
-            summary=f"PikPak is still working on <code>{task.name}</code>",
+            summary=(
+                f"queued in PikPak: <code>{escape_html(task.name)}</code> → "
+                f"{escape_html(target)}"
+            ),
             remote_path=f"{target}/{task.name}",
         )
 

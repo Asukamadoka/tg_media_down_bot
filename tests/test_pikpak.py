@@ -233,10 +233,37 @@ class TestOfflineDownload:
         task = await service.offline_download("https://example.com/a")
         assert await service.wait_for_task(task) is DownloadStatus.done
 
-    async def test_failed_task_is_reported(self, db):
-        service = make_service(db, FakeClient(get_task_status=DownloadStatus.error))
+    async def test_a_failed_status_check_is_not_a_failed_transfer(self, db, monkeypatch):
+        # pikpakapi answers `error` when its own request failed. The task may
+        # well still be running, so that is "unknown", never final: a final
+        # answer here made delivery unpublish a file PikPak was still reading.
+        monkeypatch.setattr("tgmd.pikpak._POLL_INTERVAL", 0.01)
+        service = make_service(
+            db, FakeClient(get_task_status=DownloadStatus.error), task_timeout=0.05
+        )
         task = await service.offline_download("https://example.com/a")
-        assert await service.wait_for_task(task) is DownloadStatus.error
+        assert await service.wait_for_task(task) is DownloadStatus.downloading
+
+    async def test_polling_carries_on_past_a_failed_check(self, db, monkeypatch):
+        monkeypatch.setattr("tgmd.pikpak._POLL_INTERVAL", 0.0)
+        client = SequencedClient(
+            [DownloadStatus.downloading, DownloadStatus.error, DownloadStatus.done]
+        )
+        service = make_service(db, client)
+        task = await service.offline_download("https://example.com/a")
+        assert await service.wait_for_task(task) is DownloadStatus.done
+
+
+class SequencedClient(FakeClient):
+    """Answers status checks from a script, then repeats the last answer."""
+
+    def __init__(self, statuses):
+        super().__init__()
+        self._statuses = list(statuses)
+
+    async def get_task_status(self, task_id, file_id):
+        self.calls.append(("get_task_status", task_id, file_id))
+        return self._statuses.pop(0) if len(self._statuses) > 1 else self._statuses[0]
 
 
 class TestShareLinks:
@@ -370,8 +397,21 @@ class TestPerUserSessions:
         assert any(call[0] == "offline_download" for call in own.calls)
         assert not any(call[0] == "offline_download" for call in shared.calls)
 
-    async def test_account_label_distinguishes_the_source(self, db):
-        service = make_service(db, FakeClient())
-        service._users[42] = FakeClient()  # noqa: SLF001
-        assert "your own" in await service.account_label(42)
-        assert "shared" in await service.account_label(7)
+    async def test_a_dead_own_session_never_falls_back_to_the_shared_one(
+        self, db, monkeypatch
+    ):
+        # The user expects files in their own drive. Quietly using the shared
+        # account would put them in someone else's, so they are told instead,
+        # on every attempt and not just the first.
+        shared = FakeClient()
+        service = make_service(db, shared)
+        await db.kv_set_json(user_token_key(42), {"encoded_token": "expired"})
+
+        async def dead(_key):
+            return None
+
+        monkeypatch.setattr(service, "_restore", dead)
+        for _ in range(2):
+            with pytest.raises(PikPakError, match="/pikpak login"):
+                await service.offline_download("magnet:?xt=urn:btih:abc", user_id=42)
+        assert not any(call[0] == "offline_download" for call in shared.calls)

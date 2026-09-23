@@ -58,7 +58,6 @@ class MediaInfo:
     is_photo: bool = False
     is_round: bool = False
     is_voice: bool = False
-    supports_streaming: bool = False
 
 
 def has_downloadable_media(message) -> bool:
@@ -103,7 +102,6 @@ def describe_media(message) -> MediaInfo:
     is_audio = False
     is_round = False
     is_voice = False
-    supports_streaming = False
 
     if document is not None:
         for attribute in document.attributes:
@@ -112,9 +110,6 @@ def describe_media(message) -> MediaInfo:
             elif isinstance(attribute, DocumentAttributeVideo):
                 is_video = True
                 is_round = bool(getattr(attribute, "round_message", False))
-                supports_streaming = bool(
-                    getattr(attribute, "supports_streaming", False)
-                )
                 duration = duration or attribute.duration
                 width = width or attribute.w
                 height = height or attribute.h
@@ -143,7 +138,6 @@ def describe_media(message) -> MediaInfo:
         is_photo=is_photo,
         is_round=is_round,
         is_voice=is_voice,
-        supports_streaming=supports_streaming,
     )
 
 
@@ -194,45 +188,36 @@ class Downloader:
                     file=str(destination),
                     progress_callback=self._wrap_progress(progress, cancel),
                 )
-            except DownloadCancelled:
+            except BaseException as exc:
+                # Every way out of a failed attempt, retried or not, starts by
+                # removing what it half wrote.
                 self._cleanup(destination)
-                raise
-            except FloodWaitError as exc:
-                self._cleanup(destination)
-                if exc.seconds > _FLOOD_WAIT_CEILING:
+                if not isinstance(
+                    exc, (FloodWaitError, TimeoutError, ConnectionError, OSError)
+                ):
+                    raise
+                error: Exception = exc
+            else:
+                if result is None:
+                    raise DownloadError("Telegram returned no file for that message")
+                return Path(result)
+
+            if isinstance(error, FloodWaitError):
+                if error.seconds > _FLOOD_WAIT_CEILING:
                     raise DownloadError(
-                        f"Telegram asked us to wait {exc.seconds}s; try again later"
-                    ) from exc
-                log.info("flood wait for %ss on attempt %d", exc.seconds, attempt)
-                await asyncio.sleep(exc.seconds + 1)
-                last_error = exc
-                continue
-            except (TimeoutError, ConnectionError, OSError) as exc:
-                self._cleanup(destination)
-                last_error = exc
-                log.info("download attempt %d failed: %s", attempt, exc)
+                        f"Telegram asked us to wait {error.seconds}s; try again later"
+                    ) from error
+                log.info("flood wait for %ss on attempt %d", error.seconds, attempt)
+                await asyncio.sleep(error.seconds + 1)
+            else:
+                log.info("download attempt %d failed: %s", attempt, error)
                 if attempt < _MAX_ATTEMPTS:
                     await asyncio.sleep(2**attempt)
-                continue
-
-            if result is None:
-                raise DownloadError("Telegram returned no file for that message")
-            return Path(result)
+            last_error = error
 
         raise DownloadError(
             f"download failed after {_MAX_ATTEMPTS} attempts: {last_error}"
         )
-
-    async def download_thumbnail(self, message, destination: Path) -> Path | None:
-        """Fetch the largest available thumbnail, used when re-uploading video."""
-        try:
-            result = await self._client.download_media(
-                message, file=str(destination), thumb=-1
-            )
-        except Exception as exc:  # a missing thumbnail must never fail a job
-            log.debug("no thumbnail for message %s: %s", message.id, exc)
-            return None
-        return Path(result) if result else None
 
     @staticmethod
     def _wrap_progress(

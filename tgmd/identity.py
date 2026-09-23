@@ -34,12 +34,6 @@ class BotToken:
     bot_id: int
     secret: str
 
-    @property
-    def redacted(self) -> str:
-        """The token as it is safe to print: id, then a stub of the secret."""
-        return f"{self.bot_id}:{self.secret[:4]}…{self.secret[-2:]}"
-
-
 def parse_bot_token(token: str) -> BotToken:
     """Parse and validate a bot token without contacting Telegram.
 

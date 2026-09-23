@@ -65,12 +65,6 @@ class TestParseBotToken:
         with pytest.raises(BotTokenError):
             parse_bot_token("123456789:" + "!" * 35)
 
-    def test_redaction_hides_most_of_the_secret(self):
-        redacted = parse_bot_token(VALID).redacted
-        assert redacted.startswith("123456789:")
-        assert VALID.split(":", 1)[1] not in redacted
-        assert len(redacted) < len(VALID)
-
 
 class TestDescribeAccount:
     def test_username_is_preferred(self):

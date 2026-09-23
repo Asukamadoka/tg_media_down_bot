@@ -15,7 +15,7 @@ import pytest
 
 from tgmd.config import HttpConfig
 from tgmd.signing import make_token
-from tgmd.webserver import FileServer
+from tgmd.webserver import FileServer, content_disposition
 
 SECRET = "server-test-secret"
 CONTENT = b"the quick brown fox" * 100
@@ -159,3 +159,56 @@ class TestDisabledServer:
                 instance.publish(sample)
         finally:
             await instance.stop()
+
+
+class TestExpiry:
+    """A file PikPak is still fetching is deleted once its URL has expired."""
+
+    async def test_a_marked_file_is_deleted_when_it_expires(self, server, sample):
+        server.publish(sample, ttl=60)
+        server.delete_on_expiry(sample)
+        assert server.sweep(now=time.time() + 30) == 0
+        assert sample.exists()
+        assert server.sweep(now=time.time() + 120) == 1
+        assert not sample.exists()
+
+    async def test_an_unmarked_file_is_only_unregistered(self, server, sample):
+        # Local mode and the too-large fallback keep their files on purpose.
+        server.publish(sample, ttl=60)
+        server.sweep(now=time.time() + 120)
+        assert sample.exists()
+
+    async def test_a_file_still_served_elsewhere_is_kept(self, server, sample):
+        server.publish(sample, ttl=60)
+        server.publish(sample, ttl=600)
+        server.delete_on_expiry(sample)
+        server.sweep(now=time.time() + 120)
+        assert sample.exists()
+        server.sweep(now=time.time() + 1200)
+        assert not sample.exists()
+
+    async def test_fetching_an_expired_url_leaves_the_deletion_to_the_sweep(
+        self, server, sample
+    ):
+        url = server.publish(sample, ttl=1)
+        server.delete_on_expiry(sample)
+        time.sleep(1.1)
+        assert (await fetch(url))[0] == 404
+        server.sweep()
+        assert not sample.exists()
+
+
+class TestContentDisposition:
+    def test_an_ascii_name_is_plain(self):
+        header = content_disposition("clip.mp4")
+        assert 'filename="clip.mp4"' in header
+        assert "filename*=UTF-8''clip.mp4" in header
+
+    def test_a_chinese_name_is_encoded_not_sent_raw(self):
+        header = content_disposition("视频 1.mp4")
+        header.encode("ascii")  # a raw UTF-8 header is what RFC 6266 forbids
+        assert "filename*=UTF-8''%E8%A7%86%E9%A2%91%201.mp4" in header
+
+    def test_quotes_cannot_break_out_of_the_fallback(self):
+        header = content_disposition('a"b.mp4')
+        assert 'filename="a_b.mp4"' in header

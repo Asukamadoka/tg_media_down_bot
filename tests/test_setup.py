@@ -110,6 +110,10 @@ class FakePortal:
     def unavailable_reason(self) -> str | None:
         return self._reason
 
+    @property
+    def miniapp_url(self) -> str | None:
+        return "https://media.example.com/pikpak/app" if self._reason is None else None
+
 
 def make_config(*, user_session: str = "", cache_chat_id: int | None = None) -> Config:
     return Config(
@@ -190,6 +194,9 @@ class TestStatus:
     async def test_cache_chat_state(self, db):
         without = await make_wizard(db).status_text(42)
         assert "⬜ <b>Upload cache</b>" in without
+        # Points at the one-step command, not at an id to look up by hand.
+        assert "/cache" in without
+        assert "CACHE_CHAT_ID" not in without
         wizard = make_wizard(db, config=make_config(cache_chat_id=-100123))
         assert "✅ <b>Upload cache</b>" in await wizard.status_text(42)
 
@@ -299,6 +306,14 @@ class TestPikPakConversation:
         await wizard.begin_pikpak(event)
         assert "/pikpak login" not in event.last
 
+    async def test_a_group_chat_is_refused(self, db):
+        # The password would be the next message, in front of everyone.
+        wizard = make_wizard(db)
+        event = FakeEvent("/setup pikpak", private=False)
+        await wizard.begin_pikpak(event)
+        assert "directly" in event.last
+        assert not wizard.active(42)
+
     async def test_a_bad_email_is_rejected_without_advancing(self, db):
         wizard = make_wizard(db)
         await wizard.begin_pikpak(FakeEvent())
@@ -390,6 +405,31 @@ class TestTelegramConversationGuards:
         await wizard.handle(event)
         assert "phone number" in event.last
         assert wizard._conversations[42].step is Step.TG_PHONE  # noqa: SLF001
+
+
+class TestTelegramLoginCleanup:
+    async def test_a_failed_code_request_disconnects_the_client(self, db, monkeypatch):
+        # The client is not attached to the conversation yet at that point,
+        # so cancelling the conversation cannot reach it.
+        client = FakeTelegramClient()
+
+        async def connect():
+            return None
+
+        async def send_code_request(_phone):
+            raise ConnectionError("network unreachable")
+
+        client.connect = connect
+        client.send_code_request = send_code_request
+        monkeypatch.setattr("tgmd.setup.TelegramClient", lambda *a, **k: client)
+
+        wizard = make_wizard(db)
+        await wizard.begin_telegram(FakeEvent("/setup telegram"))
+        event = FakeEvent("+8613800138000")
+        assert await wizard.handle(event)
+        assert client.disconnected
+        assert "network unreachable" in event.last
+        assert not wizard.active(42)
 
 
 class TestStoredSession:

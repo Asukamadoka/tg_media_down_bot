@@ -14,10 +14,13 @@ It handles two conversations:
   and swapped into the running bot, so there is no restart.
 
 Both delete the messages containing secrets as soon as they are consumed, and
-both are restricted to admins. That restriction is not decoration: a bot that
-asks a stranger for their Telegram login code is the shape of the most common
-account-theft scam on the platform, and this wizard is only legitimate because
-the person running it owns both the bot and the account. The prompts say so.
+both only run in a private chat. The Telegram one is restricted to admins,
+and that restriction is not decoration: a bot that asks a stranger for their
+Telegram login code is the shape of the most common account-theft scam on the
+platform, and this wizard is only legitimate because the person running it
+owns both the bot and the account. The prompts say so. The PikPak one is open
+to any allowed user, because it connects their own drive and nobody else's,
+exactly as the Mini App does.
 """
 
 from __future__ import annotations
@@ -168,7 +171,7 @@ class SetupWizard:
         else:
             lines.append(
                 "⬜ <b>Upload cache</b> — optional. Add me to a private channel "
-                "as admin, then set <code>CACHE_CHAT_ID</code> to its id."
+                "as admin, then send <code>/cache</code> in that channel."
             )
 
         lines.append("")
@@ -226,11 +229,16 @@ class SetupWizard:
             )
             return
 
+        # The password comes next, and it does not belong in a group.
+        if not event.is_private:
+            await event.reply("Message me directly to sign in, not in a group.")
+            return
+
         alternative = ""
-        if self._portal.unavailable_reason() is None:
+        if self._portal.miniapp_url is not None:
             alternative = (
-                "\n\nPrefer a web form? <code>/pikpak login</code> sends a "
-                "one-time link instead."
+                "\n\nPrefer a form? <code>/pikpak login</code> opens one inside "
+                "Telegram instead."
             )
 
         await self.cancel(event.sender_id)
@@ -393,8 +401,8 @@ class SetupWizard:
             self._config.telegram.api_id,
             self._config.telegram.api_hash,
         )
-        await client.connect()
         try:
+            await client.connect()
             sent = await client.send_code_request(phone)
         except PhoneNumberInvalidError:
             await client.disconnect()
@@ -407,6 +415,11 @@ class SetupWizard:
                 f"Telegram is rate-limiting logins for {exc.seconds}s. Try later."
             )
             return
+        except BaseException:
+            # Not attached to the conversation yet, so cancel() cannot reach
+            # it: disconnect here or it stays connected.
+            await client.disconnect()
+            raise
 
         conversation.phone = phone
         conversation.phone_code_hash = sent.phone_code_hash
@@ -476,7 +489,7 @@ class SetupWizard:
         notice = await event.respond("Checking the password…")
         try:
             await client.sign_in(password=text)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - any failure means "try again"
             await notice.edit(
                 f"❌ {escape_html(str(exc))}\n\nSend the password again, or any "
                 "command to stop.",

@@ -93,7 +93,8 @@ class PikPakConfig:
     """Whether users may connect their own account with /pikpak login."""
 
     login_link_ttl: int = 900
-    """How long a login link stays valid, in seconds."""
+    """No longer used: the one-time login link it timed was removed. Still
+    parsed, so a deployment that sets PIKPAK_LOGIN_LINK_TTL keeps starting."""
 
     @property
     def configured(self) -> bool:
@@ -177,33 +178,33 @@ class Config:
                 + f" (allowed: {', '.join(sorted(ALLOWED_TEMPLATE_FIELDS))})"
             )
 
-        if self.http.enabled and not self.http.public_base_url:
-            raise ConfigError(
-                "http.enabled is set but http.public_base_url is empty; PikPak "
-                "needs a publicly reachable URL to fetch files from"
-            )
-
+        # Only facts about the configuration itself belong here. Whether there
+        # is an admin or a reading account is runtime state: /claim and
+        # /setup telegram store both in the database, which is not open yet,
+        # so the app reports them after reading it instead.
         warnings: list[str] = []
-        if not self.telegram.user_session and not self.telegram.user_session_file.exists():
+        if self.http.enabled and not self.http.public_base_url:
+            # Not fatal: a NAS with no public address yet is a normal state,
+            # and exiting here put the container in a restart loop. The server
+            # still binds, so /healthz keeps answering.
             warnings.append(
-                "no user session configured: only chats the bot itself is in can "
-                "be read. Run `python -m tgmd.login` to add a user session."
+                "http.enabled is set but http.public_base_url is empty, so "
+                "Telegram-to-PikPak transfers are off: PikPak needs a public URL "
+                "to fetch files from. Magnet, URL and share transfers still work."
+            )
+        elif self.pikpak.configured and not self.http.usable:
+            warnings.append(
+                "PikPak is configured but the HTTP file server is not; magnet and "
+                "URL transfers will work, Telegram-to-PikPak transfers will not."
             )
         if self.access.allow_all_users:
             warnings.append(
                 "access.allow_all_users is true: anyone can pull media from every "
                 "chat your user account can see."
             )
-        elif not self.access.admin_user_ids and not self.access.allowed_user_ids:
-            # Not fatal: the bot prints a claim code at startup, and /claim
-            # makes the first holder of that code an admin without a redeploy.
-            warnings.append(
-                "no admin configured yet. The bot will print a claim code to "
-                "this log and refuse everyone until someone sends /claim with "
-                "it. Set ADMIN_USER_IDS to skip that step."
-            )
         if self.delivery.default_mode == "pikpak" and not self.pikpak.configured:
-            if self.pikpak.allow_user_login and self.http.usable:
+            # /setup pikpak needs no web server, so allowing logins is enough.
+            if self.pikpak.allow_user_login:
                 warnings.append(
                     "default mode is pikpak with no shared account, so each user "
                     "must run /pikpak login before their first transfer."
@@ -213,11 +214,6 @@ class Config:
                     "default mode is pikpak but there is no shared account and "
                     "no way for users to connect their own."
                 )
-        if self.pikpak.configured and not self.http.usable:
-            warnings.append(
-                "PikPak is configured but the HTTP file server is not; magnet and "
-                "URL transfers will work, Telegram-to-PikPak transfers will not."
-            )
         return warnings
 
 

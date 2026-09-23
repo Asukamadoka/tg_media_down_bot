@@ -106,7 +106,7 @@ async def apply(client: TelegramClient) -> list[str]:
             )
         )
         applied.append(f"command menu ({len(COMMAND_NAMES)} commands)")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - cosmetic; must not block startup
         log.warning("could not set the command menu: %s", exc)
 
     # Both texts are capped by Telegram; truncating loses less than being
@@ -118,7 +118,7 @@ async def apply(client: TelegramClient) -> list[str]:
             SetBotInfoRequest(lang_code="", about=about, description=description)
         )
         applied.append("profile text")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - cosmetic; must not block startup
         # A bot can only edit its own info, and only when BotFather has not
         # been used to lock it; neither is fatal here.
         log.info("could not set the profile text: %s", exc)

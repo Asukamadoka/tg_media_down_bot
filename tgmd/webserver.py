@@ -12,7 +12,6 @@ URLs and share links, which need no local download at all.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import secrets
 import time
@@ -44,6 +43,7 @@ class ServedFile:
     path: Path
     name: str
     expires_at: float
+    delete_on_expiry: bool = False
 
 
 class FileServer:
@@ -89,8 +89,9 @@ class FileServer:
     async def stop(self) -> None:
         if self._sweeper is not None:
             self._sweeper.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._sweeper
+            # Collects the sweeper's own cancellation without swallowing one
+            # aimed at the caller.
+            await asyncio.gather(self._sweeper, return_exceptions=True)
             self._sweeper = None
         if self._runner is not None:
             await self._runner.cleanup()
@@ -129,6 +130,30 @@ class FileServer:
         for file_id in [fid for fid, served in self._files.items() if served.path == path]:
             self._files.pop(file_id, None)
 
+    def delete_on_expiry(self, path: Path) -> None:
+        """Delete ``path`` from disk once its last URL has expired.
+
+        For a file PikPak is still fetching: it must stay served, so nobody
+        else can delete it, and without this nobody ever would.
+        """
+        for served in self._files.values():
+            if served.path == path:
+                served.delete_on_expiry = True
+
+    def sweep(self, now: float | None = None) -> int:
+        """Drop expired registrations, deleting files marked for it."""
+        now = time.time() if now is None else now
+        stale = [fid for fid, served in self._files.items() if served.expires_at <= now]
+        for file_id in stale:
+            served = self._files.pop(file_id)
+            still_served = any(other.path == served.path for other in self._files.values())
+            if served.delete_on_expiry and not still_served:
+                try:
+                    served.path.unlink(missing_ok=True)
+                except OSError as exc:
+                    log.warning("could not delete expired file %s: %s", served.path, exc)
+        return len(stale)
+
     # -------------------------------------------------------------- handlers
 
     async def _handle_health(self, _request: web.Request) -> web.Response:
@@ -145,7 +170,8 @@ class FileServer:
 
         served = self._files.get(file_id)
         if served is None or served.expires_at <= time.time():
-            self._files.pop(file_id, None)
+            # An expired entry is left for sweep(), which also deletes the
+            # file when it was marked for that.
             raise web.HTTPNotFound(text="not found")
 
         if not served.path.is_file():
@@ -158,7 +184,7 @@ class FileServer:
         return web.FileResponse(
             served.path,
             headers={
-                "Content-Disposition": f'attachment; filename="{served.name}"',
+                "Content-Disposition": content_disposition(served.name),
                 "Cache-Control": "no-store",
             },
         )
@@ -169,13 +195,21 @@ class FileServer:
         while True:
             try:
                 await asyncio.sleep(_SWEEP_INTERVAL)
-                now = time.time()
-                stale = [fid for fid, s in self._files.items() if s.expires_at <= now]
-                for file_id in stale:
-                    self._files.pop(file_id, None)
-                if stale:
-                    log.debug("dropped %d expired file registration(s)", len(stale))
+                dropped = self.sweep()
+                if dropped:
+                    log.debug("dropped %d expired file registration(s)", dropped)
             except asyncio.CancelledError:
                 raise
             except Exception:  # pragma: no cover - defensive
                 log.exception("file sweeper failed")
+
+
+def content_disposition(name: str) -> str:
+    """An RFC 6266 attachment header that survives any file name.
+
+    A bare ``filename="…"`` is ASCII by definition; non-ASCII names go in
+    ``filename*`` and an ASCII stand-in keeps old clients happy.
+    """
+    fallback = name.encode("ascii", "replace").decode("ascii").replace('"', "_")
+    fallback = fallback.replace("\\", "_")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
