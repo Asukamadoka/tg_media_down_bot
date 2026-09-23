@@ -32,6 +32,8 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
+from . import bootstrap
+from .clients import user_session_source
 from .config import Config, ConfigError, load_config
 from .db import Database
 from .identity import (
@@ -44,7 +46,8 @@ from .identity import (
     parse_bot_token,
 )
 from .pikpak import PikPakError, PikPakService
-from .portal import PikPakLoginPortal, is_secure_base_url
+from .portal import PikPakLoginPortal
+from .setup import stored_user_session
 from .utils import human_size
 from .webserver import FileServer
 
@@ -86,7 +89,7 @@ def check_access_control(report: Report, config: Config) -> None:
             Check.fail(
                 "access control",
                 "no admin or allowed user ids, so every request will be refused. "
-                "Set ADMIN_USER_IDS.",
+                "Send /claim with the code from the bot's log, or set ADMIN_USER_IDS.",
             )
         )
         return
@@ -184,14 +187,19 @@ async def connect_bot(
         await client.disconnect()
         return None, None
 
+    check_bot_identity(report, me, token)
+    return client, me
+
+
+def check_bot_identity(report: Report, me, token: BotToken | None) -> None:
+    """The account that answered must be a bot, and the one the token names."""
     link = account_link(me)
     report.add(
         Check.ok(
             "bot created",
-            f"{describe_account(me)}" + (f" — {link}" if link else " — no username"),
+            describe_account(me) + (f" — {link}" if link else " — no username"),
         )
     )
-
     if not getattr(me, "bot", False):
         report.add(
             Check.fail(
@@ -199,7 +207,7 @@ async def connect_bot(
                 "that token belongs to an account Telegram does not mark as a bot",
             )
         )
-    elif me.id != token.bot_id:
+    elif token is not None and me.id != token.bot_id:
         report.add(
             Check.fail(
                 "bot identity",
@@ -207,35 +215,33 @@ async def connect_bot(
                 f"answered is {me.id}",
             )
         )
-    else:
+    elif token is not None:
         report.add(
             Check.ok("bot identity", f"id {me.id} matches the token, and is a bot")
         )
 
-    return client, me
-
 
 async def connect_user(
-    report: Report, config: Config
+    report: Report, config: Config, stored_session: str | None = None
 ) -> tuple[TelegramClient | None, object | None]:
-    """Confirm the reading account is authorised and is a human account."""
-    telegram = config.telegram
-    if telegram.user_session:
-        session = StringSession(telegram.user_session)
-        source = "TG_USER_SESSION"
-    elif telegram.user_session_file.exists():
-        session = str(telegram.user_session_file.with_suffix(""))
-        source = str(telegram.user_session_file)
-    else:
+    """Confirm the reading account is authorised and is a human account.
+
+    The session is chosen exactly as the bot chooses it at startup, including
+    one stored by an in-chat ``/setup telegram``.
+    """
+    chosen = user_session_source(config, stored_session)
+    if chosen is None:
         report.add(
             Check.warn(
                 "user session",
                 "not configured. Without one, only chats the bot itself is in "
-                "can be read. Run `python -m tgmd.login`.",
+                "can be read. Sign one in from Telegram with /setup telegram.",
             )
         )
         return None, None
+    session, source = chosen
 
+    telegram = config.telegram
     client = TelegramClient(session, telegram.api_id, telegram.api_hash)
     try:
         await asyncio.wait_for(client.connect(), timeout=_NETWORK_TIMEOUT)
@@ -251,8 +257,8 @@ async def connect_user(
             report.add(
                 Check.fail(
                     "user session",
-                    f"the session from {source} is not authorised; create a new "
-                    "one with `python -m tgmd.login`",
+                    f"the session from {source} is not authorised; sign in "
+                    "again with /setup telegram",
                 )
             )
             await client.disconnect()
@@ -392,31 +398,20 @@ async def check_pikpak(report: Report, config: Config, db: Database) -> None:
         )
 
     if not config.pikpak.allow_user_login:
-        report.add(
-            Check.skip("pikpak login links", "disabled (pikpak.allow_user_login)")
-        )
-    elif not config.http.usable:
+        report.add(Check.skip("pikpak login", "disabled (pikpak.allow_user_login)"))
+    elif not (config.http.usable and config.http.base_url.startswith("https://")):
         report.add(
             Check.warn(
-                "pikpak login links",
-                "cannot be issued: the HTTP server needs HTTP_ENABLED=true and "
-                "PUBLIC_BASE_URL",
-            )
-        )
-    elif not is_secure_base_url(config.http.base_url):
-        report.add(
-            Check.fail(
-                "pikpak login links",
-                f"PUBLIC_BASE_URL is {config.http.base_url}; a login page must "
-                "be served over HTTPS",
+                "pikpak login",
+                "the Mini App needs HTTP_ENABLED=true and an HTTPS "
+                "PUBLIC_BASE_URL; until then users connect with /setup pikpak",
             )
         )
     else:
         report.add(
             Check.ok(
-                "pikpak login links",
-                f"/pikpak login will issue {config.http.base_url}/pikpak/login/… "
-                f"valid for {config.pikpak.login_link_ttl}s",
+                "pikpak login",
+                f"/pikpak login opens {config.http.base_url}/pikpak/app in Telegram",
             )
         )
 
@@ -438,7 +433,13 @@ async def check_http(report: Report, config: Config, db: Database) -> None:
 
     secret = await db.get_or_create_secret()
     pikpak = PikPakService(config.pikpak, db)
-    portal = PikPakLoginPortal(pikpak, config.pikpak, config.http, secret)
+    portal = PikPakLoginPortal(
+        pikpak,
+        config.pikpak,
+        config.http,
+        bot_token=config.telegram.bot_token,
+        is_allowed=config.access.is_allowed,
+    )
     server = FileServer(config.http, secret, portal=portal)
 
     try:
@@ -501,7 +502,6 @@ async def run_checks(config: Config) -> Report:
     report = Report()
 
     check_configuration(report, config)
-    check_access_control(report, config)
     token = check_token(report, config)
     check_directories(report, config)
 
@@ -513,10 +513,15 @@ async def run_checks(config: Config) -> Report:
         report.add(Check.fail("database", f"could not open {config.download.db_path}: {exc}"))
         return report
 
+    # An admin claimed with /claim and a session from /setup telegram live in
+    # the database, exactly as the running bot would find them.
+    await bootstrap.load_runtime_settings(db, config)
+    check_access_control(report, config)
+
     bot = user = None
     try:
         bot, bot_me = await connect_bot(report, config, token)
-        user, user_me = await connect_user(report, config)
+        user, user_me = await connect_user(report, config, await stored_user_session(db))
         check_distinct_accounts(report, bot_me, user_me)
         if user is not None and user_me is not None:
             await check_read_access(report, user)
@@ -569,23 +574,7 @@ async def run_live_checks(
         bot_me = None
 
     if bot_me is not None:
-        link = account_link(bot_me)
-        report.add(
-            Check.ok(
-                "bot created",
-                describe_account(bot_me) + (f" — {link}" if link else " — no username"),
-            )
-        )
-        if token is not None and bot_me.id != token.bot_id:
-            report.add(
-                Check.fail(
-                    "bot identity",
-                    f"the token names bot id {token.bot_id} but this account is "
-                    f"{bot_me.id}",
-                )
-            )
-        elif token is not None:
-            report.add(Check.ok("bot identity", f"id {bot_me.id} matches the token"))
+        check_bot_identity(report, bot_me, token)
 
     user_me = None
     if user is None:
@@ -640,9 +629,11 @@ async def run_live_checks(
 
     reason = portal.unavailable_reason()
     if reason is None:
-        report.add(Check.ok("pikpak login links", "/pikpak login can issue one"))
+        report.add(Check.ok("pikpak login", "/pikpak login opens the Mini App"))
     else:
-        report.add(Check.warn("pikpak login links", reason))
+        report.add(
+            Check.warn("pikpak login", f"no Mini App ({reason}); /setup pikpak works")
+        )
 
     if config.http.enabled:
         report.add(

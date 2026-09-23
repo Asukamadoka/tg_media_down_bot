@@ -79,3 +79,64 @@ docker pull ghcr.io/asukamadoka/tg_media_down_bot:sha-<上一个>
    - **UP042**：`(str, Enum)` 改 `StrEnum`。这是语义变更，不是 lint 清理，而且这类枚举的格式化行为在 3.11 和 3.12 之间本就不同。
    - **BLE001**：18 处 `except Exception`。多数是有意的健壮性边界（worker 不能因一个任务而死、装饰性调用失败不能阻塞启动），但每一处都值得单独判断，一次性加 18 个 `noqa` 等于替审计下结论。
 6. **`stop()` 在等待已取消的子任务时吞掉 `CancelledError`**（`tasks.py`、`webserver.py`）。如果调用 `stop()` 的任务本身正在被取消，这也会把外层的取消一并吞掉。本阶段只是把写法换成 `contextlib.suppress`，语义没变；是否需要区分“子任务的取消”和“自己的取消”，留给阶段 1。
+
+---
+
+## 阶段 1 · 全仓审计
+
+完整审计见 `docs/AUDIT.md`：简报点名的 A1–A8 逐条给了结论，另外新发现 15 条（B1–B15），阶段 0 遗留的 4 条（C1–C4）也有结论。
+
+### 这一阶段做了什么
+
+- **A1** 启动日志和 `python -m tgmd.verify` 不再误报「没有管理员」「没有读取账号」。NAS 上这两件事都是在聊天里完成的（`/claim`、`/setup telegram`），以前每次启动都有两条假警告，`verify` 还会因此判失败。
+- **A2** `HTTP_ENABLED=true` 而没有公网地址时不再崩溃循环，降为警告，只关闭「Telegram 媒体转存 PikPak」。
+- **A5** 删除了一次性 PikPak 登录链接，只保留 Mini App 与聊天内登录。理由：它要求的 HTTPS 条件与 Mini App 完全相同，所以在任何真实部署上它都不会被发出。
+- **B1（安全）** `/setup pikpak` 以前可以在群里发起，接下来的密码就发在群里。现在只能私聊。
+- **B2–B7** 几个真 bug：文件名带 `&` 时最终状态消息写不出去；下载 / 投递失败会在 NAS 上留下文件；PikPak 还没拉完的文件永远不删；任务里的意外异常让进度消息卡住；用户自己的 PikPak 会话失效后悄悄改用共享账号；PikPak 状态查询偶发失败会让正在进行的转存失败。
+- **A3** 给 `tasks.py`、`delivery.py`、`downloader.py`、`reporter.py`、`verify.py` 补了行为层面的测试，这是阶段 2 提速改动的安全网。测试 545 → 613，覆盖率 61% → 77%。
+- **行数** `tgmd/` 8,171 → 7,830（−341）。
+
+### NAS 上要改什么
+
+**必须做的：无。** 所有现有环境变量照常生效，`/data` 布局与数据库结构未动（没有迁移），镜像入口未变。照常拉新镜像、只重启 `bot`：
+
+```bash
+docker compose pull bot
+docker compose up -d bot
+```
+
+**可选：**
+
+- `PIKPAK_LOGIN_LINK_TTL` 如果在 `.env` 或 compose 里设过，现在不再起作用，可以删；不删也照常启动。
+- 如果 NAS 的 compose 因为当初的崩溃把 `HTTP_ENABLED` 设成了 `"false"`：只要 Tailscale Funnel 的地址可用，就可以设 `HTTP_ENABLED: "true"` 和 `PUBLIC_BASE_URL: "https://ugreen-nas.tail212e43.ts.net"`，这样 `/pikpak login` 会直接弹出 Mini App，Telegram 媒体也能转存 PikPak。即使地址暂时不可用，现在也只是一条警告，不会再崩溃循环。**改之前先看一眼 NAS 上现在的值，不要盲改。**
+
+### 用户需要在 Telegram 里做什么
+
+**无。** 下面是 Cowork 核验时可以顺手做的。
+
+### 给 Cowork 的核验手段
+
+1. **A1 假警告消失**：`docker compose logs bot --since 10m | grep -iE "no admin configured|no user session configured"`，应当没有输出。（如果确实没有读取账号，会有另一条 `no user session yet: ... /setup telegram`，那条是真话。）
+2. **verify 读得到数据库**：`docker compose exec bot python -m tgmd.verify`。期望 `access control` 为 ✓，`user session` 为 ✓ 且写着 `from an in-chat login`。`http server` 一行可能提示端口被占用，因为 bot 本身在跑，这是预期的。
+3. **B10**：在任意群里发 `/pikpak login`，应收到「请私聊我来连接 PikPak」。
+4. **A5**：私聊发 `/pikpak login`。有 HTTPS 地址时应弹出「🔐 连接 PikPak」按钮（Mini App）；没有时应提示用 `/setup pikpak`。
+5. **B12**：私聊发 `/setup`，「上传缓存」一行若未配置，应提示在频道里发 `/cache`，而不是去设 `CACHE_CHAT_ID`。
+6. **B2**：`/mode local` 后转发一个文件名含 `&` 的文件（或让它下载一个），最后的状态消息应正常显示「saved to …」，而不是停在下载中。
+
+### 怎么回滚
+
+回到阶段 0 的镜像 `sha-2424ad2`（阶段 0 之后的 `fdd04ae` 只改了文档，没有构建镜像）：
+
+```bash
+docker pull ghcr.io/asukamadoka/tg_media_down_bot:sha-2424ad2
+# 把 compose 里的 image 临时改成该标签，再 up -d bot
+```
+
+数据库没有迁移，所以前后两个版本可以用同一个 `/data` 来回切换。
+
+### 待决问题
+
+1. **`PIKPAK_LOGIN_LINK_TTL` 永久保留为空操作，还是在某个大版本里删掉？** 红线 2 要求现有变量名不动，所以本阶段只是不再使用它。建议永久保留：一行解析代码的成本远低于让某个旧部署起不来。
+2. **`/setup pikpak` 对所有已授权用户开放了（B11）。** 这是我按一致性做的决定：Mini App 本来就允许任何已授权用户连接**自己的** PikPak，聊天内登录写入的也只是发起人自己的令牌。如果主人希望聊天内登录仍只限管理员，改回来只需要一行（`handlers.py` `on_setup()`），测试 `test_any_allowed_user_may_connect_their_own_pikpak` 也要随之改。
+3. **`ruff format` 仍不强制（C4）。** 阶段 2–4 会重写大半文件，建议阶段 4 结束后再决定。
+4. **`resolver.py`（覆盖率 19%）与 `handlers.py`（36%）的测试没有补齐。** 前者阶段 2a 转发快路会改，后者阶段 3 命令面会变，届时连同新代码一起补。

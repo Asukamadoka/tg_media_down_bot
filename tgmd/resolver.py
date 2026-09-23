@@ -24,7 +24,6 @@ from telethon.errors import (
     UsernameInvalidError,
     UsernameNotOccupiedError,
 )
-from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import (
     CheckChatInviteRequest,
     GetDiscussionMessageRequest,
@@ -254,10 +253,3 @@ class Resolver:
             messages = await self._expand_album(entity, messages[0])
 
         return entity, messages
-
-    async def join_public(self, username: str) -> None:
-        """Join a public chat with the reading account."""
-        try:
-            await self._client(JoinChannelRequest(username))
-        except Exception as exc:
-            raise ResolveError(f"could not join @{username}: {exc}") from exc

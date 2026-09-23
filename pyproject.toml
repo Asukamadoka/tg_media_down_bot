@@ -26,13 +26,7 @@ select = [
     "SIM",  # simplifications
     "RUF",  # ruff's own rules, including RUF006 dropped task references
     "SLF",  # private member access, so each deliberate one is marked
-]
-
-ignore = [
-    # (str, Enum) -> StrEnum changes how members format, and that behaviour
-    # already differs between 3.11 and 3.12. It is a semantic change, not a
-    # lint cleanup, so it belongs to the audit (docs/AUDIT.md), not here.
-    "UP042",
+    "BLE",  # blind `except Exception`: each one must say why it is safe
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -41,6 +35,11 @@ ignore = [
 # everywhere else, where a stray full-width character would be a real bug,
 # for example inside a command name.
 "tgmd/i18n.py" = ["RUF001"]
+# A diagnostic tool's job is to turn any failure into a "failed" line rather
+# than crash, so every check there catches broadly by design. See AUDIT.md C2.
+"tgmd/verify.py" = ["BLE001"]
+# Fakes stand in for whatever a real client might raise.
+"tests/*" = ["BLE001"]
 
 # pytest is configured in pytest.ini. There is deliberately no
 # [tool.pytest.ini_options] table here, so there is one source of truth.

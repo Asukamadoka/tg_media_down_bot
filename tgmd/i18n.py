@@ -194,14 +194,13 @@ CATALOG: dict[str, dict[str, str]] = {
                         ),
         'mode.unknown': 'Unknown mode {choice}. Pick one of: {modes}',
         'mode.pikpak_none': (
-                                'No PikPak account is connected yet. Send <code>/pikpak log'
-                                'in</code> first and I will send you a login link.'
-                            ),
+            'No PikPak account is connected yet. Send '
+            '<code>/pikpak login</code> to connect yours.'
+        ),
         'mode.pikpak_unavailable': (
-                                       'PikPak is not available on this server. Ask the ope'
-                                       'rator to set PIKPAK_USERNAME and PIKPAK_PASSWORD, o'
-                                       'r to enable login links.'
-                                   ),
+            'PikPak is not available on this server. Ask the operator to set '
+            'PIKPAK_USERNAME and PIKPAK_PASSWORD, or to allow per-user logins.'
+        ),
         'mode.set': 'Mode set to <b>{choice}</b>.',
         'mode.name.telegram': 'telegram',
         'mode.name.local': 'local',
@@ -244,15 +243,10 @@ CATALOG: dict[str, dict[str, str]] = {
                                     'access token. Only the token is stored.{replacing}'
                                 ),
         'pikpak.login.button_miniapp': '🔐 Connect PikPak',
-        'pikpak.login.link': (
-                                 '<b>Connect your PikPak account</b>\n'
-                                 '\n'
-                                 'The link works once and expires in {ttl}. It opens a page'
-                                 ' served by this bot, not by PikPak. Your password is used'
-                                 ' once to get an access token, and only the token is '
-                                 'stored.{replacing}'
-                             ),
-        'pikpak.login.button_link': '🔐 Open the login page',
+        'pikpak.login.private_only': (
+            'Message me directly to connect PikPak. Telegram only opens the '
+            'login form in a private chat, and a password does not belong in a group.'
+        ),
         'pikpak.login.chat_fallback': (
                                           '<b>Connect your PikPak account</b>\n'
                                           '\n'
@@ -260,7 +254,7 @@ CATALOG: dict[str, dict[str, str]] = {
                                           'or your email and password here, deleting each m'
                                           'essage as I read it.\n'
                                           '\n'
-                                          '<i>A web form is not available: '
+                                          '<i>The in-Telegram form is not available: '
                                           '{reason}</i>{replacing}'
                                       ),
         'pikpak.logout.only_admin_shared': 'Only an admin can clear the shared session.',
@@ -276,13 +270,9 @@ CATALOG: dict[str, dict[str, str]] = {
                               ),
         'pikpak.dir.set': 'PikPak folder set to <code>{folder}</code>.',
         'pikpak.status.none': (
-                                  'No PikPak account is connected. Send <code>/pikpak login'
-                                  '</code> and I will send you a login link.'
-                              ),
-        'pikpak.status.unavailable': (
-                                         'PikPak is not available on this server.\n'
-                                         'Login links: {reason}'
-                                     ),
+            'No PikPak account is connected. Send '
+            '<code>/pikpak login</code> to connect yours.'
+        ),
         'pikpak.status.account_own': 'your own account',
         'pikpak.status.account_shared': 'the shared account ({username})',
         'pikpak.status.transfers_full': (
@@ -354,7 +344,7 @@ CATALOG: dict[str, dict[str, str]] = {
         'setup.unavailable': 'Setup is not available in this build.',
         'setup.cancelled': 'Setup cancelled.',
         'setup.nothing_to_cancel': 'Nothing to cancel.',
-        'setup.only_admin': 'Only an admin can run setup.',
+        'setup.only_admin': 'Only an admin can sign in a reading account.',
         'setup.footer': (
                             '\n'
                             '\n'
@@ -534,14 +524,13 @@ CATALOG: dict[str, dict[str, str]] = {
                         ),
         'mode.unknown': '不认识的模式 {choice}。只能是以下之一：{modes}',
         'mode.pikpak_none': (
-                                '还没有连接 PikPak 账号。先发送 <code>/pikpak '
-                                'login</code>，我会给你一个登录链接。'
-                            ),
+            '还没有连接 PikPak 账号。'
+            '发送 <code>/pikpak login</code> 连接你自己的账号。'
+        ),
         'mode.pikpak_unavailable': (
-                                       '这台服务器上 PikPak 不可用。'
-                                       '请运维配置 PIKPAK_USERNAME 和 '
-                                       'PIKPAK_PASSWORD，或者启用登录链接。'
-                                   ),
+            '这台服务器上 PikPak 不可用。请运维配置 PIKPAK_USERNAME 和 '
+            'PIKPAK_PASSWORD，或者允许用户自行登录。'
+        ),
         'mode.set': '模式已设为 <b>{choice}</b>。',
         'mode.name.telegram': 'telegram（传回给你）',
         'mode.name.local': 'local（留在服务器）',
@@ -585,15 +574,10 @@ CATALOG: dict[str, dict[str, str]] = {
                                     '{replacing}'
                                 ),
         'pikpak.login.button_miniapp': '🔐 连接 PikPak',
-        'pikpak.login.link': (
-                                 '<b>连接你的 PikPak 账号</b>\n'
-                                 '\n'
-                                 '这个链接只能用一次，{ttl} 后失效。'
-                                 '它打开的是这个机器人自己提供的页面，不是 PikPak '
-                                 '的页面。你的密码只用一次来换取访问令牌，'
-                                 '而且只有令牌会被保存。{replacing}'
-                             ),
-        'pikpak.login.button_link': '🔐 打开登录页面',
+        'pikpak.login.private_only': (
+            '请私聊我来连接 PikPak。'
+            'Telegram 只在私聊里打开登录表单，密码也不该发在群里。'
+        ),
         'pikpak.login.chat_fallback': (
                                           '<b>连接你的 PikPak 账号</b>\n'
                                           '\n'
@@ -601,7 +585,7 @@ CATALOG: dict[str, dict[str, str]] = {
                                           'pikpak</code>，我会在这里问你的邮箱和密码，'
                                           '每条消息读完立即删除。\n'
                                           '\n'
-                                          '<i>网页表单不可用：{reason}</i>{replacing}'
+                                          '<i>Telegram 内的表单不可用：{reason}</i>{replacing}'
                                       ),
         'pikpak.logout.only_admin_shared': '只有管理员能清除共享会话。',
         'pikpak.logout.shared_cleared': '共享的 PikPak 会话已清除。',
@@ -613,13 +597,9 @@ CATALOG: dict[str, dict[str, str]] = {
                               ),
         'pikpak.dir.set': 'PikPak 文件夹已设为 <code>{folder}</code>。',
         'pikpak.status.none': (
-                                  '还没有连接 PikPak 账号。发送 <code>/pikpak '
-                                  'login</code>，我会给你一个登录链接。'
-                              ),
-        'pikpak.status.unavailable': (
-                                         '这台服务器上 PikPak 不可用。\n'
-                                         '登录链接：{reason}'
-                                     ),
+            '还没有连接 PikPak 账号。'
+            '发送 <code>/pikpak login</code> 连接你自己的账号。'
+        ),
         'pikpak.status.account_own': '你自己的账号',
         'pikpak.status.account_shared': '共享账号（{username}）',
         'pikpak.status.transfers_full': '磁力链接、直链、分享链接，以及 Telegram 媒体',
@@ -687,7 +667,7 @@ CATALOG: dict[str, dict[str, str]] = {
         'setup.unavailable': '这个构建里没有配置向导。',
         'setup.cancelled': '配置已取消。',
         'setup.nothing_to_cancel': '没有可取消的操作。',
-        'setup.only_admin': '只有管理员能运行配置向导。',
+        'setup.only_admin': '只有管理员能登录读取账号。',
         'setup.footer': (
                             '\n'
                             '\n'

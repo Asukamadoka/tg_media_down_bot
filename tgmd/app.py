@@ -79,8 +79,9 @@ class Application:
             self.pikpak,
             config.pikpak,
             config.http,
-            secret,
             bot_token=config.telegram.bot_token,
+            # Bound, not copied: a later /claim appends to the same list.
+            is_allowed=config.access.is_allowed,
         )
         self.file_server = FileServer(config.http, secret, portal=self.portal)
         await self.file_server.start()
@@ -144,7 +145,7 @@ class Application:
 
         log.info(
             "ready — mode %s, %d worker(s), cache chat %s, shared PikPak %s, "
-            "PikPak login links %s",
+            "PikPak Mini App %s",
             config.delivery.default_mode,
             config.download.concurrent,
             config.delivery.cache_chat_id or "disabled",

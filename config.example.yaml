@@ -47,11 +47,11 @@ pikpak:
   folder: /TelegramMedia    # created on demand
   # How long to poll an offline-download task before replying "still running".
   task_timeout: 600
-  # Let users connect their own account with /pikpak login. The bot sends a
-  # one-time link to a page it serves itself; only the token is stored. Needs
-  # http.public_base_url to be HTTPS.
+  # Let users connect their own account: /pikpak login opens a Mini App when
+  # http.public_base_url is HTTPS, and /setup pikpak works in any private
+  # chat. Only the token is stored, never the password.
   allow_user_login: true
-  login_link_ttl: 900       # how long a login link stays valid, seconds
+  # login_link_ttl is no longer used (the one-time link was removed).
 
 http:
   # Serves two things: files for PikPak to fetch, and the PikPak login page.

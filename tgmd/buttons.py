@@ -11,7 +11,6 @@ upgrade that moves it again breaks a test rather than the first button press.
 from __future__ import annotations
 
 from telethon.tl.types import (
-    InlineButtonTypeUrl,
     InlineButtonTypeWebView,
     KeyboardInlineButton,
     KeyboardInlineButtonRow,
@@ -30,41 +29,5 @@ def webview_button(text: str, url: str) -> ReplyInlineMarkup:
             KeyboardInlineButtonRow(
                 [KeyboardInlineButton(text=text, type=InlineButtonTypeWebView(url=url))]
             )
-        ]
-    )
-
-
-def url_button(text: str, url: str) -> ReplyInlineMarkup:
-    """A button that opens ``url`` in the viewer's browser."""
-    return ReplyInlineMarkup(
-        [
-            KeyboardInlineButtonRow(
-                [KeyboardInlineButton(text=text, type=InlineButtonTypeUrl(url=url))]
-            )
-        ]
-    )
-
-
-def rows(*buttons: tuple[str, str, bool]) -> ReplyInlineMarkup:
-    """Stack several buttons vertically.
-
-    Each entry is ``(text, url, as_webview)``; a web-view entry opens inside
-    Telegram, a plain one opens the browser.
-    """
-    return ReplyInlineMarkup(
-        [
-            KeyboardInlineButtonRow(
-                [
-                    KeyboardInlineButton(
-                        text=text,
-                        type=(
-                            InlineButtonTypeWebView(url=url)
-                            if as_webview
-                            else InlineButtonTypeUrl(url=url)
-                        ),
-                    )
-                ]
-            )
-            for text, url, as_webview in buttons
         ]
     )

@@ -128,21 +128,44 @@ class TestValidation:
         with pytest.raises(ConfigError, match="at least 1"):
             config.validate()
 
-    def test_http_without_a_public_url_is_fatal(self, tmp_path):
+    def test_http_without_a_public_url_is_a_warning_not_a_crash(self, tmp_path):
+        # It used to raise, and the container restarted forever. No public
+        # address yet is a normal state for a NAS, so only the one capability
+        # that needs it is switched off.
         config = load_config(
             write_config(tmp_path, MINIMAL_YAML + "\nhttp:\n  enabled: true\n")
         )
-        with pytest.raises(ConfigError, match="public_base_url"):
-            config.validate()
+        warnings = config.validate()
+        assert any("Telegram-to-PikPak transfers are off" in w for w in warnings)
+        assert not config.http.usable
 
-    def test_no_admin_is_a_warning_that_points_at_claim(self, tmp_path):
-        # Not fatal: an unclaimed bot is a normal bootstrap state now, so the
-        # warning has to explain the way out rather than just the symptom.
+    def test_the_http_problem_is_reported_once(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PIKPAK_USERNAME", "a@b.c")
+        monkeypatch.setenv("PIKPAK_PASSWORD", "secret")
+        config = load_config(
+            write_config(tmp_path, MINIMAL_YAML + "\nhttp:\n  enabled: true\n")
+        )
+        about_http = [w for w in config.validate() if "Telegram-to-PikPak" in w]
+        assert len(about_http) == 1
+
+    def test_runtime_state_is_not_reported_here(self, tmp_path):
+        # Whether there is an admin or a reading account is decided by /claim
+        # and /setup telegram, which store it in the database. validate() runs
+        # before that is read, so a warning from it would be wrong every time
+        # after either was done.
         body = MINIMAL_YAML.replace("admin_user_ids: [42]", "admin_user_ids: []")
         config = load_config(write_config(tmp_path, body))
-        warnings = config.validate()
-        assert any("/claim" in warning for warning in warnings)
-        assert any("claim code" in warning for warning in warnings)
+        assert not config.telegram.user_session
+        warnings = " ".join(config.validate())
+        assert "admin" not in warnings
+        assert "user session" not in warnings
+
+    def test_the_retired_login_link_ttl_still_parses(self, tmp_path, monkeypatch):
+        # The link it timed is gone; an old compose that sets it must still start.
+        monkeypatch.setenv("PIKPAK_LOGIN_LINK_TTL", "300")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        config.validate()
+        assert config.pikpak.login_link_ttl == 300
 
     def test_open_access_is_a_warning(self, tmp_path):
         config = load_config(

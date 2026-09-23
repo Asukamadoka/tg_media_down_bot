@@ -201,7 +201,7 @@ class TestExtractLinks:
         assert len(bundle.magnets) == 1
         assert bundle.pikpak_shares == ["https://mypikpak.com/s/VO8BcRbShare"]
         assert bundle.direct_urls == ["https://example.com/video.mp4"]
-        assert bundle.total == 4
+        assert bundle.actionable
 
     def test_duplicate_links_are_collapsed(self):
         bundle = extract_links("https://t.me/durov/1 https://t.me/durov/1")
@@ -215,15 +215,17 @@ class TestExtractLinks:
         bundle = extract_links("https://t.me/durov")
         assert not bundle.messages
         assert bundle.errors and "no message id" in bundle.errors[0]
+        # Errors alone leave nothing to queue.
+        assert not bundle.actionable
 
     def test_plain_text_yields_nothing(self):
         bundle = extract_links("hello there")
-        assert not bundle
-        assert bundle.total == 0
+        assert not bundle.actionable
+        assert not bundle.errors
 
-    def test_range_counts_every_message(self):
+    def test_range_expands_to_every_message(self):
         bundle = extract_links("https://t.me/durov/1-5")
-        assert bundle.total == 5
+        assert bundle.messages[0].ids == (1, 2, 3, 4, 5)
 
 
 class TestMessageRefHelpers:
@@ -234,10 +236,3 @@ class TestMessageRefHelpers:
     def test_describe_private_range(self):
         ref = parse_message_link("https://t.me/c/99/10-12")
         assert ref is not None and ref.describe() == "c/99/10-12"
-
-    def test_with_id_narrows_the_reference(self):
-        ref = parse_message_link("https://t.me/durov/1-3")
-        assert ref is not None
-        narrowed = ref.with_id(2)
-        assert narrowed.ids == (2,)
-        assert narrowed.chat == ref.chat

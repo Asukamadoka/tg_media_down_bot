@@ -121,18 +121,6 @@ class MessageRef:
         """True for invite links that do not point at any message."""
         return not self.ids and self.invite_hash is not None
 
-    def with_id(self, message_id: int) -> MessageRef:
-        """Return a copy narrowed to a single message id."""
-        return MessageRef(
-            chat=self.chat,
-            ids=(message_id,),
-            topic_id=self.topic_id,
-            comment_id=self.comment_id,
-            invite_hash=self.invite_hash,
-            single=self.single,
-            raw=self.raw,
-        )
-
     def describe(self) -> str:
         """Short human label, used in progress and log messages."""
         chat = f"c/{self.chat}" if self.is_private else f"@{self.chat}"
@@ -153,18 +141,10 @@ class LinkBundle:
     direct_urls: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
-    def __bool__(self) -> bool:
-        return bool(self.messages or self.magnets or self.pikpak_shares or self.direct_urls)
-
     @property
-    def total(self) -> int:
-        """Number of actionable items, counting each message id separately."""
-        return (
-            sum(max(len(ref.ids), 1) for ref in self.messages)
-            + len(self.magnets)
-            + len(self.pikpak_shares)
-            + len(self.direct_urls)
-        )
+    def actionable(self) -> bool:
+        """True when there is something to queue. Errors alone do not count."""
+        return bool(self.messages or self.magnets or self.pikpak_shares or self.direct_urls)
 
 
 def normalize_chat_id(value: str | int) -> int:
