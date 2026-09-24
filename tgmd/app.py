@@ -30,6 +30,7 @@ from .setup import SetupWizard, stored_user_session
 from .tasks import JobQueue
 from .webserver import FileServer
 from .wms import WmsInBot
+from .wms_panel import WmsPanel
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ class Application:
         self.user = None
         self.route: MediaRoute | None = None
         self.wms: WmsInBot | None = None
+        self.wms_panel: WmsPanel | None = None
         self._stopping = asyncio.Event()
 
     async def start(self) -> None:
@@ -88,7 +90,13 @@ class Application:
             # Bound, not copied: a later /claim appends to the same list.
             is_allowed=config.access.is_allowed,
         )
-        self.file_server = FileServer(config.http, secret, portal=self.portal)
+        # The warehouse runs on the same PikPak service; its admin panel is
+        # served next to the login Mini App (WMS_ENABLED, docs/wms/).
+        self.wms = WmsInBot(config, self.pikpak)
+        self.wms_panel = WmsPanel(config, self.wms)
+        self.file_server = FileServer(
+            config.http, secret, portal=self.portal, routes=[self.wms_panel]
+        )
         await self.file_server.start()
 
         # A session added by a previous in-chat login is picked up here, so
@@ -144,10 +152,9 @@ class Application:
             has_user_client=lambda: self.user is not None,
         )
         self.handlers.attach_wizard(self.wizard)
+        self.handlers.attach_wms(self.wms, self.wms_panel)
         self.handlers.register()
 
-        # The warehouse runs on the PikPak account connected above (WMS_ENABLED).
-        self.wms = WmsInBot(config, self.pikpak)
         await self.wms.start()
 
         # Write the command menu and profile text ourselves, so nobody has to

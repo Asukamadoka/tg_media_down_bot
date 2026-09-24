@@ -22,9 +22,9 @@ import sys
 from dotenv import load_dotenv
 from pikpakapi import PikPakApi
 
-from pikpak_wms.ops.embed import AccountUnavailable, EmbeddedWms, run_command
+from pikpak_wms.ops.embed import AccountUnavailable, EmbeddedWms, run_command, set_language
 
-from . import bootstrap
+from . import bootstrap, i18n
 from .config import Config, load_config
 from .db import Database
 from .pikpak import PikPakError, PikPakService
@@ -69,6 +69,9 @@ class WmsInBot:
     async def start(self) -> None:
         if not self.config.wms.enabled:
             return
+        # WMS reads the environment for its language; the bot's may come
+        # from config.yaml instead, and both must speak the same one.
+        set_language(i18n.language())
         try:
             self.embedded = EmbeddedWms(provider_for(self.config, self.pikpak))
             await self.embedded.start()
