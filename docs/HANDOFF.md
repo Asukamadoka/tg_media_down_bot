@@ -627,3 +627,82 @@ wms events --raw --limit 20         # 贴样本（见待决问题 2）
 2. **`events` 接口样本**：请在网盘里新增、改名、移动、删除各做一次，然后跑 `wms events --raw --limit 20`，把输出里的链接和缩略图地址去掉后贴到这里。拿到样本之后，再决定是否实现基于事件的增量盘点（`EXTRAS.md` §5）。
 3. **批量改名的风控阈值**：上面实测的计划里，改名占了 101 个请求。建议第一次用 `--limit 20` 执行，然后逐步加大，看 PikPak 是否返回「操作频繁」。一旦返回，apply 会停下并记住位置，重跑同一条命令即可继续。
 4. **M1 的待决问题 1（目录时间戳是否向上传播）依然有效**。M2 的定时 organize 在出计划前会先做增量盘点；如果时间戳不传播，增量盘点可能看不到新文件，要靠每天的 `stocktake-full` 兜底。
+
+## 阶段 3 · WMS M3：同一个镜像、同一个账号、同一个卷
+
+### 这一阶段做了什么
+
+- **WMS 用 bot 已连接的 PikPak 账号**，不需要第二次登录，也不需要在 `.env` 里放密码。用哪个账号：
+  1. `WMS_ACCOUNT`：一个 Telegram 用户 id；或写 `shared`，固定用 `.env` 里的共享账号；
+  2. 否则用第一个自己连接了 PikPak（Mini App 或聊天内登录）的 admin；
+  3. 否则用 `.env` 里的共享账号。
+  - 账号是**每次调用时现选**的，所以 bot 运行中 admin 刚连上账号，WMS 下一次就会用上。
+  - 用的就是 bot 数据库里的 token，没有另存一份。token 刷新后照旧写回 bot 的库。
+- **`WMS_ENABLED=true`**：bot 启动时顺带启动 WMS 调度器，按 `wms.yaml` 里的 `schedule.jobs` 定时跑。
+  - 默认关闭，旧 compose 一字不改也照常启动（红线 2）。
+  - WMS 配置写错时只记一条错误日志，**bot 照常启动**（有测试）。
+  - 停止 bot 时调度器一起停。
+- **镜像里有 `wms` 命令**：`docker compose run --rm bot wms <命令>`，通过 `python -m tgmd.wms` 用 bot 的账号运行 M1、M2 的全部 CLI 命令。
+  - `wms doctor` 的「凭据」一行会写「bot 已连接的 PikPak 账号」。
+  - 没有可用账号时，给出一句说明并以退出码 1 结束。
+- **配置、规则、索引都在数据卷上**：
+  - 不设 `WMS_CONFIG` / `WMS_RULES` 时，先找 `$DATA_DIR/wms.yaml` / `$DATA_DIR/rules.yaml`（容器里是 `/data/db/`，也就是宿主机的 `./data/db/`），找不到才用 `config/`；
+  - 索引与审计是 `/data/db/wms.sqlite3`。
+  - 所以重建镜像、重启容器，token、索引、计划、审计、规则都不丢。
+- **边界**：tgmd 只 import `pikpak_wms.ops`，有 AST 扫描测试。入口是新的 `pikpak_wms/ops/embed.py`，由它再调用调度器和 CLI。
+- **顺手修的 M1 bug**：CLI 的 `main()` 在非 standalone 模式下丢了 click 返回的退出码，出错的命令也以 0 结束。CliRunner 测的是 typer app 本身，所以没有测出来；换成 `python -m tgmd.wms` 的测试后才暴露。
+
+### 验收证据
+
+在本环境用真实 Docker 构建了镜像。为了让 pip 信任本沙箱的 HTTPS 代理，构建用的是临时 Dockerfile，只多加一张 CA 证书，仓库里的 Dockerfile 没改。实测结果：
+
+- `docker run --rm IMAGE wms version` → `pikpak_wms 0.2.0`。`/usr/local/bin/wms` 就是那两行 shim。
+- 带卷 `-v m3data:/data` 跑 `wms doctor`：生成了 `/data/db/wms.sqlite3`，属主 `tgmd`；换一个新容器再挂同一个卷，文件还在。
+- 在没有任何 PikPak 账号的容器里跑 `wms quota`：输出「WMS has no PikPak account to use: …」，退出码 1。
+- **镜像体积（M1 待决问题 2 的答案）**：本地构建阶段 2e（`b067192`）与本阶段的镜像，解压后分别是 225 MB 和 267 MB，**WMS 带来约 42 MB**；按压缩后大小算是 52.5 MB 和 61.5 MB，**约 9 MB**，也就是 NAS 实际要多拉取的量。
+
+测试：新增 19 个（`tests/test_wms_m3.py`），全套 868 → 887，Python 3.11 与 3.12 均全绿；ruff 零告警。其中两个测试直接对应「重启不丢」：
+
+- **token**：bot 数据库里存的 token，关库、重开（模拟重启）之后，WMS 拿到的客户端用的就是它；
+- **索引**：`wms stocktake` 之后，另起一次 `wms ls` 直接读卷上的索引，不向 PikPak 发请求。
+
+### NAS 上要改什么
+
+**默认什么都不用改**，这一版的行为和上一版相同。想用 WMS 时按下面的步骤来。
+
+1. `docker compose pull && docker compose up -d`，更新镜像。
+2. 把配置和规则放到数据卷上，文件名要对（宿主机路径就是 compose 里 `./data` 挂载的那个目录）：
+
+   ```bash
+   docker compose run --rm bot sh -c 'cp config/wms.example.yaml /data/db/wms.yaml && cp config/rules.example.yaml /data/db/rules.yaml'
+   ```
+
+   然后在宿主机上编辑 `./data/db/rules.yaml`，把规则改成你要的目录结构。
+3. 先手动试（此时 bot 不需要改任何环境变量）：
+
+   ```bash
+   docker compose run --rm bot wms doctor         # 凭据一行应为「bot 已连接的 PikPak 账号」
+   docker compose run --rm bot wms stocktake --full
+   docker compose run --rm bot wms stocktake --verify
+   docker compose run --rm bot wms organize       # 只出计划
+   ```
+
+4. 确认计划没问题之后，想让它定时跑，就在 compose 的 `environment` 里取消注释 `WMS_ENABLED: "true"`，然后 `docker compose up -d bot`。
+   - 日志里会出现 `WMS started: config /data/db/wms.yaml, database /data/db/wms.sqlite3, N job(s) scheduled`。
+   - `wms.yaml` 示例里 organize / cleanup 都是 `apply: false`，也就是只存计划等确认；定时生成的计划用 `wms plans` 查看，用 `wms apply <号>` 执行。
+
+`docker compose run --rm bot wms ...` 和运行中的 bot 同时访问同一个 SQLite 没有问题（WAL 模式）。但**不要在 bot 开着 `WMS_ENABLED` 的同时再手动 `wms apply` 同一个计划**：两边会各执行一部分。已执行过的动作会被跳过，结果仍然正确，只是多花请求。
+
+### 用户需要在 Telegram 里做什么
+
+无。WMS 的 bot 命令（`/wms`）在 M5。
+
+### 怎么回滚
+
+- 只想关掉 WMS：去掉 `WMS_ENABLED` 或设为 `false`，重启 bot。
+- 回滚镜像：回到 M2 的 `sha-12009ef`。`/data/db/wms.*` 可以留着，旧版本不会读它们。
+
+### 待决问题
+
+1. **管理哪个账号**：默认是「第一个连了 PikPak 的 admin」，用户在 Mini App 里连的就是自己的主账号时这是对的。如果要管 `.env` 里的共享账号，设 `WMS_ACCOUNT=shared`。请用户确认要管哪一个。
+2. M1、M2 的待决问题（目录时间戳是否传播、`events` 样本、分享链接转存后文件落在哪、批量改名的风控阈值）依然有效。现在不需要临时密码就能在 NAS 上实测了，命令见上面第 3 步和 M2 一节。

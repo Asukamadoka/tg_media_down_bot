@@ -141,6 +141,7 @@ CATALOG: dict[str, dict[str, str]] = {
         "error.not_indexed": "{path} is not a folder in the index; run wms stocktake first.",
         "error.no_folder": "{path} does not exist.",
         "error.no_outbound": "No outbound destination is configured.",
+        "error.no_account": "WMS has no PikPak account to use: {detail}",
         # ---- inbound / outbound / jobs
         "inbound.unknown": "Not a magnet, URL or PikPak share link: {source}",
         "inbound.share_unusable": "The share link is not usable (status {status}).",
@@ -181,6 +182,7 @@ CATALOG: dict[str, dict[str, str]] = {
         "cli.doctor.credentials": "Credentials",
         "cli.doctor.credentials_env": "in the environment",
         "cli.doctor.credentials_token": "saved token",
+        "cli.doctor.credentials_bot": "the bot's connected PikPak account",
         "cli.doctor.credentials_none": (
             "none: set PIKPAK_USERNAME and PIKPAK_PASSWORD, or PIKPAK_ENCODED_TOKEN"
         ),
@@ -305,6 +307,7 @@ CATALOG: dict[str, dict[str, str]] = {
         "error.not_indexed": "本地索引里没有 {path} 这个目录，请先运行 wms stocktake。",
         "error.no_folder": "{path} 不存在。",
         "error.no_outbound": "没有配置出库目的地。",
+        "error.no_account": "WMS 没有可用的 PikPak 账号：{detail}",
         "inbound.unknown": "不是磁力、URL 或 PikPak 分享链接：{source}",
         "inbound.share_unusable": "分享链接不可用（状态 {status}）。",
         "inbound.share_empty": "分享链接里没有文件。",
@@ -336,6 +339,7 @@ CATALOG: dict[str, dict[str, str]] = {
         "cli.doctor.credentials": "凭据",
         "cli.doctor.credentials_env": "来自环境变量",
         "cli.doctor.credentials_token": "已保存的 token",
+        "cli.doctor.credentials_bot": "bot 已连接的 PikPak 账号",
         "cli.doctor.credentials_none": (
             "没有：请设置 PIKPAK_USERNAME 和 PIKPAK_PASSWORD，或 PIKPAK_ENCODED_TOKEN"
         ),

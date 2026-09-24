@@ -267,6 +267,27 @@ the credentials are discarded as soon as they have been exchanged for one.
 `/pikpak` shows which account is in use, the quota and the target folder;
 `/pikpak dir /Movies/Anime` changes where your transfers land.
 
+## PikPak warehouse
+
+The image also carries `pikpak_wms`, a rules-driven organiser for the PikPak
+drive (design and rules in [docs/wms/](docs/wms/)). It works on the account
+the bot already has, so it never asks for a password:
+
+```bash
+docker compose run --rm bot wms stocktake      # copy the folder tree into a local index
+docker compose run --rm bot wms organize       # plan what the rules would change
+docker compose run --rm bot wms apply 1        # carry the plan out
+docker compose run --rm bot wms audit          # every change, with what it was before
+docker compose run --rm bot wms undo 7 --apply # put one back
+```
+
+Every write is a dry run until you say `--apply`; deleting only ever moves to
+the trash (permanent deletion needs a config switch *and* a flag, and no
+scheduled job can do it). Rules and settings go in `/data/db/rules.yaml` and
+`/data/db/wms.yaml`, copied from `config/*.example.yaml`; the index is
+`/data/db/wms.sqlite3`, on the same volume as everything else.
+`WMS_ENABLED=true` runs the jobs listed in `wms.yaml` inside the bot.
+
 ## Commands
 
 | Command | Purpose |
@@ -316,6 +337,8 @@ The settings worth knowing about:
 | `pikpak.allow_user_login` | true | users may connect their own account |
 | `pikpak.login_link_ttl` | 900 | no longer used; still accepted so old configs start |
 | `language` | `en` | which message catalogue replies come from: `en` or `zh` |
+| `wms.enabled` | false | run the PikPak warehouse's scheduled jobs in the bot (`WMS_ENABLED`) |
+| `wms.account` | first admin with an account | whose PikPak drive the warehouse manages (`WMS_ACCOUNT`) |
 
 Template fields: `chat`, `chat_id`, `message_id`, `topic_id`, `name`, `stem`,
 `ext`, `date`. An unknown field is rejected at startup rather than at the
@@ -403,6 +426,7 @@ No credentials are needed.
 | `webserver.py` | signed URLs so PikPak can fetch local files |
 | `config.py` | YAML + environment configuration |
 | `db.py` | SQLite: preferences, upload cache, job history, tokens |
+| `wms.py` | the PikPak warehouse on the bot's account; `wms` in the image |
 
 ## Prior art
 

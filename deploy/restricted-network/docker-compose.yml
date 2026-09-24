@@ -52,6 +52,9 @@ services:
       # 宿主机路径由用户决定，下面是占位；取消注释并同时打开 volumes 里那行。
       # MEDIA_DIR: "/media"
       # LOCAL_URL_PREFIX: "smb://<NAS 地址>/<共享名>/"
+      # PikPak 仓储（WMS）：在 bot 里按 ./data/db/wms.yaml 的 schedule 跑定时任务。
+      # 先 `docker compose run --rm bot wms ...` 手动试过再打开。
+      # WMS_ENABLED: "true"
     volumes:
       - ./data:/data
       # - <NAS 上的媒体共享目录>:/media

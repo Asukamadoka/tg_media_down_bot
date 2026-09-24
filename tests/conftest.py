@@ -52,6 +52,8 @@ ENV_VARS = (
     "TGMD_LANG",
     "BOT_LANG",
     # pikpak_wms
+    "WMS_ENABLED",
+    "WMS_ACCOUNT",
     "WMS_CONFIG",
     "WMS_RULES",
     "WMS_LANG",

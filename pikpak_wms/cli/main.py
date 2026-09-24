@@ -109,7 +109,10 @@ def doctor() -> None:
     )
     table.add_row(t("cli.doctor.config"), config_state)
 
-    if Credentials.from_environment().usable:
+    if state.provider_factory is not None:
+        # Run through the bot (the image's `wms`): its connected account is used.
+        credentials = t("cli.doctor.credentials_bot")
+    elif Credentials.from_environment().usable:
         credentials = t("cli.doctor.credentials_env")
     elif read_token(cfg.store.token_path) is not None:
         credentials = t("cli.doctor.credentials_token")
@@ -578,7 +581,11 @@ def events(
 
 def main(argv: list[str] | None = None) -> int:
     try:
-        app(args=argv if argv is not None else sys.argv[1:], standalone_mode=False)
+        # Without standalone mode click *returns* an Exit's code instead of
+        # raising it; dropping it made every failing command exit 0.
+        code = app(args=argv if argv is not None else sys.argv[1:], standalone_mode=False)
+        if isinstance(code, int):
+            return code
     except typer.Exit as exc:
         return exc.exit_code
     except SystemExit as exc:  # typer/click usage errors

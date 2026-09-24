@@ -63,4 +63,10 @@ http:
   public_base_url: ""       # e.g. https://media.example.com — HTTPS for logins
   url_ttl: 3600             # signed file URL lifetime, seconds
 
+wms:
+  # The PikPak warehouse (docs/wms/): run its scheduled jobs inside the bot.
+  # Its own settings are /data/db/wms.yaml and /data/db/rules.yaml.
+  enabled: false
+  # account: 123456789      # whose drive; default: first admin with an account
+
 log_level: INFO
