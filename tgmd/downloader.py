@@ -7,7 +7,7 @@ import logging
 import mimetypes
 import shutil
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +44,10 @@ ProgressCallback = Callable[[int, int], Awaitable[None] | None]
 _DISK_HEADROOM = 256 * 1024 * 1024
 
 _MAX_ATTEMPTS = 3
+
+# Streaming reads in requests of this size, at offsets that are multiples of
+# it. Telethon's largest request, and it satisfies every upload.getFile rule.
+STREAM_CHUNK = 512 * 1024
 _FLOOD_WAIT_CEILING = 300
 
 
@@ -86,6 +90,16 @@ def has_downloadable_media(message) -> bool:
     return isinstance(media, (MessageMediaDocument, MessageMediaPhoto)) or bool(
         getattr(message, "file", None)
     )
+
+
+def can_stream(message) -> bool:
+    """True when a byte range of this message's file can be read on demand.
+
+    Documents, whose size is known up front. Photos come in several sizes
+    and are small anyway; they go through the disk.
+    """
+    document = getattr(message, "document", None)
+    return document is not None and bool(getattr(document, "size", 0))
 
 
 def _guessed_extension(mime_type: str | None, fallback: str = ".bin") -> str:
@@ -377,6 +391,33 @@ class Downloader:
         raise DownloadError(
             f"download failed after {_MAX_ATTEMPTS} attempts: {last_error}"
         )
+
+    async def stream(self, message, start: int, end: int) -> AsyncIterator[bytes]:
+        """Yield bytes ``start`` to ``end`` (inclusive) of the message's file.
+
+        Nothing touches the disk. Telegram serves aligned requests only, so
+        this reads from the aligned offset below ``start`` and trims.
+        """
+        document = message.document
+        aligned = start - start % STREAM_CHUNK
+        skip = start - aligned
+        remaining = end - start + 1
+        chunks = -(-(skip + remaining) // STREAM_CHUNK)  # ceiling division
+        async for chunk in self._client.iter_download(
+            document,
+            offset=aligned,
+            request_size=STREAM_CHUNK,
+            limit=chunks,
+            file_size=document.size,
+        ):
+            if skip:
+                chunk = chunk[skip:]
+                skip = 0
+            if len(chunk) > remaining:
+                chunk = chunk[:remaining]
+            if chunk:
+                remaining -= len(chunk)
+                yield chunk
 
     @staticmethod
     def _wrap_progress(

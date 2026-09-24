@@ -213,6 +213,13 @@ Put a TLS reverse proxy in front of it. File URLs carry an HMAC over the file
 id and an expiry, so only the exact link the bot generated works, and only
 until it expires (`http.url_ttl`, one hour by default).
 
+With `PIKPAK_STREAM=true` the file is never downloaded at all: the URL PikPak
+gets is answered by reading the bytes it asks for straight from Telegram, with
+exact `Content-Length`, `HEAD` and `Range` support for PikPak's parallel
+fetches. Nothing is written to disk. It is off by default until measured on a
+real deployment; photos, whose size is not known up front, always go through
+the disk.
+
 Without this, `/mode pikpak` still works for magnets and URLs and says clearly
 why a Telegram file cannot be transferred.
 

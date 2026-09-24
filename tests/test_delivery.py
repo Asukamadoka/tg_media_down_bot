@@ -60,6 +60,14 @@ class FakeFiles:
         self.usable = usable
         self.live: set[Path] = set()
         self.marked: list[Path] = []
+        self.streams: dict[str, object] = {}
+
+    def publish_stream(self, opener, *, name, size, ttl=None):
+        self.streams["s1"] = (opener, name, size)
+        return "s1", "https://media.example.com/s/x/y"
+
+    def unpublish_stream(self, stream_id):
+        self.streams.pop(stream_id, None)
 
     def publish(self, path, *, name=None, ttl=None):
         self.live.add(path)
@@ -184,3 +192,37 @@ class TestPikPak:
     async def test_a_url_transfer_escapes_the_task_name(self, db):
         result = await make(db).url_to_pikpak("magnet:?xt=urn:btih:abc")
         assert "a &lt;b&gt; &amp; c.iso" in result.summary
+
+
+class TestPikPakStream:
+    """PIKPAK_STREAM: the same hand-off, served from Telegram instead of disk."""
+
+    async def stream(self, db, **pikpak):
+        files = FakeFiles()
+        delivery = make(db, pikpak=FakePikPak(**pikpak), files=files)
+        result = await delivery.stream_to_pikpak(
+            lambda start, end: None, INFO, size=2048, user_id=1
+        )
+        return result, files
+
+    async def test_done_stops_serving_and_keeps_nothing(self, db):
+        result, files = await self.stream(db)
+        assert files.streams == {}
+        assert not result.kept_local
+        assert "saved to PikPak" in result.summary
+
+    async def test_still_running_keeps_serving_until_the_url_expires(self, db):
+        result, files = await self.stream(db, status=DownloadStatus.downloading)
+        assert "s1" in files.streams
+        assert not result.kept_local  # nothing on disk to keep
+
+    async def test_a_pikpak_error_stops_serving(self, db):
+        with pytest.raises(DeliveryError):
+            await self.stream(db, error=PikPakError("quota exceeded"))
+
+    async def test_no_account_is_refused_before_serving(self, db):
+        files = FakeFiles()
+        delivery = make(db, pikpak=FakePikPak(available=False), files=files)
+        with pytest.raises(DeliveryError, match="/pikpak login"):
+            await delivery.stream_to_pikpak(lambda s, e: None, INFO, size=1, user_id=1)
+        assert files.streams == {}

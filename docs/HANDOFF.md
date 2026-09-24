@@ -383,3 +383,58 @@ docker pull ghcr.io/asukamadoka/tg_media_down_bot:sha-2424ad2
 
 1. **媒体目录的宿主机路径**（简报明确要求不猜）。需要用户和 Cowork 确定：NAS 上哪个共享文件夹、SMB 共享名是什么、局域网访问地址（用于 `LOCAL_URL_PREFIX`）。compose 模板里是占位。
 2. **按频道分文件夹是否符合用户习惯。** 默认 `{chat}/{name}`；也可以是按日期（`{date}/{name}`）或全部平铺（`{name}`）。一行配置就能改，需要用户选。
+
+---
+
+## 阶段 2e · 流式与流水线
+
+### 这一阶段做了什么
+
+**PikPak 流式端点（`PIKPAK_STREAM`，默认关闭）**
+
+- 文件服务器新增 `/s/<签名令牌>/<文件名>`。PikPak 请求这个 URL 时，bot **按它要的字节范围直接从 Telegram 读取、原样转发**，不落盘。
+- 支持 PikPak 需要的全部 HTTP 语义：`HEAD`（只回大小，不读 Telegram）、`Range` 单段请求（`bytes=a-b`、`bytes=a-`、`bytes=-n`）、准确的 `Content-Length` 与 `Content-Range`（来自 Telegram 报告的文件大小，不是估计）、越界返回 `416`。多段 Range 按规范可以忽略，回整个文件。
+- 读 Telegram 时对齐到 512 KiB（Telethon 的单次上限，满足 `upload.getFile` 的全部对齐规则），多读的头尾裁掉。只读 PikPak 要的那一段。
+- 每个流同时最多 4 个 PikPak 请求在读（PikPak 可能分段并发拉取；每一段都是用户主账号的一次读取，所以设了上限，超出的排队）。
+- 只对文档生效。照片没有事先可知的单一大小，照旧走落盘；`PIKPAK_STREAM` 关闭时一切照旧（落盘模式保留为回退）。
+- 端到端测试：真实文件服务器 + 真实投递 + 真实 `Downloader.stream`，假的 PikPak 真的去拉这个 URL（先 `HEAD`，再两段并发），拼回来的字节与原文件逐字节相同，磁盘上没有任何文件。
+
+**Telegram clone 路径：保留「下完再传」，不做边下边传。** 理由如下，按简报要求写明：
+
+1. **收益有上限，而且在 NAS 上更小。** 边下边传最多把总耗时缩到接近一半，前提是上传和下载速度相当、且互不抢带宽。NAS 上两者走的是同一条代理出口，互相竞争，实际重叠收益会明显小于一半。
+2. **代价是重写 Telethon 的上传。** 要自己用 `upload.saveBigFilePart` 分片上传，再自己组 `inputFileBig`、媒体属性、缩略图，并处理 `FILE_PART_X_MISSING` 之类的部分失败。这是面向用户的主路径，出错的代价是用户收不到文件。
+3. **这条路径已经很窄了。** 2a 之后，可转发的内容走零字节快路（设了缓存频道时）；2d 之后，`auto` 模式把受限内容留在 NAS。只有「telegram 模式 + 受限内容」还会走 clone，而这部分已经用上了 2b 的并行下载。
+4. 如果以后实测发现 clone 路径仍是大头，再评估；到那时有 2b 的下载日志和 bench 数据可以对照。
+
+**local 路径**：按定义就是落盘，不变。
+
+### NAS 上要改什么
+
+**必须做的：无。** `PIKPAK_STREAM` 默认关闭。
+
+要试流式（前提是 PikPak 能访问到 bot 的公网 HTTPS 地址，即 `HTTP_ENABLED=true` 且 `PUBLIC_BASE_URL` 可用）：在 compose 里设 `PIKPAK_STREAM: "true"`，重启 `bot`。
+
+### 用户需要在 Telegram 里做什么
+
+**无。**
+
+### 给 Cowork 的核验手段
+
+1. 打开 `PIKPAK_STREAM`，`/mode pikpak`，发一个受限频道里几百 MB 的视频链接。
+2. 期望：回复「saved to PikPak …」或「PikPak is still fetching …」；`/data/downloads` 与媒体目录里**都没有**新文件；日志里**没有**这个文件的 `downloaded ...` 行（字节没有落盘，也就不走下载器）。
+3. 和关闭流式时同一个文件对比「从发链接到 PikPak 里出现文件」的总时长，记录两个数字。
+4. 如果 PikPak 那边报错或一直停在「still fetching」：关掉 `PIKPAK_STREAM` 即回到落盘模式，并把 bot 日志里 `/s/` 相关的行贴进待决问题。
+
+### 怎么回滚
+
+- `PIKPAK_STREAM=false`（或不设），重启 `bot`。
+- 整体回滚：镜像 `sha-d0d227d`（阶段 2d）。
+
+### 更正
+
+阶段 2d 的提交信息里写的行数是估计值、写错了。实测是 `tgmd/` 9,060 行、`tests/` 6,805 行（2d 之前是 8,973 / 6,623）。
+
+### 待决问题
+
+1. **流式失败时不会自动回落到落盘。** 回落需要知道「PikPak 拉失败了」，而 PikPak 只会在超时后报 `error`，那时再下载一遍等于总时长翻倍。目前的设计是：流式默认关闭，实测稳定再开；不稳定就整体关掉。如果实测结论是「大多数时候行、偶尔不行」，再考虑做自动回落。
+2. **阶段 2 整体收尾。** 2a–2e 都已交付。三条验收（转发秒到、受限并行落盘的前后数字、DC4 直连前后数字）都需要 Cowork 在 NAS 上实测，命令分别在 2a、2b、2c 三节里。

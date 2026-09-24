@@ -112,6 +112,8 @@ class PikPakConfig:
     password: str = ""
     folder: str = "/TelegramMedia"
     task_timeout: int = 600
+    stream: bool = False
+    """Serve Telegram media to PikPak straight from Telegram, never from disk."""
     allow_user_login: bool = True
     """Whether users may connect their own account with /pikpak login."""
 
@@ -450,6 +452,10 @@ def load_config(path: Path | None = None) -> Config:
         ),
         task_timeout=_env_int(
             "PIKPAK_TASK_TIMEOUT", int(_get(data, "pikpak", "task_timeout", default=600))
+        ),
+        stream=parse_bool(
+            os.environ.get("PIKPAK_STREAM"),
+            parse_bool(_get(data, "pikpak", "stream", default=False)),
         ),
         allow_user_login=parse_bool(
             os.environ.get("PIKPAK_ALLOW_USER_LOGIN"),

@@ -17,11 +17,18 @@ import pytest
 from telethon import TelegramClient
 from telethon.errors import FileMigrateError, FileReferenceExpiredError, FloodWaitError
 from telethon.sessions import StringSession
+from telethon.tl.types import DcOption
 from telethon.tl.types.upload import FileCdnRedirect
 
 from tgmd import parallel
 from tgmd.downloader import DownloadCancelled, Downloader, DownloadError
-from tgmd.parallel import ParallelUnavailable, download_parts, telethon_sources
+from tgmd.parallel import (
+    MediaRoute,
+    ParallelUnavailable,
+    download_parts,
+    media_endpoints,
+    telethon_sources,
+)
 
 PART = 1024  # small parts keep the tests fast; the logic is size-independent
 CONTENT = bytes(range(256)) * 41  # 10,496 bytes: ten full parts and a short one
@@ -453,10 +460,6 @@ class TestDownloaderUsesIt:
 
 
 # ------------------------------------------------ direct media route (2c)
-
-from telethon.tl.types import DcOption  # noqa: E402 - grouped with its tests
-
-from tgmd.parallel import MediaRoute, media_endpoints  # noqa: E402
 
 # The shape of what Cowork measured from the NAS: only dc4's IPv4 media
 # endpoint answered directly.

@@ -19,6 +19,7 @@ from .downloader import (
     Downloader,
     DownloadError,
     RateTracker,
+    can_stream,
     describe_media,
     has_downloadable_media,
 )
@@ -483,6 +484,31 @@ class JobQueue:
             # Restricted content can only be had by downloading it, and then
             # it is watched on the NAS rather than pushed anywhere else.
             mode = "local" if restricted or source is None else "telegram"
+
+        if mode == "pikpak" and self._config.pikpak.stream and can_stream(message):
+            # PIKPAK_STREAM: PikPak reads the bytes from Telegram through the
+            # file server as it asks for them. No download, nothing on disk.
+            await reporter.update(
+                t("job.handing_to_pikpak", prefix=prefix, name=escape_html(info.file_name)),
+                force=True,
+            )
+            result = await self._delivery.stream_to_pikpak(
+                lambda start, end: downloader.stream(message, start, end),
+                info,
+                size=message.document.size,
+                folder=job.pikpak_folder,
+                user_id=job.user_id,
+            )
+            await reporter.update(
+                t(
+                    "job.delivered",
+                    prefix=prefix,
+                    label=escape_html(truncate(info.file_name, 48)),
+                    summary=result.summary,
+                ),
+                force=True,
+            )
+            return
 
         def place(template: str, root: Path) -> Path:
             return root / build_relative_path(
