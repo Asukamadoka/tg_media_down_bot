@@ -11,7 +11,7 @@
 > | M5 | bot 命令族 `/wms`；入库之后自动上架（按规则生成 Plan，默认 dry-run 通知 + 一键确认） |
 > | M6 | 自然语言指令，见 `M6-natural-language.md` |
 >
-> **进度**：M1–M4 已完成（见 `docs/HANDOFF.md` 各节）；M4 的手机端验收等公网 HTTPS 地址。
+> **进度**：M1–M5 已完成（见 `docs/HANDOFF.md` 各节）；M4 的手机端验收等公网 HTTPS 地址。下一步 M6。
 >
 > 另外一并做（先写规格再实现）：按 hash 去重、归档、基于 `events` 的增量盘点、出库推送 aria2、`star` / `share` 动作。下面是原路线图，保留作背景。
 

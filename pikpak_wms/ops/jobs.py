@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass
 
 from ..config import ScheduledJob
+from ..core.errors import NotFoundError
 from ..core.models import ActionType, Plan
 from ..i18n import t
 from ..rules.actions import Deliver
@@ -67,8 +68,14 @@ async def run_job(ctx: Context, job: ScheduledJob, *, deliver: Deliver | None = 
         if not rules:
             return JobResult(job.name, t("job.no_rules", name=job.name))
         # Rules read the index, so bring the part they look at up to date.
-        await stocktake(ctx.client, ctx.store, roots=organize.scopes(rules),
-                        full=False, page_size=cfg.stocktake.page_size)
+        # A scope that does not exist yet (no /Inbox so far) simply has nothing
+        # to organize; it must not fail the job for the other rules.
+        for scope in organize.scopes(rules):
+            try:
+                await stocktake(ctx.client, ctx.store, roots=[scope], full=False,
+                                page_size=cfg.stocktake.page_size)
+            except NotFoundError:
+                log.info("job %s: %s does not exist in the drive yet", job.name, scope)
         plan = await organize.plan_rules(ctx, rules, source=job.name)
         result = await _plan_job(ctx, job, plan, deliver)
     await ctx.store.set_meta(

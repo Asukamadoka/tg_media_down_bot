@@ -11,6 +11,7 @@ upgrade that moves it again breaks a test rather than the first button press.
 from __future__ import annotations
 
 from telethon.tl.types import (
+    InlineButtonTypeCallback,
     InlineButtonTypeWebView,
     KeyboardInlineButton,
     KeyboardInlineButtonRow,
@@ -29,5 +30,30 @@ def webview_button(text: str, url: str) -> ReplyInlineMarkup:
             KeyboardInlineButtonRow(
                 [KeyboardInlineButton(text=text, type=InlineButtonTypeWebView(url=url))]
             )
+        ]
+    )
+
+
+def callback_buttons(rows: list[list[tuple[str, str]]]) -> ReplyInlineMarkup:
+    """Rows of buttons that send ``data`` back to the bot when pressed.
+
+    ``data`` must fit Telegram's 64-byte limit; callers use short ASCII
+    prefixes such as ``wms:apply:12``.
+    """
+    for row in rows:
+        for _text, data in row:
+            if len(data.encode()) > 64:
+                raise ValueError(f"callback data over 64 bytes: {data!r}")
+    return ReplyInlineMarkup(
+        [
+            KeyboardInlineButtonRow(
+                [
+                    KeyboardInlineButton(
+                        text=text, type=InlineButtonTypeCallback(data=data.encode())
+                    )
+                    for text, data in row
+                ]
+            )
+            for row in rows
         ]
     )

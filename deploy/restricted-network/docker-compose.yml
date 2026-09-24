@@ -55,6 +55,10 @@ services:
       # PikPak 仓储（WMS）：在 bot 里按 ./data/db/wms.yaml 的 schedule 跑定时任务。
       # 先 `docker compose run --rm bot wms ...` 手动试过再打开。
       # WMS_ENABLED: "true"
+      # 入库后自动上架：plan（发计划 + 确认按钮，默认）| apply（直接执行）| off
+      # WMS_AUTO_SHELVE: "plan"
+      # 让转存落在规则的 scope 里（示例规则的 scope 是 /Inbox）：
+      # PIKPAK_FOLDER: "/Inbox"
     volumes:
       - ./data:/data
       # - <NAS 上的媒体共享目录>:/media

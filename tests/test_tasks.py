@@ -205,6 +205,7 @@ class Harness:
         # Absent: no forwarder at all. Present: the reading account it uses,
         # None meaning the bot reads for itself.
         forward_with = options.pop("forward_with", _NO_FORWARDER)
+        after_pikpak = options.pop("after_pikpak", None)
         self.files = FakeFileServer()
         self.config = Config(
             download=DownloadConfig(
@@ -240,6 +241,7 @@ class Harness:
                 if forward_with is _NO_FORWARDER
                 else Forwarder(self.bot, self.config, db, reader=lambda: forward_with)
             ),
+            after_pikpak=after_pikpak,
         )
 
     @property

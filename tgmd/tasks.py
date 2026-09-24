@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -92,6 +93,13 @@ class Job:
         return self.state in (JobState.QUEUED, JobState.RUNNING)
 
 
+def saved_to_pikpak(job: Job) -> bool:
+    """True when the job finished with at least one file put into PikPak."""
+    if job.state not in (JobState.DONE, JobState.PARTIAL):
+        return False
+    return job.kind in (JobKind.URL, JobKind.SHARE) or job.mode == "pikpak"
+
+
 class QueueFull(RuntimeError):
     """The user already has as many jobs pending as they are allowed."""
 
@@ -110,6 +118,7 @@ class JobQueue:
         delivery: Delivery,
         pikpak: PikPakService,
         forwarder: Forwarder | None = None,
+        after_pikpak: Callable[[Job], Awaitable[None]] | None = None,
     ) -> None:
         self._config = config
         self._db = db
@@ -120,6 +129,8 @@ class JobQueue:
         self._delivery = delivery
         self._pikpak = pikpak
         self._forwarder = forwarder
+        # Told about every job that put files into PikPak (WMS shelving).
+        self._after_pikpak = after_pikpak
         self._queue: asyncio.Queue[Job] = asyncio.Queue()
         self._jobs: dict[int, Job] = {}
         self._workers: list[asyncio.Task] = []
@@ -236,6 +247,12 @@ class JobQueue:
             # let the worker record the failure.
             await reporter.close(t("error.generic", error=escape_html(str(exc))))
             raise
+        if self._after_pikpak is not None and saved_to_pikpak(job):
+            try:
+                await self._after_pikpak(job)
+            except Exception:
+                # Shelving is a courtesy; the transfer itself already succeeded.
+                log.exception("after-PikPak hook failed for job %d", job.id)
 
     # -------------------------------------------------------- PikPak-only jobs
 

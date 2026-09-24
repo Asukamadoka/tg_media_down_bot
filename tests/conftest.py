@@ -54,6 +54,7 @@ ENV_VARS = (
     # pikpak_wms
     "WMS_ENABLED",
     "WMS_ACCOUNT",
+    "WMS_AUTO_SHELVE",
     "WMS_CONFIG",
     "WMS_RULES",
     "WMS_LANG",

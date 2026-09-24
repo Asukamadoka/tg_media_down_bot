@@ -7,7 +7,7 @@ import logging
 from telethon import TelegramClient, events
 
 from . import bootstrap
-from .buttons import webview_button
+from .buttons import callback_buttons, webview_button
 from .config import MODES, Config
 from .db import Database
 from .downloader import has_downloadable_media
@@ -18,10 +18,19 @@ from .portal import PikPakLoginPortal
 from .tasks import Job, JobKind, JobQueue, QueueFull
 from .utils import escape_html, human_size, parse_id_list, truncate
 from .verify import run_live_checks
+from .wms import WmsError, plan_message
 
 log = logging.getLogger(__name__)
 
 # Every user-facing string now lives in :mod:`tgmd.i18n`.
+
+
+def _plan_id(raw: str) -> int:
+    """A plan or audit id from a command argument; ValueError otherwise."""
+    value = int(raw.lstrip("#"))
+    if value < 1:
+        raise ValueError(raw)
+    return value
 
 
 class BotHandlers:
@@ -81,6 +90,7 @@ class BotHandlers:
         add(self.on_pikpak, events.NewMessage(pattern=r"^/pikpak\b"))
         add(self.on_verify, events.NewMessage(pattern=r"^/verify\b"))
         add(self.on_wms, events.NewMessage(pattern=r"^/wms\b"))
+        add(self.handle_wms_button, events.CallbackQuery(pattern=rb"^wms:"))
         add(self.on_message, events.NewMessage(incoming=True))
 
     # --------------------------------------------------------- access control
@@ -552,16 +562,73 @@ class BotHandlers:
     # ------------------------------------------------------------- dispatching
 
     async def on_wms(self, event) -> None:
-        """The PikPak warehouse: status and the panel button (admins only)."""
-        if not await self._authorized(event):
+        """The PikPak warehouse (admins only): status, stocktake, plan, apply,
+        undo, rules. Every action goes through the same WMS pipeline as the
+        command line and the panel; permanent deletion is not reachable here."""
+        embedded = await self._wms_for(event)
+        if embedded is None:
             return
+        parts = (event.raw_text or "").split()
+        action = parts[1].lower() if len(parts) >= 2 else "status"
+        argument = parts[2] if len(parts) >= 3 else ""
+        try:
+            if action == "status":
+                await self._wms_status(event, embedded)
+            elif action == "stocktake":
+                job = "stocktake-full" if argument.lower() == "full" else "stocktake"
+                await event.reply(t("wms.working"))
+                result = await embedded.run_job(job)
+                await event.reply(
+                    escape_html(result.summary) if result else t("wms.failed_see_log")
+                )
+            elif action == "plan" and argument:
+                plan_id = _plan_id(argument)
+                text, buttons = plan_message(await embedded.plan_lines(plan_id), plan_id)
+                await event.reply(text, parse_mode="html", buttons=buttons)
+            elif action == "plan":
+                await event.reply(t("wms.working"))
+                result = await embedded.run_job("organize", apply=False)
+                if result is None:
+                    await event.reply(t("wms.failed_see_log"))
+                elif result.plan_id is None:
+                    await event.reply(escape_html(result.summary))
+                else:
+                    lines = await embedded.plan_lines(result.plan_id)
+                    text, buttons = plan_message(lines, result.plan_id)
+                    await event.reply(text, parse_mode="html", buttons=buttons)
+            elif action == "apply" and argument:
+                report = await embedded.apply(_plan_id(argument))
+                await event.reply(escape_html(report.summary()))
+            elif action == "undo" and argument:
+                audit_id = _plan_id(argument)
+                outcome = await embedded.undo(audit_id, apply_now=False)
+                await event.reply(
+                    t("wms.undo.preview", what=escape_html(outcome.action.describe())),
+                    parse_mode="html",
+                    buttons=callback_buttons([[(t("wms.button.undo"), f"wms:undo:{audit_id}")]]),
+                )
+            elif action == "rules":
+                await self._wms_rules(event, embedded)
+            else:
+                await event.reply(t("wms.usage"), parse_mode="html")
+        except ValueError:
+            await event.reply(t("wms.bad_id", value=escape_html(argument)))
+        except WmsError as exc:
+            await event.reply(t("wms.error", error=escape_html(exc.display())))
+
+    async def _wms_for(self, event):
+        """The running warehouse, or None after telling the sender why not."""
+        if not await self._authorized(event):
+            return None
         if not self._config.access.is_admin(event.sender_id):
             await event.reply(t("wms.admins_only"))
-            return
+            return None
         embedded = self._wms.embedded if self._wms is not None else None
         if embedded is None:
             await event.reply(t("wms.off"))
-            return
+        return embedded
+
+    async def _wms_status(self, event, embedded) -> None:
         status = await embedded.status()
         text = t(
             "wms.status",
@@ -580,6 +647,55 @@ class BotHandlers:
         if reason:
             text += "\n" + t("wms.panel.unavailable", reason=escape_html(reason))
         await event.reply(text, parse_mode="html")
+
+    async def _wms_rules(self, event, embedded) -> None:
+        rules = embedded.rules()
+        if not rules:
+            await event.reply(t("wms.rules.none"))
+            return
+        lines = [
+            t("wms.rules.line", name=escape_html(rule["name"]), stage=rule["stage"],
+              scope=escape_html(rule["scope"]), actions=", ".join(rule["actions"]),
+              state=t("wms.rules.on") if rule["enabled"] else t("wms.rules.off"))
+            for rule in rules
+        ]
+        header = t("wms.rules.header", path=escape_html(embedded.rules_file))
+        await event.reply(header + "\n" + "\n".join(lines), parse_mode="html")
+
+    async def handle_wms_button(self, event) -> None:
+        """A press on a plan's [apply] / [discard] or an [undo] button."""
+        user_id = event.sender_id
+        if user_id is None or not self._config.access.is_admin(user_id):
+            await event.answer(t("wms.admins_only"), alert=True)
+            return
+        embedded = self._wms.embedded if self._wms is not None else None
+        if embedded is None:
+            await event.answer(t("wms.off"), alert=True)
+            return
+        try:
+            _prefix, verb, raw = event.data.decode().split(":", 2)
+            item = int(raw)
+        except (UnicodeDecodeError, ValueError):
+            await event.answer()
+            return
+        try:
+            if verb == "apply":
+                result = escape_html((await embedded.apply(item)).summary())
+            elif verb == "discard":
+                await embedded.discard(item)
+                result = t("wms.discarded", id=item)
+            elif verb == "undo":
+                outcome = await embedded.undo(item, apply_now=True)
+                result = t("wms.undo.done", what=escape_html(outcome.action.describe()))
+            else:
+                await event.answer()
+                return
+        except WmsError as exc:
+            await event.answer(exc.display()[:190], alert=True)
+            return
+        await event.answer()
+        # The buttons go away with the edit, so a second press cannot repeat it.
+        await event.edit(result, parse_mode="html", buttons=None)
 
     async def on_message(self, event) -> None:
         """Handle anything that is not a command: links, or attached media."""

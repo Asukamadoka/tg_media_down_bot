@@ -22,13 +22,11 @@ from typing import Any
 
 from aiohttp import web
 
-from pikpak_wms.ops.embed import WmsError
-
 from . import i18n
 from .config import Config
 from .i18n import t
 from .miniapp import InitDataError, validate_init_data
-from .wms import WmsInBot
+from .wms import WmsError, WmsInBot
 
 log = logging.getLogger(__name__)
 

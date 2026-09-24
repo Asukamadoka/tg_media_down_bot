@@ -516,6 +516,17 @@ class TestJobs:
         assert w.exists("/Media/Lost/S01/Lost.S01E01.mkv")
         assert applied.report is not None and applied.report.applied == 3
 
+    async def test_a_rule_scope_missing_from_the_drive_does_not_fail_the_job(
+        self, world, tmp_path
+    ):
+        w = world
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text(json.dumps({"rules": [SHOWS]}))  # scope /Inbox
+        w.ctx.config.rules_file = rules_file
+        w.drive.add("/Media/a.mkv")
+        result = await jobs.run_job(w.ctx, ScheduledJob(name="organize", cron="* * * * *"))
+        assert result.plan_id is None and "nothing to do" in result.summary
+
     async def test_stocktake_and_poll_jobs(self, world):
         w = world
         w.drive.add("/Inbox/a.mkv")

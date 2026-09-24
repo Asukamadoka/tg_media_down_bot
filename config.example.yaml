@@ -68,5 +68,6 @@ wms:
   # Its own settings are /data/db/wms.yaml and /data/db/rules.yaml.
   enabled: false
   # account: 123456789      # whose drive; default: first admin with an account
+  auto_shelve: plan         # after a transfer into PikPak: plan | apply | off
 
 log_level: INFO
