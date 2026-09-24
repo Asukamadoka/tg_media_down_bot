@@ -35,6 +35,9 @@ select = [
 # everywhere else, where a stray full-width character would be a real bug,
 # for example inside a command name.
 "tgmd/i18n.py" = ["RUF001"]
+"pikpak_wms/i18n.py" = ["RUF001"]
+# typer declares options as argument defaults; that is its API, not a bug.
+"pikpak_wms/cli/*" = ["B008"]
 # A diagnostic tool's job is to turn any failure into a "failed" line rather
 # than crash, so every check there catches broadly by design. See AUDIT.md C2.
 "tgmd/verify.py" = ["BLE001"]

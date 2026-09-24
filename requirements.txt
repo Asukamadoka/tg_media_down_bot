@@ -9,3 +9,10 @@ pikpakapi==0.1.11
 aiohttp>=3.9
 PyYAML>=6.0
 python-dotenv>=1.0
+# --- pikpak_wms: the PikPak warehouse package (see docs/wms/) ---
+# Rule files, plans and the natural-language Query are validated with pydantic.
+pydantic>=2.7,<3
+# The `wms` command line; pulls in rich for its tables.
+typer>=0.12,<1
+# Scheduled stocktake / organize runs. 4.x is a rewrite with another API.
+APScheduler>=3.10,<4

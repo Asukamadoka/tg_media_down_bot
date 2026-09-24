@@ -1,0 +1,73 @@
+# pikpak-wms 主配置。复制为 config/wms.yaml 后修改。
+# 注意：此文件不包含任何凭据，凭据在 .env 里。
+version: 1
+
+# ---- 运行时 ----
+runtime:
+  # 铁律 1：写操作默认只出计划不落盘。命令行 --apply 可覆盖。
+  dry_run: true
+  # 铁律 2：永久删除总开关。打开后仍需单条命令显式传 --forever。
+  allow_permanent_delete: false
+  # 单次任务最多执行多少个动作，超出分批
+  max_actions_per_run: 500
+
+# ---- 限流（避免风控）----
+ratelimit:
+  requests_per_second: 4
+  burst: 8
+  max_retries: 3
+  initial_backoff_seconds: 3.0
+
+# ---- 本地状态 ----
+store:
+  database: data/wms.db
+  token_file: data/token.json
+
+# ---- 仓位模板（layout 会确保这些目录存在）----
+layout:
+  inbox: /Inbox            # 新入库落点
+  temp: /Temp              # 临时区，会被清退规则扫到
+  archive: /Media          # 上架目标根
+  ensure:                  # 启动时自动创建
+    - /Inbox
+    - /Temp
+    - /Media
+
+# ---- 盘点 ----
+stocktake:
+  roots: ["/"]
+  incremental: true        # 只重扫 modified_time 变化的子树
+  page_size: 100
+
+# ---- 出库 ----
+outbound:
+  # none | aria2
+  downloader: none
+  aria2:
+    rpc_url: http://127.0.0.1:6800/jsonrpc
+    # secret 请放环境变量 ARIA2_SECRET
+    dir: /downloads
+
+# ---- 定时任务（cron 表达式，本地时区）----
+schedule:
+  timezone: Asia/Shanghai
+  jobs:
+    - name: stocktake
+      cron: "*/30 * * * *"
+      enabled: true
+    - name: inbound-poll      # 轮询离线任务完成情况
+      cron: "*/5 * * * *"
+      enabled: true
+    - name: organize
+      cron: "15 * * * *"
+      enabled: true
+      apply: false            # 先只出计划，观察几天再改 true
+    - name: cleanup
+      cron: "30 4 * * *"
+      enabled: false          # 确认规则无误再开
+      apply: false
+
+# ---- 日志 ----
+logging:
+  level: INFO
+  file: logs/wms.log

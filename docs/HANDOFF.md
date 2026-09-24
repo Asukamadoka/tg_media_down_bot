@@ -438,3 +438,71 @@ docker pull ghcr.io/asukamadoka/tg_media_down_bot:sha-2424ad2
 
 1. **流式失败时不会自动回落到落盘。** 回落需要知道「PikPak 拉失败了」，而 PikPak 只会在超时后报 `error`，那时再下载一遍等于总时长翻倍。目前的设计是：流式默认关闭，实测稳定再开；不稳定就整体关掉。如果实测结论是「大多数时候行、偶尔不行」，再考虑做自动回落。
 2. **阶段 2 整体收尾。** 2a–2e 都已交付。三条验收（转发秒到、受限并行落盘的前后数字、DC4 直连前后数字）都需要 Cowork 在 NAS 上实测，命令分别在 2a、2b、2c 三节里。
+
+---
+
+## 阶段 3 · WMS M1：核心链路
+
+阶段 3 的规格是 `CC_BRIEF.md` §5 与 `docs/wms/`（本阶段已从 `Asukamadoka/pikpak-wms` 迁入：`ARCHITECTURE.md`、`ROADMAP.md`、`REFERENCES.md`，各加了一段「并入说明」，其余原样；`config/wms.example.yaml`、`config/rules.example.yaml` 迁到仓库根的 `config/`）。M6（自然语言）按其文件要求排在 M2 之后；它的机器人入口依赖 M3–M5 的集成，所以实际顺序是 M1 → M2 → M3 → M4 → M5 → M6。
+
+### 这一阶段做了什么
+
+新增顶层包 `pikpak_wms/`（与 `tgmd/` 并列，**不 import `tgmd`**，有测试扫描源码保证这一点）：
+
+- `core/`：
+  - `ratelimit.py` 全局令牌桶，默认 4 req/s、突发 8；
+  - `client.py` 唯一接触 PikPak 的地方：每个请求先取令牌；限流类错误指数退避重试（3、6、12 秒）；SDK 异常统一收敛成 `WmsError` / `AuthError` / `RateLimitedError` / `NotFoundError`；SDK 返回的 dict 转成领域模型。它不自己登录，而是接收一个「给我一个已登录客户端」的回调，这样 bot 以后可以直接注入用户已连接的账号；
+  - `auth.py` CLI 单独运行时的登录：从 `PIKPAK_USERNAME` / `PIKPAK_PASSWORD` 或 `PIKPAK_ENCODED_TOKEN` 登录一次，只把 token 写进 0600 文件（密码剥掉，不落盘），之后自动刷新。
+- `store/`：独立 SQLite，默认 `$DATA_DIR/wms.sqlite3`（容器内 `/data/db/wms.sqlite3`）；`files` / `tasks` / `audit` 三张表按原设计，另加一张 `meta`。只加不改（红线 3）。
+- `ops/stocktake.py`：全量与增量盘点；`--verify` 只读地把索引与网盘逐条核对。
+- CLI：`python -m pikpak_wms` → `version` / `doctor` / `login` / `stocktake [--full] [--verify] [--root] [--json]` / `ls` / `quota`。所有输出走 WMS 自己的 `t()`（中英两套；语言跟随 `WMS_LANG`，未设则跟随 bot 的 `TGMD_LANG`），命令名与参数保持英文。
+- 依赖：`pydantic`、`typer`（带 `rich`）、`APScheduler<4`。**镜像会变大几 MB**（主要是 `pydantic-core`）。没有引入 `aiosqlite`、`pydantic-settings`，沿用 bot 的 `sqlite3` + 线程做法。
+
+### 增量盘点的一个假设（需要 Cowork 在真实账号上确认）
+
+按原设计，增量盘点只重新列出 `modified_time` 变了的目录，一个没变的目录**连同整个子树**都跳过。这只有在 PikPak「子孙有变化时会刷新祖先目录的 `modified_time`」的前提下才正确。我在本环境无法验证 PikPak 的行为，所以：
+
+- 做了 `wms stocktake --verify`：不写任何东西，把整个网盘走一遍，与本地索引逐条比对，报告缺、多、变了的条目，不一致时退出码为 1；
+- 测试里把两种情况都跑了：会传播时增量能发现深层变化；不传播时增量会漏，而 `--verify` 能报出来，`--full` 能补齐。
+
+中断保护：一次盘点中途失败，未列完的目录会被标记，下次增量会从任何祖先处发现并补完，不会因为祖先的时间戳没变而永远跳过（测试覆盖，这个 bug 是写测试时抓到并修掉的）。
+
+### 验收数字（测试夹具上）
+
+夹具：1,202 个文件、1,263 条（含目录），分 12 部剧 × 4 季 × 25 集。
+
+| 盘点 | 请求数 | 按 4 req/s 折算 |
+|---|---:|---:|
+| 首次 | 63 | 约 15.8 秒 |
+| 二次（无变化） | 1 | 约 0.25 秒 |
+| 深层新增一个文件后 | 4 | 约 1 秒 |
+
+**真实网盘上的数字需要 Cowork 实测**（见下）。
+
+### NAS 上要改什么
+
+**无。** 这一阶段 bot 还不调用 WMS；镜像里多了 `pikpak_wms/` 和 `config/`，不影响 bot 运行。
+
+### 给 Cowork 的核验手段
+
+bot 当前是通过 Mini App 连接的 PikPak，环境变量里没有 PikPak 密码，所以**独立 CLI 在 NAS 上暂时登不上**。M3 会让镜像里的 `wms` 命令直接复用 bot 已连接的账号，届时按 M3 一节的命令实测即可，无需再输一次密码。
+
+如果现在就想测，需要临时提供凭据（**用完即删**）：
+
+```bash
+docker compose run --rm -e PIKPAK_USERNAME='…' -e PIKPAK_PASSWORD='…' bot python -m pikpak_wms login
+docker compose run --rm bot python -m pikpak_wms stocktake --full    # 记下耗时与请求数
+docker compose run --rm bot python -m pikpak_wms stocktake           # 记下耗时与请求数
+docker compose run --rm bot python -m pikpak_wms stocktake --verify  # 期望：一致
+```
+
+然后在 PikPak 网页端某个深层目录里新建一个文件，再跑一次增量盘点和 `--verify`：如果 `--verify` 报「缺 1」，说明 PikPak 不向上刷新时间戳，增量盘点需要改为依赖 `events` 接口或定期全量（待决问题 1）。
+
+### 怎么回滚
+
+不涉及运行中的 bot。回滚镜像到 `sha-b067192`（阶段 2e）即可。
+
+### 待决问题
+
+1. **PikPak 是否向上传播目录的 `modified_time`**，决定增量盘点能否按原设计工作。Cowork 按上面的步骤测一次即可定论。如果不传播，计划是：M2 做「基于 `events` 接口的增量盘点」（简报里「提过但没写成规格的功能」之一），并让定时任务每天做一次全量兜底。
+2. **镜像体积**：新增依赖约增加十几 MB（未实测，需要 CI 构建后在 GHCR 上看）。如果在意，`typer`/`rich` 可以换成标准库 `argparse`，代价是 CLI 表格输出变朴素。
