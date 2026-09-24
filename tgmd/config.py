@@ -145,6 +145,9 @@ class HttpConfig:
         return self.public_base_url.rstrip("/")
 
 
+AUTO_SHELVE_CHOICES = ("plan", "apply", "off")
+
+
 @dataclass
 class WmsSettings:
     """The PikPak warehouse (pikpak_wms) inside the bot. Off unless asked for."""
@@ -158,6 +161,10 @@ class WmsSettings:
 
     shared_account: bool = False
     """WMS_ACCOUNT=shared: always the shared account from the environment."""
+
+    auto_shelve: str = "plan"
+    """After files land in PikPak (WMS_AUTO_SHELVE): ``plan`` sends the plan
+    with a confirm button, ``apply`` shelves them at once, ``off`` does nothing."""
 
 
 @dataclass
@@ -197,6 +204,12 @@ class Config:
         if missing:
             raise ConfigError(
                 "missing required settings: " + ", ".join(missing)
+            )
+
+        if self.wms.auto_shelve not in AUTO_SHELVE_CHOICES:
+            raise ConfigError(
+                "WMS_AUTO_SHELVE must be one of "
+                f"{', '.join(AUTO_SHELVE_CHOICES)}, got {self.wms.auto_shelve!r}"
             )
 
         if self.telegram.direct_media not in DIRECT_MEDIA_CHOICES:
@@ -524,6 +537,9 @@ def load_config(path: Path | None = None) -> Config:
         ),
         account=account_ids[0] if account_ids else None,
         shared_account=str(account_raw).strip().lower() == "shared",
+        auto_shelve=_env_str(
+            "WMS_AUTO_SHELVE", str(_get(data, "wms", "auto_shelve", default="plan"))
+        ).strip().lower(),
     )
 
     return Config(

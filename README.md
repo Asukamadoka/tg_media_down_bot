@@ -286,7 +286,17 @@ the trash (permanent deletion needs a config switch *and* a flag, and no
 scheduled job can do it). Rules and settings go in `/data/db/rules.yaml` and
 `/data/db/wms.yaml`, copied from `config/*.example.yaml`; the index is
 `/data/db/wms.sqlite3`, on the same volume as everything else.
-`WMS_ENABLED=true` runs the jobs listed in `wms.yaml` inside the bot.
+`WMS_ENABLED=true` runs the jobs listed in `wms.yaml` inside the bot, and
+turns on two things in Telegram, both for admins only:
+
+* `/wms` — status, `stocktake`, `plan`, `apply <id>`, `undo <id>`, `rules`,
+  with confirm buttons; and, when the bot has a public HTTPS address, a Mini
+  App panel listing the plans waiting and the audit trail.
+* Shelving: after something lands in PikPak (a magnet, a share link, media in
+  `pikpak` mode), the organize rules run on it and you get the plan with an
+  *Apply* button (`WMS_AUTO_SHELVE=plan`, the default), or it is shelved
+  straight away (`apply`). Rules only see folders in their `scope`, so point
+  `PIKPAK_FOLDER` inside one, such as `/Inbox`; the bot says so if it is not.
 
 ## Commands
 
@@ -339,6 +349,7 @@ The settings worth knowing about:
 | `language` | `en` | which message catalogue replies come from: `en` or `zh` |
 | `wms.enabled` | false | run the PikPak warehouse's scheduled jobs in the bot (`WMS_ENABLED`) |
 | `wms.account` | first admin with an account | whose PikPak drive the warehouse manages (`WMS_ACCOUNT`) |
+| `wms.auto_shelve` | `plan` | after a transfer into PikPak: `plan`, `apply` or `off` (`WMS_AUTO_SHELVE`) |
 
 Template fields: `chat`, `chat_id`, `message_id`, `topic_id`, `name`, `stem`,
 `ext`, `date`. An unknown field is rejected at startup rather than at the
@@ -427,6 +438,7 @@ No credentials are needed.
 | `config.py` | YAML + environment configuration |
 | `db.py` | SQLite: preferences, upload cache, job history, tokens |
 | `wms.py` | the PikPak warehouse on the bot's account; `wms` in the image |
+| `wms_panel.py` | the warehouse Mini App panel (admins) |
 
 ## Prior art
 

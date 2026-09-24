@@ -142,7 +142,7 @@ CATALOG: dict[str, dict[str, str]] = {
                          '/stats — your recent jobs\n'
                          '/pikpak — PikPak account, quota and target folder\n'
                          '/pikpak login — connect your own PikPak account\n'
-                         '/wms — PikPak warehouse: plans, audit, undo (admins)\n'
+                         '/wms — PikPak warehouse: plans, audit, undo (admins; /wms help)\n'
                          '/id — your Telegram user id\n'
                          '/help — this message'
                      ),
@@ -465,6 +465,37 @@ CATALOG: dict[str, dict[str, str]] = {
         # ---- PikPak warehouse (WMS)
         'wms.off': 'The PikPak warehouse is off. Set WMS_ENABLED=true and restart the bot.',
         'wms.admins_only': 'Only admins can manage the PikPak warehouse.',
+        'wms.usage': (
+            '<b>/wms</b> — warehouse status and panel\n'
+            '/wms stocktake [full] — refresh the index\n'
+            '/wms plan — plan what the organize rules would do\n'
+            '/wms plan &lt;id&gt; — show a plan\n'
+            '/wms apply &lt;id&gt; — carry a plan out\n'
+            '/wms undo &lt;audit id&gt; — reverse one change\n'
+            '/wms rules — the rules in force'
+        ),
+        'wms.working': 'Working on it…',
+        'wms.failed_see_log': 'That failed; the deployment log has the details.',
+        'wms.error': 'Warehouse: {error}',
+        'wms.bad_id': '“{value}” is not an id.',
+        'wms.button.apply': 'Apply',
+        'wms.button.discard': 'Discard',
+        'wms.button.undo': 'Undo it',
+        'wms.discarded': 'Plan {id} discarded.',
+        'wms.undo.preview': 'This would be undone:\n<code>{what}</code>',
+        'wms.undo.done': 'Undone: <code>{what}</code>',
+        'wms.shelved.planned': '📦 New files in PikPak. The rules would do this:',
+        'wms.shelved.applied': '📦 New files in PikPak were shelved. {summary}',
+        'wms.shelved.uncovered': (
+            '📦 New files went to {folders} in PikPak, but no organize rule looks '
+            'there, so nothing will shelve them. Point PIKPAK_FOLDER at a rule\'s '
+            'scope (for example /Inbox), or widen a rule\'s scope.'
+        ),
+        'wms.rules.header': '<b>Rules</b> ({path})',
+        'wms.rules.line': '{state} <b>{name}</b> [{stage}] {scope}: {actions}',
+        'wms.rules.on': '✅',
+        'wms.rules.off': '⏸',
+        'wms.rules.none': 'The rules file has no rules.',
         'wms.status': (
             '<b>PikPak warehouse</b>\n'
             '{files} entries indexed, last stocktake {when}.\n'
@@ -527,7 +558,7 @@ CATALOG: dict[str, dict[str, str]] = {
                          '/stats — 你最近的任务\n'
                          '/pikpak — PikPak 账号、容量和目标文件夹\n'
                          '/pikpak login — 连接你自己的 PikPak 账号\n'
-                         '/wms — PikPak 仓储：计划、审计、撤销（管理员）\n'
+                         '/wms — PikPak 仓储：计划、审计、撤销（管理员；/wms help）\n'
                          '/id — 你的 Telegram 用户 id\n'
                          '/help — 这条消息'
                      ),
@@ -826,6 +857,37 @@ CATALOG: dict[str, dict[str, str]] = {
         'job.nothing_delivered': '❌ 没有任何内容被投递。',
         'wms.off': 'PikPak 仓储未开启。请设置 WMS_ENABLED=true 并重启 bot。',
         'wms.admins_only': '只有管理员能管理 PikPak 仓储。',
+        'wms.usage': (
+            '<b>/wms</b> — 仓储状态与面板\n'
+            '/wms stocktake [full] — 刷新本地索引\n'
+            '/wms plan — 按整理规则出一份计划\n'
+            '/wms plan &lt;编号&gt; — 查看计划\n'
+            '/wms apply &lt;编号&gt; — 执行计划\n'
+            '/wms undo &lt;审计编号&gt; — 撤销一处改动\n'
+            '/wms rules — 当前生效的规则'
+        ),
+        'wms.working': '处理中……',
+        'wms.failed_see_log': '失败了，详情见部署日志。',
+        'wms.error': '仓储：{error}',
+        'wms.bad_id': '「{value}」不是一个编号。',
+        'wms.button.apply': '确认执行',
+        'wms.button.discard': '丢弃',
+        'wms.button.undo': '确认撤销',
+        'wms.discarded': '计划 {id} 已丢弃。',
+        'wms.undo.preview': '将撤销：\n<code>{what}</code>',
+        'wms.undo.done': '已撤销：<code>{what}</code>',
+        'wms.shelved.planned': '📦 PikPak 里有新文件，按规则将会这样整理：',
+        'wms.shelved.applied': '📦 PikPak 里的新文件已按规则上架。{summary}',
+        'wms.shelved.uncovered': (
+            '📦 新文件存到了 PikPak 的 {folders}，但没有任何整理规则覆盖这个目录，'
+            '所以不会被上架。请把 PIKPAK_FOLDER 设到某条规则的 scope 下（比如 /Inbox），'
+            '或者放宽规则的 scope。'
+        ),
+        'wms.rules.header': '<b>规则</b>（{path}）',
+        'wms.rules.line': '{state} <b>{name}</b> [{stage}] {scope}：{actions}',
+        'wms.rules.on': '✅',
+        'wms.rules.off': '⏸',
+        'wms.rules.none': '规则文件里没有规则。',
         'wms.status': (
             '<b>PikPak 仓储</b>\n'
             '索引 {files} 条，上次盘点 {when}。\n'

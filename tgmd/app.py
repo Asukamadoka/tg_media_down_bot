@@ -130,6 +130,8 @@ class Application:
             pikpak=self.pikpak,
             # Follows self.user, which /setup telegram can replace at runtime.
             forwarder=Forwarder(self.bot, config, self.db, reader=lambda: self.user),
+            # Files that landed in PikPak get shelved by the WMS rules.
+            after_pikpak=self.wms.pikpak_saved,
         )
         await self.queue.start()
 
@@ -155,6 +157,7 @@ class Application:
         self.handlers.attach_wms(self.wms, self.wms_panel)
         self.handlers.register()
 
+        self.wms.attach_notifier(self._send_html)
         await self.wms.start()
 
         # Write the command menu and profile text ourselves, so nobody has to
@@ -179,6 +182,11 @@ class Application:
             "on" if config.pikpak.configured else "off",
             "on" if self.portal.unavailable_reason() is None else "off",
         )
+
+    async def _send_html(self, chat_id: int, text: str, buttons=None) -> None:
+        assert self.bot is not None
+        await self.bot.send_message(chat_id, text, parse_mode="html", buttons=buttons,
+                                    link_preview=False)
 
     async def run(self) -> None:
         """Serve until the process is asked to stop."""

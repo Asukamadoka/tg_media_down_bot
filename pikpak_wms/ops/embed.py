@@ -17,13 +17,13 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from ..config import Config, config_path, load_config
+from ..config import Config, config_path, load_config, rules_path
 from ..core.client import Provider
 from ..core.errors import AuthError, WmsError
 from ..core.models import ActionType
 from ..i18n import set_language, t
 from ..rules.units import human_size
-from . import outbound, plans
+from . import organize, outbound, plans
 from .context import Context, open_context
 
 log = logging.getLogger(__name__)
@@ -145,6 +145,18 @@ class EmbeddedWms:
     async def undo(self, audit_id: int, *, apply_now: bool) -> plans.UndoOutcome:
         async with self._scheduler.lock:
             return await plans.undo(self._live, audit_id, apply_now=apply_now)
+
+    @property
+    def rules_file(self) -> str:
+        return str(self.config.rules_file or rules_path())
+
+    def rules(self) -> list[dict[str, Any]]:
+        """The rules file, validated (raises RulesError, a WmsError, if broken)."""
+        return [
+            {"name": rule.name, "stage": rule.stage, "enabled": rule.enabled,
+             "scope": rule.scope, "actions": [step.op for step in rule.actions]}
+            for rule in organize.load_rules_for(self.config).rules
+        ]
 
     async def stop(self) -> None:
         if self._scheduler is not None:
