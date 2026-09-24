@@ -14,6 +14,9 @@ from .utils import ALLOWED_TEMPLATE_FIELDS, parse_bool, parse_id_list, template_
 
 MODES = ("telegram", "local", "pikpak")
 
+# Mirrors tgmd.parallel.MAX_CONNECTIONS, which imports Telethon; config does not.
+MAX_DOWNLOAD_CONNECTIONS = 8
+
 DEFAULT_CONFIG_PATHS = ("config.yaml", "config.yml")
 
 
@@ -60,6 +63,9 @@ class DownloadConfig:
     data_dir: Path = Path("data")
     filename_template: str = "{chat}/{message_id}_{name}"
     concurrent: int = 2
+    connections: int = 4
+    """Connections per large file. Parallel parts over separate connections is
+    the only way to speed up content that cannot be forwarded."""
     max_queue_per_user: int = 20
     max_batch: int = 50
     progress_interval: float = 5.0
@@ -165,6 +171,8 @@ class Config:
 
         if self.download.concurrent < 1:
             raise ConfigError("download.concurrent must be at least 1")
+        if self.download.connections < 1:
+            raise ConfigError("download.connections must be at least 1")
         if self.download.max_batch < 1:
             raise ConfigError("download.max_batch must be at least 1")
         if self.download.progress_interval < 1:
@@ -183,6 +191,13 @@ class Config:
         # /setup telegram store both in the database, which is not open yet,
         # so the app reports them after reading it instead.
         warnings: list[str] = []
+        if self.download.connections > MAX_DOWNLOAD_CONNECTIONS:
+            # Capped rather than refused: more connections from the user's own
+            # account buy little speed and invite rate limits.
+            warnings.append(
+                f"download.connections is {self.download.connections}; using "
+                f"{MAX_DOWNLOAD_CONNECTIONS}, the most this bot opens per file."
+            )
         if self.http.enabled and not self.http.public_base_url:
             # Not fatal: a NAS with no public address yet is a normal state,
             # and exiting here put the container in a restart loop. The server
@@ -346,6 +361,9 @@ def load_config(path: Path | None = None) -> Config:
         ),
         concurrent=_env_int(
             "CONCURRENT_DOWNLOADS", int(_get(data, "download", "concurrent", default=2))
+        ),
+        connections=_env_int(
+            "DOWNLOAD_CONNECTIONS", int(_get(data, "download", "connections", default=4))
         ),
         max_queue_per_user=_env_int(
             "MAX_QUEUE_PER_USER", int(_get(data, "download", "max_queue_per_user", default=20))
