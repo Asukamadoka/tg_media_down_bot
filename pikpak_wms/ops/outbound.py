@@ -72,62 +72,60 @@ def make_deliver(
     ctx: Context, *, downloader: str | None = None, fetch: Fetch | None = None,
     rpc: Rpc | None = None,
 ) -> Deliver:
+    """One deliver function for a plan. Each action may name its own
+    downloader (``via``); otherwise ``downloader``, else the config's."""
     config = ctx.config.outbound
-    mode = downloader or config.downloader
+    default = downloader or config.downloader
 
-    if mode == "none":
-        async def links(node: FileNode, to: str) -> dict[str, Any]:
-            url = await ctx.client.download_url(node.file_id)
-            return {"downloader": "none", "_output": f"{node.path}\n  {url}"}
+    async def links(node: FileNode, to: str) -> dict[str, Any]:
+        url = await ctx.client.download_url(node.file_id)
+        return {"downloader": "none", "_output": f"{node.path}\n  {url}"}
 
-        return links
+    async def aria2(node: FileNode, to: str) -> dict[str, Any]:
+        url = await ctx.client.download_url(node.file_id)
+        folder = "/".join(p for p in (config.aria2.dir.rstrip("/"), to) if p)
+        params: list[Any] = [[url], {"dir": folder, "out": node.name}]
+        secret = os.environ.get("ARIA2_SECRET", "").strip()
+        if secret:
+            params.insert(0, f"token:{secret}")
+        gid = await (rpc or http_rpc)(config.aria2.rpc_url, {
+            "jsonrpc": "2.0", "id": "wms", "method": "aria2.addUri", "params": params,
+        })
+        return {"downloader": "aria2", "dir": folder, "gid": str(gid)}
 
-    if mode == "aria2":
-        call = rpc or http_rpc
-
-        async def aria2(node: FileNode, to: str) -> dict[str, Any]:
-            url = await ctx.client.download_url(node.file_id)
-            folder = "/".join(p for p in (config.aria2.dir.rstrip("/"), to) if p)
-            params: list[Any] = [[url], {"dir": folder, "out": node.name}]
-            secret = os.environ.get("ARIA2_SECRET", "").strip()
-            if secret:
-                params.insert(0, f"token:{secret}")
-            gid = await call(config.aria2.rpc_url, {
-                "jsonrpc": "2.0", "id": "wms", "method": "aria2.addUri", "params": params,
-            })
-            return {"downloader": "aria2", "dir": folder, "gid": str(gid)}
-
-        return aria2
-
-    if mode == "local":
+    async def local(node: FileNode, to: str) -> dict[str, Any]:
         base = config.local_path
         if base is None:
             raise WmsError("no local folder for outbound", key="outbound.no_local_dir")
-        get = fetch or http_fetch
+        target = local_target(base, to, node.name)
+        if target.exists() and target.stat().st_size == node.size:
+            return {"downloader": "local", "path": str(target), "skipped": True}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        part = target.with_name(target.name + ".part")
+        url = await ctx.client.download_url(node.file_id)
+        try:
+            written = await (fetch or http_fetch)(url, part)
+        except Exception:
+            part.unlink(missing_ok=True)
+            raise
+        if node.size and written != node.size:
+            part.unlink(missing_ok=True)
+            raise WmsError(f"{node.path}: got {written} of {node.size} bytes",
+                           key="outbound.short", path=node.path, got=written, size=node.size)
+        part.replace(target)
+        return {"downloader": "local", "path": str(target)}
 
-        async def local(node: FileNode, to: str) -> dict[str, Any]:
-            target = local_target(base, to, node.name)
-            if target.exists() and target.stat().st_size == node.size:
-                return {"downloader": "local", "path": str(target), "skipped": True}
-            target.parent.mkdir(parents=True, exist_ok=True)
-            part = target.with_name(target.name + ".part")
-            url = await ctx.client.download_url(node.file_id)
-            try:
-                written = await get(url, part)
-            except Exception:
-                part.unlink(missing_ok=True)
-                raise
-            if node.size and written != node.size:
-                part.unlink(missing_ok=True)
-                raise WmsError(f"{node.path}: got {written} of {node.size} bytes",
-                               key="outbound.short", path=node.path, got=written,
-                               size=node.size)
-            part.replace(target)
-            return {"downloader": "local", "path": str(target)}
+    modes = {"none": links, "aria2": aria2, "local": local}
+    if default not in modes:
+        raise WmsError(f"unknown downloader {default}", key="outbound.unknown", mode=default)
 
-        return local
+    async def deliver(node: FileNode, to: str, via: str | None = None) -> dict[str, Any]:
+        mode = via or default
+        if mode not in modes:
+            raise WmsError(f"unknown downloader {mode}", key="outbound.unknown", mode=mode)
+        return await modes[mode](node, to)
 
-    raise WmsError(f"unknown downloader {mode}", key="outbound.unknown", mode=mode)
+    return deliver
 
 
 async def plan_paths(ctx: Context, paths: list[str], *, to: str = "") -> Plan:

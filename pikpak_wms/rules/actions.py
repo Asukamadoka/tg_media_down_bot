@@ -152,8 +152,8 @@ class Planner:
 # ------------------------------------------------------------------ applying
 
 
-Deliver = Callable[[FileNode, str], Awaitable[dict[str, Any]]]
-"""Outbound: fetch one file to the configured destination; returns audit extras."""
+Deliver = Callable[[FileNode, str, str | None], Awaitable[dict[str, Any]]]
+"""Outbound: fetch one file (sub-folder, downloader override); returns audit extras."""
 
 
 @dataclass
@@ -536,8 +536,11 @@ class Outbound(Primitive):
         if draft.node.is_folder:
             raise Conflict("conflict.outbound_folder", path=draft.node.path)
         to = planner.render(spec.to, draft).strip("/") if spec.to else ""
+        after: dict[str, Any] = {"to": to}
+        if spec.via:
+            after["via"] = spec.via
         return [Action(self.type, draft.node.file_id, before=_snapshot(draft),
-                       after={"to": to}, rule_name=rule)]
+                       after=after, rule_name=rule)]
 
     check = Star.check
 
@@ -546,7 +549,7 @@ class Outbound(Primitive):
         if rt.deliver is None:
             raise WmsError("no outbound destination is configured", key="error.no_outbound")
         node = await rt.store.node(action.file_id) or FileNode.from_snapshot(action.before)
-        return [await rt.deliver(node, action.after.get("to", ""))]
+        return [await rt.deliver(node, action.after.get("to", ""), action.after.get("via"))]
 
     def inverse(self, entry):
         raise Refused("an outbound fetch cannot be undone", key="undo.refused.outbound")

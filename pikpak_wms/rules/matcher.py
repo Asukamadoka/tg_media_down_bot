@@ -73,6 +73,11 @@ class Matcher:
         m = self.match
         if m.kind is not None and str(node.kind) != m.kind:
             return None
+        if m.exclude_paths and any(
+            node.path == folder or node.path.startswith(folder.rstrip("/") + "/")
+            for folder in m.exclude_paths
+        ):
+            return None
         if self._globs and not any(g.match(node.path) for g in self._globs):
             return None
         if m.mime and not any(fnmatch.fnmatchcase(node.mime, p) for p in m.mime):

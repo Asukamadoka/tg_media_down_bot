@@ -220,9 +220,8 @@ class Plan:
         self.notes.append({"key": key, "args": args})
 
     def note_lines(self) -> list[str]:
-        from ..i18n import t
+        return [render_note(note) for note in self.notes]
 
-        return [t(note["key"], **note.get("args", {})) for note in self.notes]
 
     @property
     def is_empty(self) -> bool:
@@ -247,3 +246,16 @@ class Plan:
                 for note in data.get("notes") or []
             ],
         )
+
+
+def render_note(value: Any) -> str:
+    """A stored note, translated now: ``{"key", "args"}``, with args that may
+    themselves be notes, or lists of them (joined the language's way)."""
+    from ..i18n import t
+
+    if isinstance(value, dict) and "key" in value:
+        args = {name: render_note(arg) for name, arg in (value.get("args") or {}).items()}
+        return t(value["key"], **args)
+    if isinstance(value, list):
+        return t("list.separator").join(render_note(item) for item in value)
+    return str(value)

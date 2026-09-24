@@ -85,3 +85,23 @@ async def run_job(ctx: Context, job: ScheduledJob, *, deliver: Deliver | None = 
     )
     log.info("job %s finished (plan %s)", job.name, result.plan_id)
     return result
+
+
+async def run_rule(
+    ctx: Context, rule_name: str, *, deliver: Deliver | None = None
+) -> JobResult:
+    """A rule with its own ``schedule``: stocktake its scope, plan it alone,
+    and apply only if the rule says ``apply: true`` (never permanent deletion)."""
+    ruleset = organize.load(ctx)
+    (rule,) = ruleset.select(names=[rule_name])
+    job = ScheduledJob(name="organize", cron=rule.schedule.cron if rule.schedule else "0 0 * * *",
+                       apply=bool(rule.schedule and rule.schedule.apply))
+    try:
+        await stocktake(ctx.client, ctx.store, roots=[rule.scope], full=False,
+                        page_size=ctx.config.stocktake.page_size)
+    except NotFoundError:
+        log.info("rule %s: %s does not exist in the drive yet", rule_name, rule.scope)
+    plan = await organize.plan_rules(ctx, [rule], source=f"rule:{rule_name}")
+    result = await _plan_job(ctx, job, plan, deliver)
+    result.name = f"rule:{rule_name}"
+    return result

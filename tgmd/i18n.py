@@ -143,6 +143,7 @@ CATALOG: dict[str, dict[str, str]] = {
                          '/pikpak — PikPak account, quota and target folder\n'
                          '/pikpak login — connect your own PikPak account\n'
                          '/wms — PikPak warehouse: plans, audit, undo (admins; /wms help)\n'
+                         '/do — say what to do with the drive, e.g. 下载今天转存的视频 (admins)\n'
                          '/id — your Telegram user id\n'
                          '/help — this message'
                      ),
@@ -380,6 +381,7 @@ CATALOG: dict[str, dict[str, str]] = {
         'menu.stats': 'Your recent jobs',
         'menu.pikpak': 'PikPak account, quota and folder',
         'menu.wms': 'PikPak warehouse: plans, audit, undo',
+        'menu.do': 'Say what to do with the drive, in a sentence',
         'menu.verify': 'Check my identity and configuration',
         'menu.id': 'Your Telegram user id',
         'profile.about': (
@@ -481,6 +483,27 @@ CATALOG: dict[str, dict[str, str]] = {
         'wms.button.apply': 'Apply',
         'wms.button.discard': 'Discard',
         'wms.button.undo': 'Undo it',
+        'wms.button.edit': 'Edit',
+        'wms.button.cancel': 'Cancel',
+        'wms.nl.usage': (
+            'Say what to do with the PikPak drive, for example:\n'
+            '<code>/do 下载今天转存到网盘的所有大于1GB的视频</code>\n'
+            'In a private chat, admins can also just send the sentence.'
+        ),
+        'wms.nl.intro': 'Here is the plan (understood by: {translator}). Nothing has changed yet.',
+        'wms.nl.ask': '🤔 {question}\nReply with the missing part; it is added to your sentence.',
+        'wms.nl.not_understood': (
+            'I did not understand that as a drive command. Links are still downloaded as '
+            'before; for the drive, try e.g. <code>下载今天转存的大于1GB的视频</code>.'
+        ),
+        'wms.nl.failed': 'The translator failed: {error}',
+        'wms.nl.edit_prompt': (
+            'Send what to change or add; it is joined to “{sentence}” and read again.'
+        ),
+        'wms.nl.cancelled': 'Cancelled. Nothing was changed.',
+        'wms.nl.expired': 'This proposal has expired; send the sentence again.',
+        'wms.nl.rule_added': 'Added to {path}. It runs on its schedule and asks before changing.',
+        'wms.job.waiting': '⏰ The scheduled job “{name}” made a plan; it waits for you:',
         'wms.discarded': 'Plan {id} discarded.',
         'wms.undo.preview': 'This would be undone:\n<code>{what}</code>',
         'wms.undo.done': 'Undone: <code>{what}</code>',
@@ -559,6 +582,7 @@ CATALOG: dict[str, dict[str, str]] = {
                          '/pikpak — PikPak 账号、容量和目标文件夹\n'
                          '/pikpak login — 连接你自己的 PikPak 账号\n'
                          '/wms — PikPak 仓储：计划、审计、撤销（管理员；/wms help）\n'
+                         '/do — 用一句话管理网盘，比如「下载今天转存的视频」（管理员）\n'
                          '/id — 你的 Telegram 用户 id\n'
                          '/help — 这条消息'
                      ),
@@ -783,6 +807,7 @@ CATALOG: dict[str, dict[str, str]] = {
         'menu.stats': '你最近的任务',
         'menu.pikpak': 'PikPak 账号、容量和文件夹',
         'menu.wms': 'PikPak 仓储：计划、审计、撤销',
+        'menu.do': '用一句话管理网盘',
         'menu.verify': '检查我的身份和配置',
         'menu.id': '你的 Telegram 用户 id',
         'profile.about': (
@@ -873,6 +898,25 @@ CATALOG: dict[str, dict[str, str]] = {
         'wms.button.apply': '确认执行',
         'wms.button.discard': '丢弃',
         'wms.button.undo': '确认撤销',
+        'wms.button.edit': '修改',
+        'wms.button.cancel': '取消',
+        'wms.nl.usage': (
+            '用一句话说要对网盘做什么，比如：\n'
+            '<code>/do 下载今天转存到网盘的所有大于1GB的视频</code>\n'
+            '管理员在私聊里也可以直接发这句话。'
+        ),
+        'wms.nl.intro': '计划如下（由 {translator} 理解）。现在还什么都没改。',
+        'wms.nl.ask': '🤔 {question}\n直接回复补充的部分，会接在你刚才那句话后面。',
+        'wms.nl.not_understood': (
+            '没听懂这是一条网盘指令。发链接照常下载；管理网盘可以这样说：'
+            '<code>下载今天转存的大于1GB的视频</code>。'
+        ),
+        'wms.nl.failed': '翻译出错：{error}',
+        'wms.nl.edit_prompt': '请发送要修改或补充的内容，会接在「{sentence}」后面重新理解。',
+        'wms.nl.cancelled': '已取消，什么都没改。',
+        'wms.nl.expired': '这个计划已过期，请重新发送那句话。',
+        'wms.nl.rule_added': '已写入 {path}。以后按时运行，每次改动前都会先问你。',
+        'wms.job.waiting': '⏰ 定时任务「{name}」生成了一份计划，等你确认：',
         'wms.discarded': '计划 {id} 已丢弃。',
         'wms.undo.preview': '将撤销：\n<code>{what}</code>',
         'wms.undo.done': '已撤销：<code>{what}</code>',

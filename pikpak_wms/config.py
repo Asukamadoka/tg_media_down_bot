@@ -132,6 +132,22 @@ class OutboundConfig(BaseModel):
         return None
 
 
+class NlConfig(BaseModel):
+    """What natural-language commands mean by 分类 / 归档 / 下载 (docs/wms/M6)."""
+
+    classify: dict[str, str] = Field(default_factory=lambda: {
+        "video": "/Media/视频", "image": "/Media/图片", "audio": "/Media/音频",
+        "document": "/Media/文档", "archive": "/Media/压缩包", "subtitle": "/Media/字幕",
+    })
+    """File type → folder, for 按类型分类."""
+
+    archive_root: str = "/Archive"
+    """归档 moves files to ``<archive_root>/<year-month they arrived>``."""
+
+    download_to: str = "PikPak"
+    """下载 fetches into this sub-folder of the NAS media folder."""
+
+
 class Config(BaseModel):
     version: int = 1
     rules_file: Path | None = None
@@ -143,6 +159,7 @@ class Config(BaseModel):
     stocktake: StocktakeConfig = Field(default_factory=StocktakeConfig)
     outbound: OutboundConfig = Field(default_factory=OutboundConfig)
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
+    nl: NlConfig = Field(default_factory=NlConfig)
 
 
 def _first_existing(env: str, name: str, default: Path) -> Path:

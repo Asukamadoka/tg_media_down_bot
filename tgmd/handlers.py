@@ -90,6 +90,7 @@ class BotHandlers:
         add(self.on_pikpak, events.NewMessage(pattern=r"^/pikpak\b"))
         add(self.on_verify, events.NewMessage(pattern=r"^/verify\b"))
         add(self.on_wms, events.NewMessage(pattern=r"^/wms\b"))
+        add(self.on_do, events.NewMessage(pattern=r"^/do\b"))
         add(self.handle_wms_button, events.CallbackQuery(pattern=rb"^wms:"))
         add(self.on_message, events.NewMessage(incoming=True))
 
@@ -616,6 +617,20 @@ class BotHandlers:
         except WmsError as exc:
             await event.reply(t("wms.error", error=escape_html(exc.display())))
 
+    async def _nl_button(self, event, user_id: int) -> None:
+        try:
+            _wms, _nl, verb, raw = event.data.decode().split(":", 3)
+            pid = int(raw)
+        except (UnicodeDecodeError, ValueError):
+            await event.answer()
+            return
+        text, alert = await self._wms.nl_button(user_id, verb, pid)
+        if alert is not None:
+            await event.answer(alert, alert=True)
+            return
+        await event.answer()
+        await event.edit(text, parse_mode="html", buttons=None)
+
     async def _wms_for(self, event):
         """The running warehouse, or None after telling the sender why not."""
         if not await self._authorized(event):
@@ -662,6 +677,29 @@ class BotHandlers:
         header = t("wms.rules.header", path=escape_html(embedded.rules_file))
         await event.reply(header + "\n" + "\n".join(lines), parse_mode="html")
 
+    async def on_do(self, event) -> None:
+        """/do <一句话>: a natural-language command, planned and shown first."""
+        if await self._wms_for(event) is None:
+            return
+        sentence = (event.raw_text or "").partition(" ")[2].strip()
+        if not sentence:
+            await event.reply(t("wms.nl.usage"), parse_mode="html")
+            return
+        await self._nl(event, sentence)
+
+    async def _nl(self, event, sentence: str) -> None:
+        text, buttons = await self._wms.nl_message(event.sender_id, sentence)
+        await event.reply(text, parse_mode="html", buttons=buttons)
+
+    def _takes_sentences(self, event) -> bool:
+        """Plain text from an admin, in private, with the warehouse running."""
+        return (
+            event.is_private
+            and self._wms is not None
+            and self._wms.embedded is not None
+            and self._config.access.is_admin(event.sender_id)
+        )
+
     async def handle_wms_button(self, event) -> None:
         """A press on a plan's [apply] / [discard] or an [undo] button."""
         user_id = event.sender_id
@@ -671,6 +709,9 @@ class BotHandlers:
         embedded = self._wms.embedded if self._wms is not None else None
         if embedded is None:
             await event.answer(t("wms.off"), alert=True)
+            return
+        if event.data.startswith(b"wms:nl:"):
+            await self._nl_button(event, user_id)
             return
         try:
             _prefix, verb, raw = event.data.decode().split(":", 2)
@@ -738,6 +779,9 @@ class BotHandlers:
             await self._submit_inbound(event)
         elif bundle.errors:
             await self._report_errors(event, bundle)
+        elif text.strip() and self._takes_sentences(event):
+            # Not a link and not a command: a sentence for the warehouse (M6).
+            await self._nl(event, text.strip())
         else:
             await event.reply(t("dispatch.prompt"))
 

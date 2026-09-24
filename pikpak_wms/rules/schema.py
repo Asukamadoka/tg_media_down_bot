@@ -67,6 +67,8 @@ class Match(_Strict):
     extensions: list[str] | None = None
     category: list[str] | None = None
     empty: bool | None = None
+    exclude_paths: list[str] | None = None
+    """Skip anything at or under these folders (e.g. where a classify rule files things)."""
     time_field: Literal["created", "modified"] = "created"
     """Which drive timestamp older_than / newer_than / {created} compare.
     ``created`` is when the file arrived in the drive (saved, restored or
@@ -81,6 +83,12 @@ class Match(_Strict):
             except re.error as exc:
                 raise ValueError(f"name_regex does not compile: {exc}") from exc
         return value
+
+    @field_validator("exclude_paths", mode="before")
+    @classmethod
+    def _folders(cls, value: Any) -> list[str] | None:
+        items = _listify(value)
+        return None if items is None else [normalize_path(item) for item in items]
 
     @field_validator("path_glob", "mime", mode="before")
     @classmethod
@@ -161,6 +169,9 @@ class OutboundSpec(_Strict):
     to: str = ""
     """A sub-folder under the outbound destination; a template."""
 
+    via: Literal["none", "aria2", "local"] | None = None
+    """Override ``outbound.downloader`` for this rule (M6's 下载 means ``local``)."""
+
     @field_validator("to")
     @classmethod
     def _to(cls, value: str) -> str:
@@ -204,9 +215,26 @@ class Step(BaseModel):
         return {"op": op, "spec": SPECS[op].model_validate(args or {})}
 
 
+class RuleSchedule(_Strict):
+    cron: str
+    """Five-field cron in ``schedule.timezone``."""
+
+    apply: bool = False
+    """False: each run saves a plan to confirm (rule 1). Never permanent deletion."""
+
+    @field_validator("cron")
+    @classmethod
+    def _cron(cls, value: str) -> str:
+        if len(value.split()) != 5:
+            raise ValueError(f"not a five-field cron expression: {value!r}")
+        return value.strip()
+
+
 class Rule(_Strict):
     name: str
     enabled: bool = True
+    schedule: RuleSchedule | None = None
+    """Run this rule on its own cron, besides the organize / cleanup jobs."""
     stage: Literal["organize", "cleanup"] = "organize"
     """``wms organize`` runs organize rules, ``wms cleanup`` cleanup rules."""
     scope: str = "/"
