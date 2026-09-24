@@ -29,6 +29,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -226,9 +227,11 @@ async def download_parts(
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-        for task in done:
-            if task.exception() is not None:
-                raise task.exception()
+        # Read every failure, not just the first: asyncio logs an unread one
+        # as "Task exception was never retrieved" when the task is collected.
+        failures = [task.exception() for task in done if task.exception() is not None]
+        if failures:
+            raise failures[0]
 
 
 # ------------------------------------------------------------------ Telethon
@@ -258,6 +261,59 @@ async def default_endpoints(client, dc_id: int) -> list:
     return [await client._get_dc(dc_id)]  # noqa: SLF001 - Telethon has no public API for this
 
 
+async def media_endpoints(client, dc_id: int) -> list:
+    """This DC's ``media_only`` IPv4 endpoints, from Telegram's own config.
+
+    Telethon never picks these: its ``_get_dc`` matches on id, IPv6 and CDN
+    only, and takes the first hit. They serve file downloads with the same
+    authorisation key as the DC's ordinary endpoint.
+    """
+    await client._get_dc(dc_id)  # noqa: SLF001 - loads Telegram's config
+    config = type(client)._config  # noqa: SLF001 - where Telethon keeps it
+    return [
+        option
+        for option in config.dc_options
+        if option.id == dc_id
+        and option.media_only
+        and not option.ipv6  # IPv6 is not routed yet; see HANDOFF 2c
+        and not option.cdn
+        and not option.tcpo_only  # needs obfuscation Telethon's TCP does not do
+    ]
+
+
+class MediaRoute:
+    """``TG_DIRECT_MEDIA=auto``: media endpoints first, ordinary ones after.
+
+    On the NAS, Telegram is only reachable through the proxy, except for a
+    few media endpoints that answer directly. Downloading from those skips
+    the proxy's bandwidth entirely. A direct route that stops working is
+    remembered per DC for a while, so every file does not pay for the same
+    failed attempt.
+    """
+
+    def __init__(self, *, retry_after: float = 1800.0) -> None:
+        self._retry_after = retry_after
+        self._failed_at: dict[int, float] = {}
+
+    def usable(self, dc_id: int) -> bool:
+        failed = self._failed_at.get(dc_id)
+        return failed is None or time.monotonic() - failed >= self._retry_after
+
+    def failed(self, dc_id: int) -> None:
+        self._failed_at[dc_id] = time.monotonic()
+        log.info("direct media route to DC %s failed; using the proxy for a while", dc_id)
+
+    async def endpoints(self, client, dc_id: int) -> list:
+        normal = await default_endpoints(client, dc_id)
+        if not self.usable(dc_id):
+            return normal
+        return await media_endpoints(client, dc_id) + normal
+
+    def refused(self, endpoint) -> None:
+        if getattr(endpoint, "media_only", False):
+            self.failed(endpoint.id)
+
+
 def _init_connection(client, query) -> InvokeWithLayerRequest:
     """``initConnection`` with the same identity the client presents."""
     template = client._init_request  # noqa: SLF001
@@ -285,6 +341,8 @@ async def telethon_sources(
     count: int,
     *,
     endpoints: EndpointChooser = default_endpoints,
+    on_refused: Callable[[object], None] | None = None,
+    connect_timeout: float = 10.0,
 ) -> AsyncIterator[tuple[list[PartSource], object]]:
     """Open ``count`` connections to ``dc_id``; yield them and the endpoint used.
 
@@ -308,10 +366,17 @@ async def telethon_sources(
         chosen = None
         for endpoint in candidates:
             try:
-                senders.append(await _open(client, auth_key, endpoint, dc_id))
+                # Bounded: a blocked route should cost seconds, not the minute
+                # Telethon's own reconnect attempts would take.
+                sender = await asyncio.wait_for(
+                    _open(client, auth_key, endpoint, dc_id), connect_timeout
+                )
             except (ConnectionError, OSError, TimeoutError) as exc:
                 log.info("could not open a connection to %s: %s", _describe(endpoint), exc)
+                if on_refused is not None:
+                    on_refused(endpoint)
                 continue
+            senders.append(sender)
             chosen = endpoint
             break
         if chosen is None:
@@ -319,7 +384,11 @@ async def telethon_sources(
 
         for _ in range(count - 1):
             try:
-                senders.append(await _open(client, auth_key, chosen, dc_id))
+                senders.append(
+                    await asyncio.wait_for(
+                        _open(client, auth_key, chosen, dc_id), connect_timeout
+                    )
+                )
             except (ConnectionError, OSError, TimeoutError) as exc:
                 # Fewer connections is still faster than falling back.
                 log.info("opened %d of %d connections: %s", len(senders), count, exc)

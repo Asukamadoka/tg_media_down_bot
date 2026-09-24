@@ -22,6 +22,7 @@ from .downloader import Downloader
 from .forwarder import Forwarder
 from .handlers import BotHandlers
 from .identity import describe_account
+from .parallel import MediaRoute
 from .pikpak import PikPakService
 from .portal import PikPakLoginPortal
 from .resolver import Resolver
@@ -60,6 +61,7 @@ class Application:
         self.wizard: SetupWizard | None = None
         self.bot = None
         self.user = None
+        self.route: MediaRoute | None = None
         self._stopping = asyncio.Event()
 
     async def start(self) -> None:
@@ -97,6 +99,9 @@ class Application:
         reading_client = self.user or self.bot
 
         delivery = Delivery(self.bot, config, self.db, self.pikpak, self.file_server)
+        # One route for every downloader, so a direct path that failed for one
+        # is skipped by all of them.
+        self.route = MediaRoute() if config.telegram.direct_media == "auto" else None
 
         self.queue = JobQueue(
             config=config,
@@ -106,9 +111,11 @@ class Application:
                 reading_client, auto_join=config.download.auto_join_invites
             ),
             downloader=Downloader(
-                reading_client, connections=config.download.connections
+                reading_client, connections=config.download.connections, route=self.route
             ),
-            bot_downloader=Downloader(self.bot, connections=config.download.connections),
+            bot_downloader=Downloader(
+                self.bot, connections=config.download.connections, route=self.route
+            ),
             delivery=delivery,
             pikpak=self.pikpak,
             # Follows self.user, which /setup telegram can replace at runtime.
@@ -149,10 +156,12 @@ class Application:
         )
 
         log.info(
-            "ready — mode %s, %d worker(s), cache chat %s, shared PikPak %s, "
-            "PikPak Mini App %s",
+            "ready — mode %s, %d worker(s), %d connection(s) per file, direct media %s, "
+            "cache chat %s, shared PikPak %s, PikPak Mini App %s",
             config.delivery.default_mode,
             config.download.concurrent,
+            config.download.connections,
+            config.telegram.direct_media,
             config.delivery.cache_chat_id or "disabled",
             "on" if config.pikpak.configured else "off",
             "on" if self.portal.unavailable_reason() is None else "off",
@@ -208,7 +217,11 @@ class Application:
                 Resolver(
                     client, auto_join=self.config.download.auto_join_invites
                 ),
-                Downloader(client, connections=self.config.download.connections),
+                Downloader(
+                    client,
+                    connections=self.config.download.connections,
+                    route=self.route,
+                ),
             )
         if self.handlers is not None:
             self.handlers.set_user_client(client)

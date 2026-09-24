@@ -12,8 +12,10 @@ from tgmd import bench
 from tgmd.downloader import Transfer
 
 
-def args(link="https://t.me/somechannel/42", connections=(1, 4), keep=False):
-    return argparse.Namespace(link=link, connections=list(connections), keep=keep)
+def args(link="https://t.me/somechannel/42", connections=(1, 4), keep=False, route="config"):
+    return argparse.Namespace(
+        link=link, connections=list(connections), keep=keep, route=route
+    )
 
 
 class TestArguments:
@@ -77,8 +79,9 @@ class FakeResolver:
 class FakeDownloader:
     runs: list[int] = []  # noqa: RUF012 - reset by the test
 
-    def __init__(self, client, *, connections: int) -> None:
+    def __init__(self, client, *, connections: int, **route) -> None:
         self.connections = connections
+        self.route = route
         self.last = None
 
     async def download(self, message, target: Path, **_kwargs):
@@ -110,3 +113,39 @@ class TestARun:
         # Nothing left behind in the download directory.
         leftovers = [p for p in (env / "downloads").rglob("*") if p.is_file()]
         assert leftovers == []
+
+
+class TestRoutes:
+    """The experiment switch for direct media endpoints (CC_BRIEF 2c)."""
+
+    def test_normal_uses_telethons_endpoint(self):
+        from tgmd.parallel import default_endpoints
+
+        downloader = bench._downloader(object(), 4, "normal", None)  # noqa: SLF001
+        assert downloader._endpoints is default_endpoints  # noqa: SLF001
+        assert downloader._route is None  # noqa: SLF001
+
+    def test_media_uses_only_media_endpoints(self):
+        from tgmd.parallel import media_endpoints
+
+        downloader = bench._downloader(object(), 4, "media", None)  # noqa: SLF001
+        assert downloader._endpoints is media_endpoints  # noqa: SLF001
+
+    def test_config_follows_tg_direct_media(self):
+        auto = SimpleNamespace(telegram=SimpleNamespace(direct_media="auto"))
+        off = SimpleNamespace(telegram=SimpleNamespace(direct_media="off"))
+        assert bench._downloader(object(), 4, "config", auto)._route is not None  # noqa: SLF001
+        assert bench._downloader(object(), 4, "config", off)._route is None  # noqa: SLF001
+
+    async def test_both_measures_each_count_both_ways(self, env, monkeypatch, capsys):
+        FakeDownloader.runs = []
+        monkeypatch.setattr(
+            bench, "user_session_source", lambda config, stored: (object(), "env")
+        )
+        monkeypatch.setattr(bench, "TelegramClient", FakeClient)
+        monkeypatch.setattr(bench, "Resolver", FakeResolver)
+        monkeypatch.setattr(bench, "Downloader", FakeDownloader)
+        assert await bench.run(args(connections=(4,), route="both")) == 0
+        out = capsys.readouterr().out
+        assert FakeDownloader.runs == [4, 4]
+        assert "normal" in out and "media" in out
