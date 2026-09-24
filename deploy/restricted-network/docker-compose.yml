@@ -39,9 +39,8 @@ services:
     depends_on: [proxy]
     env_file: .env
     environment:
-      # 没有公网 HTTPS 地址时必须关掉，否则启动即 exit 2：
-      #   http.enabled is set but http.public_base_url is empty
-      # 代价：Telegram→PikPak 转存和内嵌 PikPak 登录页不可用。
+      # 没有公网 HTTPS 地址时，开着也只是一条启动警告（阶段 1 起不再 exit 2），
+      # 只是 Telegram→PikPak 转存和 Mini App 登录不可用。
       # 有了公网地址后，设 PUBLIC_BASE_URL 并把这里翻回 "true"。
       HTTP_ENABLED: "false"
       DEFAULT_MODE: "telegram"
@@ -49,8 +48,13 @@ services:
       # en | zh — what people read. Command names, their arguments and the
       # deployment log stay English either way.
       TGMD_LANG: "en"
+      # 媒体目录（local 模式、auto 模式里受限的文件、超过上传上限的文件）。
+      # 宿主机路径由用户决定，下面是占位；取消注释并同时打开 volumes 里那行。
+      # MEDIA_DIR: "/media"
+      # LOCAL_URL_PREFIX: "smb://<NAS 地址>/<共享名>/"
     volumes:
       - ./data:/data
+      # - <NAS 上的媒体共享目录>:/media
 
 # 注意：bot 挂在 proxy 的网络栈上，重启 proxy 会掐断 bot 的连接。
 #       改完 mihomo 配置后要两个一起重启：

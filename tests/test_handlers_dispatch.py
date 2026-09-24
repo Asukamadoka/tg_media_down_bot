@@ -281,3 +281,20 @@ class TestCommands:
     async def test_an_admin_may_sign_in_a_reading_account(self, full):
         await full.on_setup(HtmlEvent("/setup telegram"))
         assert full._wizard.begun == ["telegram"]  # noqa: SLF001
+
+
+class RecordingDb(FakeDb):
+    def __init__(self) -> None:
+        self.modes: list[str] = []
+
+    async def set_user_mode(self, user_id, mode):
+        self.modes.append(mode)
+
+
+class TestModes:
+    async def test_auto_can_be_chosen(self, full):
+        db = RecordingDb()
+        full._db = db  # noqa: SLF001
+        event = HtmlEvent("/mode auto")
+        await full.on_mode(event)
+        assert db.modes == ["auto"]

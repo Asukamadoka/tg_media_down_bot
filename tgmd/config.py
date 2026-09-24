@@ -12,7 +12,9 @@ import yaml
 from . import i18n
 from .utils import ALLOWED_TEMPLATE_FIELDS, parse_bool, parse_id_list, template_fields
 
-MODES = ("telegram", "local", "pikpak")
+MODES = ("telegram", "local", "pikpak", "auto")
+"""Stored values: never translated (see tgmd.i18n). ``auto`` sends what can be
+forwarded back through Telegram and keeps what cannot on the NAS."""
 
 DIRECT_MEDIA_CHOICES = ("auto", "off")
 
@@ -66,6 +68,13 @@ class DownloadConfig:
     dir: Path = Path("downloads")
     data_dir: Path = Path("data")
     filename_template: str = "{chat}/{message_id}_{name}"
+    media_dir: Path | None = None
+    """Where files kept on the NAS go (local mode, auto's restricted files,
+    the too-large fallback). None means the download directory, as before."""
+    media_template: str = "{chat}/{name}"
+    """Layout under the media directory: the original file name, by chat."""
+    local_url_prefix: str = ""
+    """Prepended to a kept file's path in replies, e.g. smb://nas/share/."""
     concurrent: int = 2
     connections: int = 4
     """Connections per large file. Parallel parts over separate connections is
@@ -79,6 +88,10 @@ class DownloadConfig:
     @property
     def db_path(self) -> Path:
         return self.data_dir / "tgmd.sqlite3"
+
+    @property
+    def media_root(self) -> Path:
+        return self.media_dir if self.media_dir is not None else self.dir
 
 
 @dataclass
@@ -147,6 +160,7 @@ class Config:
         for directory in (
             self.telegram.session_dir,
             self.download.dir,
+            self.download.media_root,
             self.download.data_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
@@ -188,13 +202,17 @@ class Config:
         if self.download.progress_interval < 1:
             raise ConfigError("download.progress_interval must be at least 1 second")
 
-        unknown = template_fields(self.download.filename_template) - ALLOWED_TEMPLATE_FIELDS
-        if unknown:
-            raise ConfigError(
-                "download.filename_template uses unknown fields: "
-                + ", ".join(sorted(unknown))
-                + f" (allowed: {', '.join(sorted(ALLOWED_TEMPLATE_FIELDS))})"
-            )
+        for name, template in (
+            ("download.filename_template", self.download.filename_template),
+            ("download.media_template", self.download.media_template),
+        ):
+            unknown = template_fields(template) - ALLOWED_TEMPLATE_FIELDS
+            if unknown:
+                raise ConfigError(
+                    f"{name} uses unknown fields: "
+                    + ", ".join(sorted(unknown))
+                    + f" (allowed: {', '.join(sorted(ALLOWED_TEMPLATE_FIELDS))})"
+                )
 
         # Only facts about the configuration itself belong here. Whether there
         # is an admin or a reading account is runtime state: /claim and
@@ -299,6 +317,10 @@ def _env_float(name: str, default: float) -> float:
         raise ConfigError(f"{name} must be a number, got {raw!r}") from exc
 
 
+def _optional_path(value: str) -> Path | None:
+    return Path(value) if value.strip() else None
+
+
 def _env_str(name: str, default: str) -> str:
     value = os.environ.get(name)
     return default if value is None or value == "" else value.strip()
@@ -371,6 +393,16 @@ def load_config(path: Path | None = None) -> Config:
         filename_template=_env_str(
             "FILENAME_TEMPLATE",
             str(_get(data, "download", "filename_template", default="{chat}/{message_id}_{name}")),
+        ),
+        media_dir=_optional_path(
+            _env_str("MEDIA_DIR", str(_get(data, "download", "media_dir", default="")))
+        ),
+        media_template=_env_str(
+            "MEDIA_TEMPLATE",
+            str(_get(data, "download", "media_template", default="{chat}/{name}")),
+        ),
+        local_url_prefix=_env_str(
+            "LOCAL_URL_PREFIX", str(_get(data, "download", "local_url_prefix", default=""))
         ),
         concurrent=_env_int(
             "CONCURRENT_DOWNLOADS", int(_get(data, "download", "concurrent", default=2))

@@ -22,7 +22,7 @@ from .downloader import (
     describe_media,
     has_downloadable_media,
 )
-from .forwarder import Forwarder, Outcome
+from .forwarder import Forwarder, Outcome, forwardable
 from .i18n import t
 from .links import MessageRef
 from .pikpak import PikPakError, PikPakService
@@ -435,10 +435,14 @@ class JobQueue:
         info = describe_media(message)
         key = cache_key(peer_id, message.id)
         caption = _build_caption(message, chat_title)
+        # auto starts out as telegram and becomes local for what cannot be
+        # forwarded; every other mode is what it says.
+        to_telegram = job.mode in ("telegram", "auto")
+        mode = job.mode
 
-        # The cheapest path: a file we have already uploaded once. The cache is
-        # only consulted in telegram mode; `and` short-circuits before the await.
-        if job.mode == "telegram" and await self._delivery.send_from_cache(
+        # The cheapest path: a file we have already uploaded once. Only when
+        # it is going back through Telegram; `and` short-circuits the await.
+        if to_telegram and await self._delivery.send_from_cache(
             job.chat_id, key, caption
         ):
             await reporter.update(
@@ -454,7 +458,8 @@ class JobQueue:
         # Next cheapest: let Telegram copy it server-side. Only a restricted
         # source, or no way to forward, falls through to the download.
         hint = ""
-        if job.mode == "telegram" and self._forwarder is not None and source is not None:
+        restricted = source is not None and not forwardable(message, source)
+        if to_telegram and self._forwarder is not None and source is not None:
             attempt = await self._forwarder.deliver(
                 chat_id=job.chat_id,
                 message=message,
@@ -470,20 +475,32 @@ class JobQueue:
                     force=True,
                 )
                 return
+            restricted = attempt.outcome is Outcome.RESTRICTED
             if attempt.outcome is Outcome.NO_CACHE and not job.cache_hint:
                 job.cache_hint = True
                 hint = t("job.hint_cache")
+        if job.mode == "auto":
+            # Restricted content can only be had by downloading it, and then
+            # it is watched on the NAS rather than pushed anywhere else.
+            mode = "local" if restricted or source is None else "telegram"
 
-        relative = build_relative_path(
-            self._config.download.filename_template,
-            chat=chat_title,
-            chat_id=peer_id,
-            message_id=message.id,
-            name=info.file_name,
-            topic_id=job.ref.topic_id if job.ref else None,
-            when=getattr(message, "date", None),
+        def place(template: str, root: Path) -> Path:
+            return root / build_relative_path(
+                template,
+                chat=chat_title,
+                chat_id=peer_id,
+                message_id=message.id,
+                name=info.file_name,
+                topic_id=job.ref.topic_id if job.ref else None,
+                when=getattr(message, "date", None),
+            )
+
+        download = self._config.download
+        keep_at = place(download.media_template, download.media_root)
+        # A file that is to be kept is downloaded straight to where it stays.
+        destination = unique_path(
+            keep_at if mode == "local" else place(download.filename_template, download.dir)
         )
-        destination = unique_path(self._config.download.dir / relative)
 
         tracker = RateTracker()
         label = truncate(info.file_name, 48)
@@ -518,7 +535,9 @@ class JobQueue:
         )
 
         try:
-            result = await self._deliver(job, reporter, path, info, caption, key, prefix)
+            result = await self._deliver(
+                job, mode, reporter, path, info, caption, key, prefix, keep_at
+            )
         except BaseException:
             # A failed delivery has no retry, so the file would sit on disk
             # with nobody told where. Keep it only if files are kept anyway.
@@ -547,8 +566,10 @@ class JobQueue:
         except OSError as exc:
             log.debug("could not remove %s: %s", path, exc)
 
-    async def _deliver(self, job, reporter, path: Path, info, caption, key, prefix):
-        """Send the downloaded file to wherever the job's mode points."""
+    async def _deliver(
+        self, job, mode: str, reporter, path: Path, info, caption, key, prefix, keep_at: Path
+    ):
+        """Send the downloaded file to wherever ``mode`` points."""
         upload_tracker = RateTracker()
 
         async def on_upload(sent: int, total: int) -> None:
@@ -566,10 +587,10 @@ class JobQueue:
                 )
             )
 
-        if job.mode == "local":
+        if mode == "local":
             return await self._delivery.to_local(path, info)
 
-        if job.mode == "pikpak":
+        if mode == "pikpak":
             await reporter.update(
                 t(
                     "job.handing_to_pikpak",
@@ -599,7 +620,7 @@ class JobQueue:
             # Falling back is better than losing a download that already cost
             # bandwidth, so the file stays on disk and the user is told why.
             log.info("job %d falling back to local: %s", job.id, exc)
-            result = await self._delivery.to_local(path, info)
+            result = await self._delivery.to_local(path, info, keep_at=unique_path(keep_at))
             result.summary = f"{exc}; {result.summary}"
             return result
 

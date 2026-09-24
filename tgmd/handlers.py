@@ -597,7 +597,7 @@ class BotHandlers:
         """Queue media that was sent straight to the bot."""
         mode = await self._mode_for(event.sender_id)
         note = ""
-        if mode == "telegram":
+        if mode in ("telegram", "auto"):
             # Sending the file back to the person who just sent it is pointless.
             mode = "local"
             note = t("inbound.note_local")
