@@ -16,7 +16,21 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from ..core.models import Action, FileNode, Kind, normalize_path
+from ..core.models import Action, FileNode, Kind, Plan, normalize_path
+
+# Columns added after a table first shipped (red line 3: add, never rename).
+_ADDED_COLUMNS = (
+    ("audit", "plan_id", "INTEGER"),
+    ("audit", "undo_of", "INTEGER"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, kind in _ADDED_COLUMNS:
+        present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in present:
+            # Names come from the constant above, never from input.
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
 
 
 def now_iso() -> str:
@@ -57,6 +71,7 @@ class Store:
         conn.row_factory = sqlite3.Row
         schema = resources.files("pikpak_wms.store").joinpath("schema.sql").read_text("utf-8")
         conn.executescript(schema)
+        _migrate(conn)
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.commit()
         return conn
@@ -217,6 +232,44 @@ class Store:
 
         await self._write(work)
 
+    async def insert(self, node: FileNode, *, synced_at: str | None = None) -> None:
+        """Add or overwrite one entry (after this process changed the drive)."""
+        stamp = synced_at or now_iso()
+        await self._write(
+            lambda conn: conn.execute(
+                """
+                INSERT OR REPLACE INTO files (file_id, parent_id, path, name, kind, size, mime,
+                                              hash, created_time, modified_time, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    node.file_id, node.parent_id, normalize_path(node.path), node.name,
+                    str(node.kind), node.size, node.mime, node.hash, node.created_time,
+                    node.modified_time, stamp,
+                ),
+            )
+        )
+
+    async def relocate(self, file_id: str, *, parent_id: str, path: str) -> None:
+        """Record a rename or a move: the entry and everything under it."""
+        path = normalize_path(path)
+
+        def work(conn: sqlite3.Connection) -> None:
+            row = conn.execute("SELECT path FROM files WHERE file_id = ?", (file_id,)).fetchone()
+            if row is None:
+                return
+            old = row["path"]
+            conn.execute(
+                "UPDATE files SET parent_id = ?, path = ?, name = ? WHERE file_id = ?",
+                (parent_id, path, path.rsplit("/", 1)[-1], file_id),
+            )
+            conn.execute(
+                "UPDATE files SET path = ? || substr(path, ?) WHERE path LIKE ? ESCAPE '\\'",
+                (path, len(old) + 1, _like_prefix(old) + "/%"),
+            )
+
+        await self._write(work)
+
     # ----------------------------------------------------------------- meta
 
     async def get_meta(self, key: str) -> str | None:
@@ -234,18 +287,26 @@ class Store:
 
     # ---------------------------------------------------------------- audit
 
-    async def record(self, action: Action, *, dry_run: bool, at: str | None = None) -> int:
+    async def record(
+        self,
+        action: Action,
+        *,
+        dry_run: bool,
+        at: str | None = None,
+        plan_id: int | None = None,
+        undo_of: int | None = None,
+    ) -> int:
         """Write one audit row, with the before snapshot (rule 5). Returns its id."""
 
         def work(conn: sqlite3.Connection) -> int:
             cursor = conn.execute(
-                "INSERT INTO audit (action, file_id, before, after, rule_name, dry_run, at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO audit (action, file_id, before, after, rule_name, dry_run, at, "
+                "plan_id, undo_of) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     str(action.type), action.file_id,
                     json.dumps(action.before, ensure_ascii=False),
                     json.dumps(action.after, ensure_ascii=False),
-                    action.rule_name, int(dry_run), at or now_iso(),
+                    action.rule_name, int(dry_run), at or now_iso(), plan_id, undo_of,
                 ),
             )
             return int(cursor.lastrowid or 0)
@@ -256,14 +317,122 @@ class Store:
         rows = await self._read("SELECT * FROM audit WHERE id = ?", (audit_id,))
         return _audit(rows[0]) if rows else None
 
-    async def audit_entries(self, *, limit: int = 50, applied_only: bool = False) -> list[dict]:
-        where = "WHERE dry_run = 0" if applied_only else ""
+    async def audit_entries(
+        self, *, limit: int = 50, applied_only: bool = False, plan_id: int | None = None
+    ) -> list[dict]:
+        clauses, params = [], []
+        if applied_only:
+            clauses.append("dry_run = 0")
+        if plan_id is not None:
+            clauses.append("plan_id = ?")
+            params.append(plan_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = await self._read(
-            # `where` is one of two fixed strings, never user input.
+            # `where` is built from fixed strings; values are parameters.
             f"SELECT * FROM audit {where} ORDER BY id DESC LIMIT ?",
-            (limit,),
+            (*params, limit),
         )
         return [_audit(row) for row in rows]
+
+    async def undone_by(self, audit_id: int) -> int | None:
+        """The audit id of the entry that undid ``audit_id``, if any."""
+        rows = await self._read("SELECT id FROM audit WHERE undo_of = ? LIMIT 1", (audit_id,))
+        return int(rows[0]["id"]) if rows else None
+
+    # ---------------------------------------------------------------- plans
+
+    async def save_plan(self, plan: Plan, *, fingerprint: str) -> int:
+        stamp = now_iso()
+
+        def work(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
+                "INSERT INTO plans (source, fingerprint, body, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (plan.source, fingerprint, json.dumps(plan.to_dict(), ensure_ascii=False),
+                 stamp, stamp),
+            )
+            return int(cursor.lastrowid or 0)
+
+        return await self._write(work)
+
+    async def plan_row(self, plan_id: int) -> dict[str, Any] | None:
+        rows = await self._read("SELECT * FROM plans WHERE id = ?", (plan_id,))
+        return _plan(rows[0]) if rows else None
+
+    async def plan_rows(self, *, status: list[str] | None = None, limit: int = 20) -> list[dict]:
+        if status:
+            marks = ",".join("?" for _ in status)
+            rows = await self._read(
+                f"SELECT * FROM plans WHERE status IN ({marks}) ORDER BY id DESC LIMIT ?",
+                (*status, limit),
+            )
+        else:
+            rows = await self._read("SELECT * FROM plans ORDER BY id DESC LIMIT ?", (limit,))
+        return [_plan(row) for row in rows]
+
+    async def open_plan_with(self, source: str, fingerprint: str) -> int | None:
+        """A pending plan of ``source`` with exactly these actions, if one exists."""
+        rows = await self._read(
+            "SELECT id FROM plans WHERE source = ? AND fingerprint = ? AND status = 'pending' "
+            "ORDER BY id DESC LIMIT 1",
+            (source, fingerprint),
+        )
+        return int(rows[0]["id"]) if rows else None
+
+    async def update_plan(
+        self, plan_id: int, *, status: str, progress: int, result: dict[str, Any]
+    ) -> None:
+        await self._write(
+            lambda conn: conn.execute(
+                "UPDATE plans SET status = ?, progress = ?, result = ?, updated_at = ? "
+                "WHERE id = ?",
+                (status, progress, json.dumps(result, ensure_ascii=False), now_iso(), plan_id),
+            )
+        )
+
+    # ---------------------------------------------------------------- tasks
+
+    async def add_task(
+        self, *, task_id: str, type: str, source: str, target_path: str, file_id: str = "",
+        phase: str = "PENDING",
+    ) -> None:
+        await self._write(
+            lambda conn: conn.execute(
+                "INSERT INTO tasks (task_id, type, source, target_path, phase, file_id, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (task_id, type, source, target_path, phase, file_id or None, now_iso()),
+            )
+        )
+
+    async def task_for(self, type: str, source: str) -> dict[str, Any] | None:
+        rows = await self._read(
+            "SELECT * FROM tasks WHERE type = ? AND source = ?", (type, source)
+        )
+        return dict(rows[0]) if rows else None
+
+    async def task_rows(self, *, phases: list[str] | None = None, limit: int = 50) -> list[dict]:
+        if phases:
+            marks = ",".join("?" for _ in phases)
+            rows = await self._read(
+                f"SELECT * FROM tasks WHERE phase IN ({marks}) ORDER BY created_at DESC LIMIT ?",
+                (*phases, limit),
+            )
+        else:
+            rows = await self._read(
+                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)
+            )
+        return [dict(row) for row in rows]
+
+    async def finish_task(
+        self, task_id: str, *, phase: str, file_id: str | None = None, error: str | None = None
+    ) -> None:
+        await self._write(
+            lambda conn: conn.execute(
+                "UPDATE tasks SET phase = ?, file_id = COALESCE(?, file_id), error = ?, "
+                "finished_at = ? WHERE task_id = ?",
+                (phase, file_id, error, now_iso(), task_id),
+            )
+        )
 
 
 def _audit(row: sqlite3.Row) -> dict[str, Any]:
@@ -276,6 +445,22 @@ def _audit(row: sqlite3.Row) -> dict[str, Any]:
         "rule_name": row["rule_name"],
         "dry_run": bool(row["dry_run"]),
         "at": row["at"],
+        "plan_id": row["plan_id"],
+        "undo_of": row["undo_of"],
+    }
+
+
+def _plan(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "source": row["source"],
+        "status": row["status"],
+        "fingerprint": row["fingerprint"],
+        "plan": Plan.from_dict(json.loads(row["body"])),
+        "progress": row["progress"],
+        "result": json.loads(row["result"] or "{}"),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
     }
 
 

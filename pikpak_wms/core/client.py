@@ -149,13 +149,22 @@ class WmsClient:
 
     async def ensure_folder(self, path: str) -> str:
         """The id of the folder at ``path``, creating any missing levels."""
+        chain = await self.ensure_folder_chain(path)
+        return chain[-1][1] if chain else ROOT_ID
+
+    async def ensure_folder_chain(self, path: str) -> list[tuple[str, str]]:
+        """``[(path, id), ...]`` for every level of ``path``, creating missing ones."""
         path = normalize_path(path)
         if path == "/":
-            return ROOT_ID
+            return []
+        parts = [p for p in path.split("/") if p]
         found = await self._call("path_to_id", path, create=True)
-        if not found:
+        if not found or len(found) < len(parts):
             raise WmsError(f"could not create {path}")
-        return str(found[-1].get("id") or "")
+        return [
+            ("/" + "/".join(parts[: index + 1]), str(level.get("id") or ""))
+            for index, level in enumerate(found[: len(parts)])
+        ]
 
     async def rename(self, file_id: str, name: str) -> None:
         await self._call("file_rename", file_id, name)
@@ -204,6 +213,18 @@ class WmsClient:
 
     async def restore_share(self, share_id: str, pass_code_token: str, ids: list[str]) -> None:
         await self._call("restore", share_id, pass_code_token, ids)
+
+    async def offline_tasks(self, *, page_size: int = 100) -> list[dict]:
+        """The account's recent offline downloads, every phase, newest first."""
+        page = await self._call(
+            "offline_list",
+            size=page_size,
+            phase=[
+                "PHASE_TYPE_PENDING", "PHASE_TYPE_RUNNING",
+                "PHASE_TYPE_COMPLETE", "PHASE_TYPE_ERROR",
+            ],
+        )
+        return list(page.get("tasks") or [])
 
 
 def child_path(parent: str, name: str) -> str:

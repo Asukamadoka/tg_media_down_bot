@@ -17,10 +17,18 @@ async def ls(ctx: Context, path: str = "/") -> list[FileNode]:
     if path != "/":
         folder = await ctx.store.node_at(path)
         if folder is None or not folder.is_folder:
-            raise NotFoundError(f"{path} is not a folder in the index; run a stocktake")
+            raise NotFoundError(
+                f"{path} is not a folder in the index; run a stocktake",
+                key="error.not_indexed", path=path,
+            )
     nodes = await ctx.store.nodes_under(path, recursive=False)
     return sorted(nodes, key=lambda node: (not node.is_folder, node.name.lower()))
 
 
 async def quota(ctx: Context) -> Quota:
     return await ctx.client.quota()
+
+
+async def events_raw(ctx: Context, *, limit: int = 20) -> dict:
+    """PikPak's ``events`` answer, untouched (docs/wms/EXTRAS.md §5)."""
+    return await ctx.client.events(page_size=limit)

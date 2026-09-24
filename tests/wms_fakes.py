@@ -31,6 +31,7 @@ class FakeDrive:
         self._ids = itertools.count(1)
         self._clock = datetime(2026, 9, 1, tzinfo=UTC)
         self.quota = {"limit": "10995116277760", "usage": "1000", "usage_in_trash": "10"}
+        self.tasks: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------ building
 
@@ -240,8 +241,16 @@ class FakeDrive:
         base = self.path_of(parent_id) if parent_id else ""
         item_id = self.add(f"{base}/{name or file_url.rsplit('/', 1)[-1] or 'download'}",
                            size=1024)
-        return {"task": {"id": f"task-{item_id}", "file_id": item_id,
-                         "file_name": self.items[item_id]["name"]}}
+        task = {"id": f"task-{item_id}", "file_id": item_id,
+                "file_name": self.items[item_id]["name"], "phase": "PHASE_TYPE_RUNNING"}
+        self.tasks.append(task)
+        return {"task": dict(task)}
+
+    async def offline_list(self, size=10000, next_page_token=None, phase=None):
+        self._record("offline_list")
+        wanted = phase or ["PHASE_TYPE_RUNNING", "PHASE_TYPE_ERROR"]
+        return {"tasks": [dict(t) for t in reversed(self.tasks) if t["phase"] in wanted][:size],
+                "next_page_token": ""}
 
     async def get_share_info(self, share_link, pass_code=None):
         self._record("get_share_info")

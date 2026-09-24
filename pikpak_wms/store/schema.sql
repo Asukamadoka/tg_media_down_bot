@@ -65,3 +65,23 @@ CREATE TABLE IF NOT EXISTS meta (
     key    TEXT PRIMARY KEY,
     value  TEXT NOT NULL
 );
+
+-- 变更计划（M2）：dry-run 的产物落在这里，面板和 bot 都从这里读，确认后执行。
+-- progress 是已处理到第几个动作，分批执行（max_actions_per_run、--limit）从这里续上。
+CREATE TABLE IF NOT EXISTS plans (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    source       TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending', 'partial', 'applied', 'discarded')),
+    fingerprint  TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    progress     INTEGER NOT NULL DEFAULT 0,
+    result       TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_plans_status ON plans (status);
+
+-- audit 在 M2 加了两列（plan_id、undo_of），由 db.py 的迁移补上：
+-- 旧库里已有的 audit 表不会被 CREATE TABLE IF NOT EXISTS 改动。

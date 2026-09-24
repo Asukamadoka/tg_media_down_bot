@@ -19,9 +19,15 @@ ratelimit:
   initial_backoff_seconds: 3.0
 
 # ---- 本地状态 ----
-store:
-  database: data/wms.db
-  token_file: data/token.json
+# 默认放在 $DATA_DIR 下（容器里是 /data/db，与 bot 的数据库同一个卷，重建不丢）：
+#   索引与审计 $DATA_DIR/wms.sqlite3，token $DATA_DIR/wms-token.json。
+# 一般不要改；改成相对路径会落到容器的临时层，重建即丢。
+store: {}
+#  database: /data/db/wms.sqlite3
+#  token_file: /data/db/wms-token.json
+
+# 规则文件：默认 WMS_RULES，否则 config/rules.yaml
+# rules_file: /data/db/rules.yaml
 
 # ---- 仓位模板（layout 会确保这些目录存在）----
 layout:
@@ -41,19 +47,27 @@ stocktake:
 
 # ---- 出库 ----
 outbound:
-  # none | aria2
+  # none：只给直链 | aria2：交给 aria2 | local：bot 自己下载到 local_dir
   downloader: none
   aria2:
     rpc_url: http://127.0.0.1:6800/jsonrpc
     # secret 请放环境变量 ARIA2_SECRET
-    dir: /downloads
+    dir: /downloads          # aria2 那边的保存目录
+  # local 模式的目标目录；不填则用 bot 的 MEDIA_DIR（再不行用 DOWNLOAD_DIR）
+  # local_dir: /data/media
 
-# ---- 定时任务（cron 表达式，本地时区）----
+# ---- 定时任务（cron 表达式，按 timezone）----
+# 可用任务：stocktake / stocktake-full / inbound-poll / layout / organize / cleanup
+# apply: false 只把计划存为「待确认」（wms plans 查看，wms apply <id> 执行）。
+# 任何定时任务都不会永久删除（铁律 2）。
 schedule:
   timezone: Asia/Shanghai
   jobs:
     - name: stocktake
       cron: "*/30 * * * *"
+      enabled: true
+    - name: stocktake-full        # 增量盘点的兜底（docs/wms/EXTRAS.md §5）
+      cron: "0 5 * * *"
       enabled: true
     - name: inbound-poll      # 轮询离线任务完成情况
       cron: "*/5 * * * *"
@@ -67,7 +81,4 @@ schedule:
       enabled: false          # 确认规则无误再开
       apply: false
 
-# ---- 日志 ----
-logging:
-  level: INFO
-  file: logs/wms.log
+# 日志跟随 bot 的 LOG_LEVEL，输出到标准输出（docker logs 可见）。

@@ -51,6 +51,12 @@ ENV_VARS = (
     # one of these: images set it to C.UTF-8 for unrelated reasons.
     "TGMD_LANG",
     "BOT_LANG",
+    # pikpak_wms
+    "WMS_CONFIG",
+    "WMS_RULES",
+    "WMS_LANG",
+    "PIKPAK_ENCODED_TOKEN",
+    "ARIA2_SECRET",
     # Hosting platforms export these; they must not leak into tests.
     "PORT",
     "RENDER_EXTERNAL_URL",
