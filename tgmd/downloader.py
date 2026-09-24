@@ -22,7 +22,17 @@ from telethon.tl.types import (
     MessageMediaWebPage,
 )
 
-from .utils import sanitize_component
+from .parallel import (
+    MAX_CONNECTIONS,
+    MIN_PARALLEL_SIZE,
+    EndpointChooser,
+    ParallelUnavailable,
+    default_endpoints,
+    document_location,
+    download_parts,
+    telethon_sources,
+)
+from .utils import human_rate, human_size, sanitize_component
 
 log = logging.getLogger(__name__)
 
@@ -154,11 +164,35 @@ def ensure_disk_space(target_dir: Path, needed: int | None) -> None:
         )
 
 
+@dataclass
+class Transfer:
+    """How the last download went, for the log line and for the benchmark."""
+
+    size: int
+    seconds: float
+    connections: int
+    dc_id: int | None
+    endpoint: str | None = None
+
+    @property
+    def rate(self) -> float:
+        return self.size / self.seconds if self.seconds > 0 else 0.0
+
+
 class Downloader:
     """Downloads message media to disk, reporting progress as it goes."""
 
-    def __init__(self, client: TelegramClient) -> None:
+    def __init__(
+        self,
+        client: TelegramClient,
+        *,
+        connections: int = 1,
+        endpoints: EndpointChooser = default_endpoints,
+    ) -> None:
         self._client = client
+        self._connections = max(1, min(connections, MAX_CONNECTIONS))
+        self._endpoints = endpoints
+        self.last: Transfer | None = None
 
     async def download(
         self,
@@ -170,14 +204,93 @@ class Downloader:
     ) -> Path:
         """Download ``message``'s media to ``destination``.
 
-        Retries transient failures and honours Telegram's flood waits. A
-        partially written file is always removed, so the download directory
-        never accumulates truncated media.
+        Large documents go over several connections at once when that is
+        configured; anything that cannot, falls back to one. Retries transient
+        failures and honours Telegram's flood waits. A partially written file
+        is always removed, so the download directory never accumulates
+        truncated media.
         """
         info = describe_media(message)
         destination.parent.mkdir(parents=True, exist_ok=True)
         ensure_disk_space(destination.parent, info.size)
 
+        started = time.monotonic()
+        transfer = await self._parallel(message, info, destination, progress, cancel)
+        if transfer is None:
+            path = await self._sequential(message, destination, progress, cancel)
+            transfer = Transfer(
+                size=path.stat().st_size if path.exists() else (info.size or 0),
+                seconds=0.0,
+                connections=1,
+                dc_id=_dc_of(message),
+            )
+        else:
+            path = destination
+        transfer.seconds = time.monotonic() - started
+        self.last = transfer
+        # One line per file, so the operator can see where their files live
+        # (which DC) and what a connection count actually buys.
+        log.info(
+            "downloaded %s: %s in %.1fs (%s) from DC %s over %d connection(s)%s",
+            info.file_name,
+            human_size(transfer.size),
+            transfer.seconds,
+            human_rate(transfer.rate),
+            transfer.dc_id if transfer.dc_id is not None else "?",
+            transfer.connections,
+            f" via {transfer.endpoint}" if transfer.endpoint else "",
+        )
+        return path
+
+    async def _parallel(self, message, info: MediaInfo, destination: Path, progress, cancel):
+        """Try the multi-connection path. Returns None when it does not apply."""
+        document = getattr(message, "document", None)
+        size = info.size or 0
+        if self._connections < 2 or document is None or size < MIN_PARALLEL_SIZE:
+            return None
+        dc_id = document.dc_id
+
+        async def refresh():
+            # A file reference expires; the message, fetched again, carries a
+            # fresh one.
+            fresh = await self._client.get_messages(
+                await message.get_input_chat(), ids=message.id
+            )
+            if fresh is None or getattr(fresh, "document", None) is None:
+                raise ParallelUnavailable("the message is gone")
+            return document_location(fresh.document)
+
+        try:
+            async with telethon_sources(
+                self._client, dc_id, self._connections, endpoints=self._endpoints
+            ) as (sources, endpoint):
+                await download_parts(
+                    sources,
+                    location=document_location(document),
+                    size=size,
+                    path=destination,
+                    progress=progress,
+                    cancel=cancel,
+                    refresh=refresh,
+                    flood_ceiling=_FLOOD_WAIT_CEILING,
+                )
+                return Transfer(
+                    size=size,
+                    seconds=0.0,
+                    connections=len(sources),
+                    dc_id=dc_id,
+                    endpoint=_endpoint_label(endpoint),
+                )
+        except ParallelUnavailable as exc:
+            self._cleanup(destination)
+            log.info("parallel download not possible (%s); using one connection", exc)
+            return None
+        except BaseException:
+            self._cleanup(destination)
+            raise
+
+    async def _sequential(self, message, destination: Path, progress, cancel) -> Path:
+        """Telethon's own download, over one connection, with retries."""
         last_error: Exception | None = None
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             if cancel is not None and cancel.is_set():
@@ -272,3 +385,19 @@ class RateTracker:
         if rate <= 0:
             return None
         return max((total - received) / rate, 0.0)
+
+
+def _dc_of(message) -> int | None:
+    """The data centre a message's file lives in, when there is one."""
+    for attribute in ("document", "photo"):
+        media = getattr(message, attribute, None)
+        if media is not None and getattr(media, "dc_id", None) is not None:
+            return int(media.dc_id)
+    return None
+
+
+def _endpoint_label(endpoint) -> str | None:
+    if endpoint is None:
+        return None
+    kind = " media" if getattr(endpoint, "media_only", False) else ""
+    return f"{getattr(endpoint, 'ip_address', '?')}:{getattr(endpoint, 'port', '?')}{kind}"

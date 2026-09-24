@@ -105,8 +105,10 @@ class Application:
             resolver=Resolver(
                 reading_client, auto_join=config.download.auto_join_invites
             ),
-            downloader=Downloader(reading_client),
-            bot_downloader=Downloader(self.bot),
+            downloader=Downloader(
+                reading_client, connections=config.download.connections
+            ),
+            bot_downloader=Downloader(self.bot, connections=config.download.connections),
             delivery=delivery,
             pikpak=self.pikpak,
             # Follows self.user, which /setup telegram can replace at runtime.
@@ -206,7 +208,7 @@ class Application:
                 Resolver(
                     client, auto_join=self.config.download.auto_join_invites
                 ),
-                Downloader(client),
+                Downloader(client, connections=self.config.download.connections),
             )
         if self.handlers is not None:
             self.handlers.set_user_client(client)

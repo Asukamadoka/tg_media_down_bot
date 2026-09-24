@@ -286,6 +286,7 @@ The settings worth knowing about:
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `download.concurrent` | 2 | parallel downloads across all users |
+| `download.connections` | 4 | connections per large file (`DOWNLOAD_CONNECTIONS`, at most 8); 1 turns parallel download off |
 | `download.max_batch` | 50 | cap on messages expanded from one range link |
 | `download.max_queue_per_user` | 20 | per-user queue limit |
 | `download.filename_template` | `{chat}/{message_id}_{name}` | layout under `DOWNLOAD_DIR` |
