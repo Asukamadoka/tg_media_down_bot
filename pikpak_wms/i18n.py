@@ -43,9 +43,10 @@ _language: str | None = None
 
 
 def set_language(value: str | None) -> str:
+    """Fix the language for this process; ``None`` goes back to the environment."""
     global _language
-    _language = normalize(value)
-    return _language
+    _language = normalize(value) if value is not None else None
+    return language()
 
 
 def language() -> str:
@@ -82,6 +83,79 @@ CATALOG: dict[str, dict[str, str]] = {
         "action.share": "share   {path}",
         "action.delete_forever": "DELETE FOREVER  {path}",
         "action.other": "{action}  {path}",
+        "action.unstar": "unstar  {path}",
+        "action.outbound": "fetch   {path}  →  {dest}",
+        "action.inbound": "take in {source}  →  {path}",
+        # ---- plans
+        "plan.header": (
+            "Plan {id} ({source}): {actions} action(s) on {files} file(s), {size}"
+        ),
+        "plan.empty": "  Nothing to do.",
+        "plan.more": "  … and {count} more",
+        "plan.note": "{text}",
+        "plan.rule_matched": "rule “{rule}” matched {count}",
+        "plan.not_found": "There is no plan {id}.",
+        "plan.closed": "Plan {id} is {status}; it cannot be applied or discarded again.",
+        "plan.status.pending": "pending",
+        "plan.status.partial": "partly applied",
+        "plan.status.applied": "applied",
+        "plan.status.discarded": "discarded",
+        "apply.summary": (
+            "Plan {id}: {applied} applied, {skipped} skipped, {failed} failed, "
+            "{remaining} left"
+        ),
+        "conflict.bad_name": "rule “{rule}”: {file} would get the unusable name “{name}”",
+        "conflict.taken": "rule “{rule}”: {file} not moved, {path} is taken",
+        "conflict.into_itself": "rule “{rule}”: cannot move {path} into itself",
+        "conflict.no_folder": (
+            "rule “{rule}”: {file} not moved, {path} does not exist (create_missing is off)"
+        ),
+        "conflict.outbound_folder": "rule “{rule}”: {path} is a folder; outbound takes files",
+        "conflict.template": "rule “{rule}”: {file} skipped: {error}",
+        "dedupe.group": "keep {keep}, trash {count} copy/copies ({size})",
+        "dedupe.size_mismatch": "same hash {hash} but different sizes, left alone: {paths}",
+        "dedupe.total": "duplicates take {size}",
+        "forever.refused": (
+            "Permanent deletion is off. Set runtime.allow_permanent_delete: true in the "
+            "config and pass --forever."
+        ),
+        # ---- undo
+        "undo.no_entry": "There is no audit entry {id}.",
+        "undo.failed": "The undo failed: {error}",
+        "undo.refused.generic": "“{action}” cannot be undone.",
+        "undo.refused.already": "Entry {id} was already undone (entry {by}).",
+        "undo.refused.changed": (
+            "The file changed since entry {id} ({state}); nothing was done."
+        ),
+        "undo.refused.dry_run": "Entry {id} was a dry run; it changed nothing.",
+        "undo.refused.copy": "A copy is not undone automatically: trash {path} yourself.",
+        "undo.refused.forever": "A permanent deletion cannot be undone.",
+        "undo.refused.share": (
+            "PikPak has no way to cancel a share from here; cancel it in the PikPak app."
+        ),
+        "undo.refused.outbound": "A file taken out of the drive cannot be undone.",
+        "undo.refused.inbound": "To undo an inbound, trash {path} yourself.",
+        "undo.refused.existed": "{path} existed before; undo will not trash it.",
+        "undo.refused.not_empty": "{path} is not empty; undo what was put in it first.",
+        # ---- errors
+        "error.not_indexed": "{path} is not a folder in the index; run wms stocktake first.",
+        "error.no_folder": "{path} does not exist.",
+        "error.no_outbound": "No outbound destination is configured.",
+        # ---- inbound / outbound / jobs
+        "inbound.unknown": "Not a magnet, URL or PikPak share link: {source}",
+        "inbound.share_unusable": "The share link is not usable (status {status}).",
+        "inbound.share_empty": "The share link contains no files.",
+        "outbound.missing": "{path} is not in the index",
+        "outbound.no_local_dir": (
+            "No local folder: set outbound.local_dir in the config, or MEDIA_DIR."
+        ),
+        "outbound.short": "{path}: got {got} of {size} bytes; the partial file was removed",
+        "outbound.aria2_error": "aria2 refused: {error}",
+        "outbound.unknown": "Unknown downloader “{mode}”: use none, aria2 or local.",
+        "job.nothing": "{name}: nothing to do",
+        "job.planned": "{name}: plan {id} with {actions} action(s) is waiting for confirmation",
+        "job.no_rules": "{name}: no enabled rules",
+        "job.polled": "{checked} download(s) checked, {finished} finished, {failed} failed",
         # ---- stocktake
         "stocktake.full": (
             "Full stocktake of {roots}: {entries} entries, {listed} folder(s) listed, "
@@ -136,6 +210,41 @@ CATALOG: dict[str, dict[str, str]] = {
         "cli.ls.folder": "folder",
         "cli.quota.line": "Used {used} of {limit} ({percent}%), {trash} in the trash.",
         "cli.todo": "Not implemented yet: {what} (planned for {milestone}).",
+        "cli.plan.dry_run_hint": "Dry run: nothing changed. Apply it with: wms apply {id}",
+        "cli.plan.status": "Status: {status}, {progress}/{total} handled.",
+        "cli.plan.discarded": "Plan {id} discarded.",
+        "cli.plans.none": "No plans waiting.",
+        "cli.plans.id": "Plan",
+        "cli.plans.source": "From",
+        "cli.plans.status": "Status",
+        "cli.plans.actions": "Done",
+        "cli.plans.created": "Made",
+        "cli.apply.failed": "failed: {path}: {error}",
+        "cli.apply.stopped": "Stopped early: {reason}. Run the same command again to continue.",
+        "cli.forever.confirm": "Delete permanently? This cannot be undone.",
+        "cli.rules.valid": "The rules file is valid: {count} rule(s).",
+        "cli.rules.name": "Rule",
+        "cli.rules.stage": "Stage",
+        "cli.rules.scope": "Scope",
+        "cli.rules.actions": "Actions",
+        "cli.rules.enabled": "Enabled",
+        "cli.inbound.plan": "Would take in {source} ({kind}) to {target}",
+        "cli.inbound.hint": "Dry run: nothing sent. Add --apply to take them in.",
+        "cli.inbound.done": "Taken in {source} ({kind}): {names}",
+        "cli.inbound.existing": "Already taken in earlier ({phase}): {source}",
+        "cli.audit.none": "No changes recorded yet.",
+        "cli.audit.id": "Entry",
+        "cli.audit.at": "When (UTC)",
+        "cli.audit.what": "Change",
+        "cli.audit.rule": "Rule",
+        "cli.audit.undo_of": "[undo of {id}]",
+        "cli.undo.hint": "Dry run: nothing changed. Undo it with: wms undo {id} --apply",
+        "cli.undo.done": "Entry {id} undone (recorded as entry {new}).",
+        "cli.run.no_jobs": "No enabled jobs under schedule.jobs in the config.",
+        "cli.run.started": "Running {count} job(s) on {tz} time. Ctrl-C stops.",
+        "cli.events.raw_only": (
+            "Only --raw exists for now: the format is undocumented (docs/wms/EXTRAS.md §5)."
+        ),
     },
     "zh": {
         "action.rename": "重命名  {old}  →  {new}",
@@ -148,6 +257,66 @@ CATALOG: dict[str, dict[str, str]] = {
         "action.share": "分享    {path}",
         "action.delete_forever": "永久删除  {path}",
         "action.other": "{action}  {path}",
+        "action.unstar": "取消星标  {path}",
+        "action.outbound": "出库    {path}  →  {dest}",
+        "action.inbound": "入库    {source}  →  {path}",
+        "plan.header": "计划 {id}（{source}）：{actions} 个动作，涉及 {files} 个文件，共 {size}",
+        "plan.empty": "  没有要做的。",
+        "plan.more": "  …… 还有 {count} 个",
+        "plan.note": "{text}",
+        "plan.rule_matched": "规则「{rule}」命中 {count} 个",
+        "plan.not_found": "没有编号为 {id} 的计划。",
+        "plan.closed": "计划 {id} 已{status}，不能再执行或丢弃。",
+        "plan.status.pending": "待确认",
+        "plan.status.partial": "部分执行",
+        "plan.status.applied": "执行完毕",
+        "plan.status.discarded": "丢弃",
+        "apply.summary": (
+            "计划 {id}：执行 {applied}，跳过 {skipped}，失败 {failed}，剩余 {remaining}"
+        ),
+        "conflict.bad_name": "规则「{rule}」：{file} 会得到不可用的名字「{name}」",
+        "conflict.taken": "规则「{rule}」：{file} 没有移动，{path} 已被占用",
+        "conflict.into_itself": "规则「{rule}」：不能把 {path} 移进它自己",
+        "conflict.no_folder": (
+            "规则「{rule}」：{file} 没有移动，{path} 不存在（create_missing 已关闭）"
+        ),
+        "conflict.outbound_folder": "规则「{rule}」：{path} 是目录，出库只接受文件",
+        "conflict.template": "规则「{rule}」：跳过 {file}：{error}",
+        "dedupe.group": "保留 {keep}，{count} 个副本进回收站（{size}）",
+        "dedupe.size_mismatch": "hash {hash} 相同但大小不同，不处理：{paths}",
+        "dedupe.total": "重复文件共占 {size}",
+        "forever.refused": (
+            "永久删除未开启。需要在配置里设 runtime.allow_permanent_delete: true，"
+            "并且传 --forever。"
+        ),
+        "undo.no_entry": "没有编号为 {id} 的审计记录。",
+        "undo.failed": "撤销失败：{error}",
+        "undo.refused.generic": "「{action}」不能撤销。",
+        "undo.refused.already": "记录 {id} 已经撤销过了（记录 {by}）。",
+        "undo.refused.changed": "记录 {id} 之后文件又变了（{state}），没有做任何事。",
+        "undo.refused.dry_run": "记录 {id} 只是 dry-run，本来就没改动任何东西。",
+        "undo.refused.copy": "复制不自动撤销：请自己把 {path} 放进回收站。",
+        "undo.refused.forever": "永久删除无法撤销。",
+        "undo.refused.share": "这里没法取消分享（PikPak 没有这个接口），请在 PikPak 应用里取消。",
+        "undo.refused.outbound": "已经取出网盘的文件无法撤销。",
+        "undo.refused.inbound": "要撤销入库，请自己把 {path} 放进回收站。",
+        "undo.refused.existed": "{path} 原本就存在，撤销不会把它放进回收站。",
+        "undo.refused.not_empty": "{path} 不是空的，请先撤销放进去的东西。",
+        "error.not_indexed": "本地索引里没有 {path} 这个目录，请先运行 wms stocktake。",
+        "error.no_folder": "{path} 不存在。",
+        "error.no_outbound": "没有配置出库目的地。",
+        "inbound.unknown": "不是磁力、URL 或 PikPak 分享链接：{source}",
+        "inbound.share_unusable": "分享链接不可用（状态 {status}）。",
+        "inbound.share_empty": "分享链接里没有文件。",
+        "outbound.missing": "本地索引里没有 {path}",
+        "outbound.no_local_dir": "没有本地目录：请在配置里设 outbound.local_dir，或设 MEDIA_DIR。",
+        "outbound.short": "{path}：只收到 {got} / {size} 字节，已删除残缺文件",
+        "outbound.aria2_error": "aria2 拒绝：{error}",
+        "outbound.unknown": "未知的下载器「{mode}」：可选 none、aria2、local。",
+        "job.nothing": "{name}：没有要做的",
+        "job.planned": "{name}：计划 {id}（{actions} 个动作）等待确认",
+        "job.no_rules": "{name}：没有启用的规则",
+        "job.polled": "检查了 {checked} 个下载，完成 {finished}，失败 {failed}",
         "stocktake.full": (
             "全量盘点 {roots}：{entries} 条，列出 {listed} 个目录，{requests} 次请求，{seconds} 秒"
         ),
@@ -196,5 +365,40 @@ CATALOG: dict[str, dict[str, str]] = {
         "cli.ls.folder": "文件夹",
         "cli.quota.line": "已用 {used} / 共 {limit}（{percent}%），回收站占 {trash}。",
         "cli.todo": "尚未实现：{what}（计划在 {milestone}）。",
+        "cli.plan.dry_run_hint": "只是计划，没有改动任何东西。确认执行：wms apply {id}",
+        "cli.plan.status": "状态：{status}，已处理 {progress}/{total}。",
+        "cli.plan.discarded": "计划 {id} 已丢弃。",
+        "cli.plans.none": "没有等待确认的计划。",
+        "cli.plans.id": "计划",
+        "cli.plans.source": "来源",
+        "cli.plans.status": "状态",
+        "cli.plans.actions": "进度",
+        "cli.plans.created": "生成时间",
+        "cli.apply.failed": "失败：{path}：{error}",
+        "cli.apply.stopped": "提前停止：{reason}。再运行一次同样的命令会接着做。",
+        "cli.forever.confirm": "确定永久删除？无法撤销。",
+        "cli.rules.valid": "规则文件有效：{count} 条规则。",
+        "cli.rules.name": "规则",
+        "cli.rules.stage": "阶段",
+        "cli.rules.scope": "范围",
+        "cli.rules.actions": "动作",
+        "cli.rules.enabled": "启用",
+        "cli.inbound.plan": "将入库 {source}（{kind}）到 {target}",
+        "cli.inbound.hint": "只是计划，什么都没发送。加 --apply 才会入库。",
+        "cli.inbound.done": "已入库 {source}（{kind}）：{names}",
+        "cli.inbound.existing": "之前已经入库过（{phase}）：{source}",
+        "cli.audit.none": "还没有任何改动记录。",
+        "cli.audit.id": "记录",
+        "cli.audit.at": "时间（UTC）",
+        "cli.audit.what": "改动",
+        "cli.audit.rule": "规则",
+        "cli.audit.undo_of": "[撤销 {id}]",
+        "cli.undo.hint": "只是预览，没有改动。确认撤销：wms undo {id} --apply",
+        "cli.undo.done": "记录 {id} 已撤销（记为记录 {new}）。",
+        "cli.run.no_jobs": "配置的 schedule.jobs 里没有启用的任务。",
+        "cli.run.started": "按 {tz} 时间运行 {count} 个定时任务，Ctrl-C 停止。",
+        "cli.events.raw_only": (
+            "目前只有 --raw：这个接口的格式没有文档（见 docs/wms/EXTRAS.md §5）。"
+        ),
     },
 }

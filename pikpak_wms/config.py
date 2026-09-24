@@ -10,11 +10,13 @@ a rebuild exactly like the bot's own database does.
 from __future__ import annotations
 
 import os
+from datetime import tzinfo
 from pathlib import Path
-from typing import Any
+from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 DEFAULT_CONFIG_PATH = Path("config/wms.yaml")
 DEFAULT_RULES_PATH = Path("config/rules.yaml")
@@ -71,25 +73,69 @@ class StocktakeConfig(BaseModel):
     page_size: int = 100
 
 
+JOB_NAMES = ("stocktake", "stocktake-full", "inbound-poll", "layout", "organize", "cleanup")
+
+
 class ScheduledJob(BaseModel):
     name: str
     cron: str
     enabled: bool = True
     apply: bool = False
+    """organize / cleanup / layout: apply the plan instead of only saving it.
+    Never permanent deletion: no scheduled job can delete forever (rule 2)."""
+
+    @field_validator("name")
+    @classmethod
+    def _known(cls, value: str) -> str:
+        if value not in JOB_NAMES:
+            raise ValueError(f"unknown job {value!r}; use one of {', '.join(JOB_NAMES)}")
+        return value
 
 
 class ScheduleConfig(BaseModel):
     timezone: str = "Asia/Shanghai"
+    """Cron times, ``{created|date:...}`` and dates in rules are read in this zone."""
     jobs: list[ScheduledJob] = Field(default_factory=list)
+
+    @property
+    def tz(self) -> tzinfo:
+        try:
+            return ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"unknown time zone {self.timezone!r}") from exc
+
+
+class Aria2Config(BaseModel):
+    rpc_url: str = "http://127.0.0.1:6800/jsonrpc"
+    dir: str = "/downloads"
+    """Where aria2 (not this container) saves files."""
+    # The secret is read from ARIA2_SECRET only: no credential in YAML.
 
 
 class OutboundConfig(BaseModel):
-    downloader: str = "none"
-    aria2: dict[str, Any] = Field(default_factory=dict)
+    downloader: Literal["none", "aria2", "local"] = "none"
+    """none: show direct links; aria2: hand them to aria2; local: fetch into local_dir."""
+
+    aria2: Aria2Config = Field(default_factory=Aria2Config)
+    local_dir: Path | None = None
+    """None means the bot's ``MEDIA_DIR`` (else ``DOWNLOAD_DIR``), so files land
+    in the same NAS folder the bot already writes to."""
+
+    @property
+    def local_path(self) -> Path | None:
+        if self.local_dir is not None:
+            return self.local_dir
+        for name in ("MEDIA_DIR", "DOWNLOAD_DIR"):
+            value = os.environ.get(name, "").strip()
+            if value:
+                return Path(value)
+        return None
 
 
 class Config(BaseModel):
     version: int = 1
+    rules_file: Path | None = None
+    """None means ``WMS_RULES``, else ``config/rules.yaml``."""
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     ratelimit: RateLimitConfig = Field(default_factory=RateLimitConfig)
     store: StoreConfig = Field(default_factory=StoreConfig)

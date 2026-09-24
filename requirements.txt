@@ -16,3 +16,5 @@ pydantic>=2.7,<3
 typer>=0.12,<1
 # Scheduled stocktake / organize runs. 4.x is a rewrite with another API.
 APScheduler>=3.10,<4
+# Time-zone data for zoneinfo, in case the slim base image lacks it.
+tzdata>=2024.1

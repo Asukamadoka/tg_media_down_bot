@@ -1,10 +1,23 @@
-# 规则集。复制为 config/rules.yaml 后修改。
+# 规则集。复制为 config/rules.yaml 后修改（或用 WMS_RULES 指定路径）。
 # 铁律 3：业务逻辑写在这里，不写在 Python 里。
 #
-# 匹配器：kind / name_regex / path_glob / mime
-#           min_size / max_size / older_than / newer_than
-# 动作原语：rename / move / copy / trash / star / share / create_folder
-# 模板过滤器：title / upper / lower / pad2 / date:%Y-%m
+# 求值顺序：规则按文件顺序；一个文件只归第一条命中它的规则。
+#          规则命中了某个目录，目录里的东西就不再单独匹配（跟着目录走）。
+# 阶段 stage：organize（wms organize、定时 organize）| cleanup（wms cleanup、定时 cleanup）
+#
+# 匹配器（全部满足才算命中）：
+#   kind: file|folder         name_regex: 正则（命名组可在模板里用）
+#   path_glob: '/Inbox/**/*.mkv'（* 不跨目录，** 跨目录；不以 / 开头则任意深度）
+#   mime: 'video/*'           extensions: [mkv, mp4]
+#   category: video|image|audio|document|archive|subtitle
+#   min_size / max_size: 100MB、1.5GB（按 1024 进位）
+#   older_than / newer_than: 30d、12h、2w，或日期 2026-09-01（按 schedule.timezone）
+#   time_field: created（默认，文件进网盘的时间）| modified
+#   empty: true（空目录 / 0 字节文件）
+# 动作原语：rename / move / copy / trash / star / share / create_folder / outbound
+#   没有永久删除：永久删除只能 wms cleanup --forever，且要配置开关（铁律 2）。
+# 模板字段：正则命名组，以及 name stem ext parent path size kind category created modified
+# 模板过滤器：title / upper / lower / strip / spaces / pad2 / date:%Y-%m
 version: 1
 
 rules:
@@ -20,7 +33,7 @@ rules:
       - rename:
           template: '{show|title}.S{s}E{e}.{ext}'
       - move:
-          to: '/Media/剧集/{show|title}/S{s}'
+          to: '/Media/剧集/{show|spaces|title}/S{s}'
           create_missing: true
 
   - name: 电影入库上架
@@ -32,9 +45,9 @@ rules:
       min_size: 500MB
     actions:
       - rename:
-          template: '{title|title} ({year}).{ext}'
+          template: '{title|spaces|title} ({year}).{ext}'
       - move:
-          to: '/Media/电影/{title|title} ({year})'
+          to: '/Media/电影/{title|spaces|title} ({year})'
           create_missing: true
 
   # ---------- 整理 ----------
@@ -48,9 +61,66 @@ rules:
     actions:
       - trash: {}
 
+  # ---------- 分类（M6 预置模板：按类型归类）----------
+  # 上架规则没认出来的，按类型放进 /Media 下对应目录。
+  - name: 按类型分类-视频
+    enabled: true
+    scope: /Inbox
+    match: {kind: file, category: video}
+    actions:
+      - move: {to: /Media/视频}
+  - name: 按类型分类-图片
+    enabled: true
+    scope: /Inbox
+    match: {kind: file, category: image}
+    actions:
+      - move: {to: /Media/图片}
+  - name: 按类型分类-音频
+    enabled: true
+    scope: /Inbox
+    match: {kind: file, category: audio}
+    actions:
+      - move: {to: /Media/音频}
+  - name: 按类型分类-文档
+    enabled: true
+    scope: /Inbox
+    match: {kind: file, category: document}
+    actions:
+      - move: {to: /Media/文档}
+  - name: 按类型分类-压缩包
+    enabled: true
+    scope: /Inbox
+    match: {kind: file, category: archive}
+    actions:
+      - move: {to: /Media/压缩包}
+
+  # ---------- 归档（M6 预置模板：按月归档）----------
+  # 进网盘超过 90 天的文件，按进网盘的月份移入 /Archive/2026-09 这样的目录。
+  - name: 按月归档
+    enabled: false
+    scope: /Media/视频
+    match:
+      kind: file
+      older_than: 90d
+    actions:
+      - move:
+          to: '/Archive/{created|date:%Y-%m}'
+
+  # ---------- 星标 / 分享（示例，默认关闭）----------
+  # 分享不能撤销（PikPak 没有取消分享的接口），所以只对新文件用。
+  - name: 新电影加星标
+    enabled: false
+    scope: /Media/电影
+    match:
+      kind: file
+      newer_than: 1d
+    actions:
+      - star: {}
+
   # ---------- 清退 ----------
   - name: 清退临时区
     enabled: true
+    stage: cleanup
     scope: /Temp
     match:
       older_than: 30d
@@ -59,6 +129,7 @@ rules:
 
   - name: 清退空目录
     enabled: false
+    stage: cleanup
     scope: /Media
     match:
       kind: folder

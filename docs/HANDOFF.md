@@ -506,3 +506,124 @@ docker compose run --rm bot python -m pikpak_wms stocktake --verify  # 期望：
 
 1. **PikPak 是否向上传播目录的 `modified_time`**，决定增量盘点能否按原设计工作。Cowork 按上面的步骤测一次即可定论。如果不传播，计划是：M2 做「基于 `events` 接口的增量盘点」（简报里「提过但没写成规格的功能」之一），并让定时任务每天做一次全量兜底。
 2. **镜像体积**：新增依赖约增加十几 MB（未实测，需要 CI 构建后在 GHCR 上看）。如果在意，`typer`/`rich` 可以换成标准库 `argparse`，代价是 CLI 表格输出变朴素。
+
+## 阶段 3 · WMS M2：规则引擎、计划流水线、审计与撤销
+
+规格：`CC_BRIEF.md` §5 的 M2 行、`docs/wms/ARCHITECTURE.md` §4–§5，以及本阶段新写的 `docs/wms/EXTRAS.md`（简报里「提过但没写成规格」的五项：按 hash 去重、归档、出库、star / share、基于 `events` 的增量盘点）。
+
+### 这一阶段做了什么
+
+- **规则层 `pikpak_wms/rules/`**
+  - `schema.py`：规则文件的 pydantic 校验。**未知字段一律报错**（比如把 `min_size` 拼成 `min_sise`，如果静默忽略，规则就会扩大到整个范围）。**规则文件里写不了永久删除。**
+  - `matcher.py`：原设计的 8 种匹配器 `kind` / `name_regex` / `path_glob` / `mime` / `min_size` / `max_size` / `older_than` / `newer_than`，另加 4 种：
+    - `extensions`；
+    - `category`：视频 / 图片 / 音频 / 文档 / 压缩包 / 字幕，按 mime 或扩展名判断；
+    - `empty`：空目录；
+    - `time_field`：默认用 `created`，即文件进网盘的时间。
+    - 这些是 M6 映射 Query 时要用的。
+  - 时长 `30d`，日期 `2026-09-01`，都**按 `schedule.timezone`（默认 Asia/Shanghai）解释，不按容器时区**。
+  - `template.py`：命名模板 `{show|title}`。过滤器有 `title` / `upper` / `lower` / `strip` / `spaces` / `pad2` / `date:%Y-%m`。模板里缺字段就报错，不会填成空串。
+  - `actions.py`：动作原语，每个都有 `plan()` 和 `apply()`（铁律 1），另有 `check()`（执行前确认还该不该做）和 `inverse()`（撤销）。
+    - 规则里可用的：`rename` / `move` / `copy` / `trash` / `star` / `share` / `create_folder` / `outbound`。
+    - 内部用的：`untrash` / `unstar` / `delete_forever` / `inbound`。
+  - `engine.py`：规则加本地索引生成 Plan，**不发任何请求**。求值顺序固定：
+    - 规则按文件顺序求值，一个文件只归第一条命中它的规则；
+    - 命中的目录带走它里面的东西；
+    - 一条规则的各步骤横向执行（先全部改名，再全部移动），这样同一目标目录的移动能合成一个批量请求；
+    - 目标名被占、模板缺字段时，跳过该文件并在计划里写一条备注，不猜。
+- **计划流水线 `ops/plans.py`**（CLI、M4 面板、M5 bot 共用这一条）
+  - 新增 `plans` 表（只加表），计划存为「待确认」，内容相同的待确认计划不重复存。
+  - `apply` 支持断点续跑：每次最多执行 `runtime.max_actions_per_run`（默认 500）个动作，`--limit N` 可以更少，下次从断点接着做。遇到限流或登录失败立即停下并记住位置。
+  - 每个动作执行前对照索引：已经做过的跳过（`done`），计划之后文件又变了的跳过（`changed`）。
+  - 执行后**当场更新索引**，所以紧接着再出一次计划就是空的（铁律 5，测试覆盖）。已执行或已丢弃的计划不能再执行。
+  - 某个文件失败时，只跳过这个文件后面的步骤，其余文件照做。
+  - 批量接口一次最多 100 个 id。
+- **审计与撤销**
+  - `audit` 表加两列 `plan_id`、`undo_of`。迁移只加列（红线 3），旧库启动时自动补上，有测试。
+  - `wms undo <id>` 默认只预览，加 `--apply` 才执行：
+    - rename 改回原名；
+    - move 移回原目录；
+    - trash 从回收站还原（目录还原后，下次增量盘点会重新列出它）；
+    - star 取消星标；
+    - create_folder 把新建的目录放回回收站。
+  - `wms undo` 会**拒绝**以下情况，并说明原因：
+    - 文件在那之后又变过；
+    - 已经撤销过；
+    - share（PikPak 没有取消分享的接口）；
+    - copy（新副本的 id 拿不到）；
+    - 永久删除；
+    - 目录原本就存在，或者已经被放进了东西。
+- **五个业务模块**
+  - `organize`：跑 `stage: organize` 的规则。`--dedupe` 是按 hash 去重：保留 `--keep-under` 下的那份，没有就保留最早的，再没有就保留路径最短的；其余进回收站。hash 相同但大小不同的不处理，只写备注。
+  - `cleanup`：跑 `stage: cleanup` 的规则，只进回收站。`--forever` 需要**同时满足**三个条件：配置 `allow_permanent_delete: true`、命令行 `--forever`、交互确认（或 `--yes`）。**任何定时任务都走不到永久删除**，有测试。
+  - `layout`：建出 `layout.ensure` 里缺的目录。执行时先查一次目录是否本来就在：本来就在的，撤销时不会把它放进回收站。
+  - `inbound`：
+    - 磁力 / URL 走离线下载，PikPak 分享链接走转存；
+    - 同一个来源只入库一次（`tasks` 表唯一约束）；
+    - `--poll` 或定时任务 `inbound-poll` 用一次请求更新离线任务状态。
+  - `outbound`：`none` 只给直链，`aria2` 通过 JSON-RPC 交给 aria2（secret 只从 `ARIA2_SECRET` 读），`local` 先下到 `.part` 文件再改名，已存在同名同大小的文件就跳过。**直链不写进计划，也不写进审计。**
+- **调度 `scheduler/runner.py`**
+  - APScheduler，cron 按 `schedule.timezone` 解释；
+  - 一把锁保证任务串行；上一轮没跑完时本轮跳过，不叠加；
+  - 单个任务出错只记日志，不影响调度，更不会拖垮 bot（M3 会把它放进 bot 进程）。
+  - 可用任务：`stocktake` / `stocktake-full` / `inbound-poll` / `layout` / `organize` / `cleanup`。
+  - organize / cleanup 会先对规则涉及的目录做一次增量盘点；`apply: false` 时只存计划，等人确认。
+- **`wms events --raw`**：原样打印 PikPak `events` 接口的返回。基于它的增量盘点**没有实现**，原因见 `EXTRAS.md` §5：字段没有文档，猜着解析，猜错时会悄悄漏掉变化。示例配置里加了每天一次的 `stocktake-full` 作兜底。
+- **CLI 新命令**：`rules [--check]`、`organize [--rule] [--dedupe --scope --keep-under]`、`cleanup [--forever --yes]`、`layout`、`inbound <链接…> [--to] [--pass-code] [--poll]`、`outbound <路径…> [--to] [--downloader]`、`plans [--all]`、`plan <id>`、`apply <id> [--limit] [--forever]`、`discard <id>`、`audit [--plan] [--json]`、`undo <id>`、`run`、`events --raw`。
+  - 写操作一律默认 dry-run，`--apply` 才执行。配置里 `runtime.dry_run: false` 可以改默认，`--dry-run` 始终可以强制只出计划。
+- **i18n**：新增文案全部走 WMS 的 `t()`，中英两套 key 完全一致。
+  - 计划备注、冲突原因、拒绝撤销的原因**以 key 加参数的形式落库**，展示时才翻译（红线 4），所以同一份计划切换语言后显示对应语言。
+  - `WmsError` 可以带 key：`str(exc)` 是英文，供日志用；`exc.display()` 是用户的语言。这就是简报 §6 要求的做法，WMS 从一开始就这样写。
+- **配置**
+  - `rules.example.yaml` 补齐 M6 要求的预置模板：按类型分类（视频 / 图片 / 音频 / 文档 / 压缩包 → `/Media/…`）、按月归档（`/Archive/{created|date:%Y-%m}`，默认关闭）、星标示例（默认关闭）；清退规则标了 `stage: cleanup`。
+  - `wms.example.yaml` 修了一个会在 M3 踩到的坑：原样例的 `store.database: data/wms.db` 是相对路径，在容器里会落到临时层，重建就丢。现在默认留空，也就是 `$DATA_DIR/wms.sqlite3`。
+  - 新增 `rules_file`、`outbound.local_dir`（默认沿用 bot 的 `MEDIA_DIR`）。
+- **依赖**：加了 `tzdata`（本地安装实测 2.8 MB），slim 镜像万一缺时区数据时，`Asia/Shanghai` 仍然可用。
+
+### 验收证据
+
+`CC_BRIEF` 的 M2 验收流程是「写一份 rules.yaml → dry-run 输出 Plan → apply 生效 → 审计可回溯 → undo 能撤销 rename / move，能从回收站还原」。这个流程就是 `tests/test_wms_m2.py::TestAcceptance`，全程计数写请求：dry-run 阶段为 0。
+
+用仓库自带的 `config/rules.example.yaml`，在假网盘上实测：`/Inbox` 放 100 集剧、1 部电影、100 个短视频、40 张图、1 个广告文件，共 243 个文件。
+
+- 盘点后出计划，**0 个请求**。计划有 348 个动作，涉及 242 个文件，共 132.9 GiB。
+- 执行共 **117 个请求**：
+  - 101 次改名（PikPak 没有批量改名接口）；
+  - 5 次批量移动；
+  - 1 次批量进回收站；
+  - 10 次建目录与查目录。
+- 执行完立刻再出计划：**0 个动作**。
+
+按 4 req/s 折算，执行约 30 秒。**规模和耗时的主要来源是改名**，这正是简报「已知风险」里说的。可以用 `wms apply <id> --limit 50` 分批执行，观察是否触发风控。
+
+测试：新增 78 个（`test_wms_rules.py` 42 个，`test_wms_m2.py` 36 个），全套 790 → 868 个，3.11 与 3.12 均全绿；`ruff check` 零告警。
+
+### NAS 上要改什么
+
+**无。** bot 仍然不调用 WMS（M3 才接入），镜像里只是多了代码。
+
+### 给 Cowork 的核验手段
+
+独立 CLI 在 NAS 上登录受限的问题同 M1（见上一节）。M3 之后可以直接用 bot 的账号。到时候按这个顺序跑：
+
+```bash
+wms stocktake
+wms rules --check                   # 规则文件有效
+wms organize                        # 只出计划：看每一行是不是你想要的
+wms apply <计划号> --limit 20       # 先小批量，观察有无风控
+wms audit                           # 每条改动都在
+wms undo <审计号>                   # 预览撤销
+wms undo <审计号> --apply           # 真撤销：rename / move / trash 各试一次
+wms events --raw --limit 20         # 贴样本（见待决问题 2）
+```
+
+### 怎么回滚
+
+不涉及运行中的 bot。回滚镜像到 M1 的提交 `sha-72249ad` 即可。WMS 库多出的 `plans` 表和 `audit` 的两列，旧代码不读，不影响。
+
+### 待决问题
+
+1. **分享链接转存后文件落在哪**：pikpakapi 的 `restore` 不接受目标目录，所以 `wms inbound <分享链接> --to X` 里的 `--to` 对分享链接不生效，文件会落在 PikPak 默认的位置。bot 现有的转存（`tgmd/pikpak.py`）也是这样。请 Cowork 转存一次，看落在哪个目录。如果不在 `/Inbox` 下，M5 的「入库后自动上架」需要把那个目录也写进规则的 `scope`。
+2. **`events` 接口样本**：请在网盘里新增、改名、移动、删除各做一次，然后跑 `wms events --raw --limit 20`，把输出里的链接和缩略图地址去掉后贴到这里。拿到样本之后，再决定是否实现基于事件的增量盘点（`EXTRAS.md` §5）。
+3. **批量改名的风控阈值**：上面实测的计划里，改名占了 101 个请求。建议第一次用 `--limit 20` 执行，然后逐步加大，看 PikPak 是否返回「操作频繁」。一旦返回，apply 会停下并记住位置，重跑同一条命令即可继续。
+4. **M1 的待决问题 1（目录时间戳是否向上传播）依然有效**。M2 的定时 organize 在出计划前会先做增量盘点；如果时间戳不传播，增量盘点可能看不到新文件，要靠每天的 `stocktake-full` 兜底。

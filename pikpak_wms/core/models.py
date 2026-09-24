@@ -26,6 +26,9 @@ class ActionType(StrEnum):
     SHARE = "share"
     CREATE_FOLDER = "create_folder"
     UNTRASH = "untrash"
+    UNSTAR = "unstar"
+    OUTBOUND = "outbound"
+    INBOUND = "inbound"
 
 
 @dataclass(slots=True)
@@ -61,6 +64,28 @@ class FileNode:
     def modified(self) -> datetime | None:
         return parse_time(self.modified_time)
 
+    def snapshot(self) -> dict[str, Any]:
+        """Everything an audit ``before`` needs to put the entry back."""
+        data = asdict(self)
+        data["kind"] = str(self.kind)
+        data.pop("synced_at", None)
+        return data
+
+    @classmethod
+    def from_snapshot(cls, data: dict[str, Any]) -> FileNode:
+        return cls(
+            file_id=str(data["file_id"]),
+            parent_id=str(data.get("parent_id") or ROOT_ID),
+            name=str(data.get("name") or ""),
+            kind=Kind(data.get("kind") or "file"),
+            path=str(data.get("path") or ""),
+            size=int(data.get("size") or 0),
+            mime=str(data.get("mime") or ""),
+            hash=str(data.get("hash") or ""),
+            created_time=data.get("created_time"),
+            modified_time=data.get("modified_time"),
+        )
+
     @classmethod
     def from_api(cls, raw: dict[str, Any], *, parent_path: str) -> FileNode:
         """Build a node from one entry of PikPak's ``files`` listing."""
@@ -82,6 +107,12 @@ class FileNode:
             created_time=raw.get("created_time") or None,
             modified_time=raw.get("modified_time") or None,
         )
+
+
+def parent_of(path: str) -> str:
+    """``/a/b`` → ``/a``; ``/a`` → ``/``."""
+    head = normalize_path(path).rpartition("/")[0]
+    return head or "/"
 
 
 def join_path(parent: str, name: str) -> str:
@@ -136,11 +167,16 @@ class Action:
             return t(f"action.{self.type}", old=before.get("path"), new=after.get("path"))
         if self.type is ActionType.CREATE_FOLDER:
             return t("action.create_folder", path=after.get("path"))
+        if self.type is ActionType.OUTBOUND:
+            return t("action.outbound", path=path, dest=after.get("to") or "/")
+        if self.type is ActionType.INBOUND:
+            return t("action.inbound", source=after.get("source"), path=after.get("path"))
         key = f"action.{self.type}"
         if self.type in (
             ActionType.TRASH,
             ActionType.UNTRASH,
             ActionType.STAR,
+            ActionType.UNSTAR,
             ActionType.SHARE,
             ActionType.DELETE_FOREVER,
         ):
@@ -174,10 +210,19 @@ class Plan:
     actions: list[Action] = field(default_factory=list)
     source: str = ""
     generated_at: str | None = None
-    notes: list[str] = field(default_factory=list)
+    notes: list[dict[str, Any]] = field(default_factory=list)
+    """``{"key": catalogue key, "args": {...}}``: stored, translated when shown."""
 
     def __len__(self) -> int:
         return len(self.actions)
+
+    def note(self, key: str, **args: Any) -> None:
+        self.notes.append({"key": key, "args": args})
+
+    def note_lines(self) -> list[str]:
+        from ..i18n import t
+
+        return [t(note["key"], **note.get("args", {})) for note in self.notes]
 
     @property
     def is_empty(self) -> bool:
@@ -197,5 +242,8 @@ class Plan:
             actions=[Action.from_dict(item) for item in data.get("actions") or []],
             source=str(data.get("source", "")),
             generated_at=data.get("generated_at"),
-            notes=list(data.get("notes") or []),
+            notes=[
+                note if isinstance(note, dict) else {"key": "plan.note", "args": {"text": note}}
+                for note in data.get("notes") or []
+            ],
         )
