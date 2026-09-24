@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 from pikpakapi import DownloadStatus
 
-from tgmd.config import Config, DeliveryConfig, DownloadConfig
+from tgmd.config import Config, DeliveryConfig, DownloadConfig, PikPakConfig
 from tgmd.db import Database, cache_key
 from tgmd.delivery import Delivery
 from tgmd.downloader import DownloadCancelled, DownloadError
@@ -149,6 +149,14 @@ class FakeFileServer:
         self.usable = True
         self.published: list[Path] = []
         self.marked: list[Path] = []
+        self.streams: list[tuple[str, int]] = []
+
+    def publish_stream(self, opener, *, name, size, ttl=None):
+        self.streams.append((name, size))
+        return f"s{len(self.streams)}", f"https://media.example.com/s/token/{name}"
+
+    def unpublish_stream(self, stream_id: str) -> None:
+        pass
 
     def publish(self, path: Path, *, name=None, ttl=None) -> str:
         self.published.append(path)
@@ -214,6 +222,7 @@ class Harness:
                 max_upload_size_mb=options.pop("max_upload_mb", 2000),
                 cache_chat_id=options.pop("cache_chat_id", None),
             ),
+            pikpak=PikPakConfig(stream=options.pop("pikpak_stream", False)),
         )
         assert not options, f"unknown options: {options}"
         self.delivery = Delivery(self.bot, self.config, db, self.pikpak, self.files)
@@ -777,3 +786,40 @@ class TestMediaDirectory:
         assert row["status"] == "done"
         assert (media / "Some Channel" / "clip.mp4").is_file()
         assert harness.files_on_disk() == []
+
+
+
+def streamable(message_id: int, name: str = "film.mkv", size: int = 64):
+    message = media_message(message_id, name)
+    message.document = SimpleNamespace(size=size, dc_id=4, attributes=[])
+    return message
+
+
+class TestPikPakStreaming:
+    """CC_BRIEF 2e: with PIKPAK_STREAM on, a Telegram file never touches disk."""
+
+    async def test_a_document_is_streamed_not_downloaded(self, make):
+        harness = await make(pikpak_stream=True, resolver=FakeResolver([streamable(1)]))
+        row = await harness.run(await harness.job("pikpak"))
+        assert row["status"] == "done"
+        assert harness.downloader.downloaded == []
+        assert harness.files.streams == [("film.mkv", 64)]
+        assert harness.files_on_disk() == []
+
+    async def test_it_is_off_by_default(self, make):
+        harness = await make(resolver=FakeResolver([streamable(1)]))
+        await harness.run(await harness.job("pikpak"))
+        assert harness.downloader.downloaded == [1]
+        assert harness.files.streams == []
+
+    async def test_a_photo_still_goes_through_the_disk(self, make):
+        # No document, no size known up front: the fallback is the old path.
+        harness = await make(pikpak_stream=True)
+        await harness.run(await harness.job("pikpak"))
+        assert harness.downloader.downloaded == [1]
+        assert harness.files.streams == []
+
+    async def test_other_modes_are_unaffected(self, make):
+        harness = await make(pikpak_stream=True, resolver=FakeResolver([streamable(1)]))
+        await harness.run(await harness.job("local"))
+        assert harness.downloader.downloaded == [1]

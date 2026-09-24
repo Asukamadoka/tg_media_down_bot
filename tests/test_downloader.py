@@ -298,3 +298,65 @@ class TestDownloadLoop:
     async def test_no_file_from_telegram_is_an_error(self, tmp_path):
         with pytest.raises(DownloadError, match="no file"):
             await Downloader(ScriptedClient(None)).download(MESSAGE, target(tmp_path))
+
+
+class RangeClient:
+    """iter_download over a known byte string, enforcing Telegram's rules."""
+
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.requests: list[tuple[int, int, int]] = []
+
+    async def iter_download(self, document, *, offset, request_size, limit, file_size):
+        # upload.getFile: offset and limit divisible by 4 KiB, no part crossing
+        # a 1 MiB boundary. A misaligned stream would be refused by Telegram.
+        assert offset % 4096 == 0 and request_size % 4096 == 0
+        assert (1024 * 1024) % request_size == 0
+        assert offset % request_size == 0
+        self.requests.append((offset, request_size, limit))
+        for index in range(limit):
+            start = offset + index * request_size
+            if start >= len(self.content):
+                return
+            yield self.content[start : start + request_size]
+
+
+class TestStreaming:
+    CONTENT = bytes(range(251)) * 9000  # 2,259,000 bytes: not a round number
+
+    def message(self):
+        return SimpleNamespace(
+            id=1, document=SimpleNamespace(size=len(self.CONTENT)), media=object()
+        )
+
+    async def read(self, start, end):
+        client = RangeClient(self.CONTENT)
+        chunks = [
+            chunk async for chunk in Downloader(client).stream(self.message(), start, end)
+        ]
+        return b"".join(chunks), client
+
+    @pytest.mark.parametrize(
+        ("start", "end"),
+        [
+            (0, 99),
+            (1000, 600_000),  # straddles a 512 KiB boundary
+            (524_288, 1_048_575),  # exactly one aligned request
+            (2_000_000, 2_258_999),  # the tail, short last request
+            (0, 2_258_999),  # everything
+        ],
+    )
+    async def test_any_range_comes_back_exactly(self, start, end):
+        body, _ = await self.read(start, end)
+        assert body == self.CONTENT[start : end + 1]
+
+    async def test_only_the_needed_requests_are_made(self):
+        _, client = await self.read(1000, 600_000)
+        assert client.requests == [(0, 512 * 1024, 2)]
+
+    def test_documents_can_be_streamed_photos_cannot(self):
+        from tgmd.downloader import can_stream
+
+        assert can_stream(self.message())
+        assert not can_stream(SimpleNamespace(document=None, photo=object()))
+        assert not can_stream(SimpleNamespace(document=SimpleNamespace(size=0)))

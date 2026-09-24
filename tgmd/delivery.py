@@ -243,13 +243,54 @@ class Delivery:
         user_id: int | None = None,
         delete_when_done: bool = False,
     ) -> DeliveryResult:
-        """Hand the file to PikPak by publishing it on the bot's HTTP server.
+        """Hand a downloaded file to PikPak by publishing it on the HTTP server.
 
         If PikPak is still fetching when the wait runs out, the file has to
         stay published, so the caller cannot delete it. ``delete_when_done``
         hands that job to the file server, which deletes it once its URL
         expires.
         """
+        await self._check_pikpak_reachable(user_id)
+        url = self._files.publish(path, name=info.file_name)
+        result = await self._hand_to_pikpak(
+            url,
+            info,
+            folder=folder,
+            user_id=user_id,
+            release=lambda: self._files.unpublish_all(path),
+        )
+        if result.kept_local and delete_when_done:
+            self._files.delete_on_expiry(path)
+        return result
+
+    async def stream_to_pikpak(
+        self,
+        opener,
+        info: MediaInfo,
+        *,
+        size: int,
+        folder: str | None = None,
+        user_id: int | None = None,
+    ) -> DeliveryResult:
+        """Hand a Telegram file to PikPak without it ever touching the disk.
+
+        PikPak's requests are answered by reading the matching bytes from
+        Telegram as they arrive (PIKPAK_STREAM). Nothing is left behind to
+        clean up: a stream still in use simply expires with its URL.
+        """
+        await self._check_pikpak_reachable(user_id)
+        stream_id, url = self._files.publish_stream(opener, name=info.file_name, size=size)
+        result = await self._hand_to_pikpak(
+            url,
+            info,
+            folder=folder,
+            user_id=user_id,
+            release=lambda: self._files.unpublish_stream(stream_id),
+        )
+        result.kept_local = False  # there is no local copy
+        return result
+
+    async def _check_pikpak_reachable(self, user_id: int | None) -> None:
         if user_id is not None and not await self._pikpak.available_for(user_id):
             raise DeliveryError(
                 "no PikPak account is connected. Use /pikpak login to connect "
@@ -262,7 +303,10 @@ class Delivery:
                 "/mode local. Magnet and URL transfers work without it."
             )
 
-        url = self._files.publish(path, name=info.file_name)
+    async def _hand_to_pikpak(
+        self, url: str, info: MediaInfo, *, folder, user_id, release
+    ) -> DeliveryResult:
+        """Ask PikPak to fetch ``url``; ``release`` stops serving it."""
         status: DownloadStatus | None = None
         try:
             task = await self._pikpak.offline_download(
@@ -270,13 +314,13 @@ class Delivery:
             )
             status = await self._pikpak.wait_for_task(task, user_id=user_id)
         except PikPakError as exc:
-            self._files.unpublish_all(path)
+            release()
             raise DeliveryError(str(exc)) from exc
         finally:
             # Stop serving as soon as PikPak is done with it. While a task is
             # still running the URL has to stay alive, so it is left to expire.
             if status_is_final(status):
-                self._files.unpublish_all(path)
+                release()
 
         target = folder or self._config.pikpak.folder
         remote = f"{target}/{info.file_name}"
@@ -288,8 +332,6 @@ class Delivery:
             )
         if status is DownloadStatus.error:
             raise DeliveryError("PikPak reported an error fetching the file")
-        if delete_when_done:
-            self._files.delete_on_expiry(path)
         return DeliveryResult(
             mode="pikpak",
             summary=(

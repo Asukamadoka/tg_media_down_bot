@@ -7,6 +7,7 @@ token gets a file" has to hold.
 
 from __future__ import annotations
 
+import asyncio
 import socket
 import time
 
@@ -15,7 +16,13 @@ import pytest
 
 from tgmd.config import HttpConfig
 from tgmd.signing import make_token
-from tgmd.webserver import FileServer, content_disposition
+from tgmd.webserver import (
+    STREAM_CONCURRENCY,
+    FileServer,
+    RangeNotSatisfiable,
+    content_disposition,
+    parse_range,
+)
 
 SECRET = "server-test-secret"
 CONTENT = b"the quick brown fox" * 100
@@ -212,3 +219,134 @@ class TestContentDisposition:
     def test_quotes_cannot_break_out_of_the_fallback(self):
         header = content_disposition('a"b.mp4')
         assert 'filename="a_b.mp4"' in header
+
+
+# ------------------------------------------------ streaming (PIKPAK_STREAM)
+
+STREAMED = bytes(range(256)) * 20  # 5,120 bytes
+
+
+def opener(content: bytes = STREAMED, *, record: list | None = None, gate=None):
+    """A stream opener serving ``content`` in small pieces, like Telegram would."""
+
+    async def open_range(start: int, end: int):
+        if record is not None:
+            record.append((start, end))
+        if gate is not None:
+            await gate()
+        for offset in range(start, end + 1, 700):
+            yield content[offset : min(offset + 700, end + 1)]
+
+    return open_range
+
+
+async def request(url: str, method: str = "GET", headers=None):
+    async with (
+        aiohttp.ClientSession() as session,
+        session.request(method, url, headers=headers or {}) as response,
+    ):
+        return response.status, await response.read(), dict(response.headers)
+
+
+class TestParseRange:
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [
+            (None, None),
+            ("bytes=0-99", (0, 99)),
+            ("bytes=100-", (100, 999)),
+            ("bytes=-50", (950, 999)),
+            ("bytes=900-5000", (900, 999)),  # clipped to the file
+            ("bytes=0-1,5-9", None),  # multi-range: served whole
+            ("items=0-1", None),
+        ],
+    )
+    def test_accepted(self, header, expected):
+        assert parse_range(header, 1000) == expected
+
+    @pytest.mark.parametrize("header", ["bytes=1000-", "bytes=5-2", "bytes=-", "bytes=-0"])
+    def test_unsatisfiable(self, header):
+        with pytest.raises(RangeNotSatisfiable):
+            parse_range(header, 1000)
+
+
+class TestStreaming:
+    async def test_the_whole_file(self, server):
+        _, url = server.publish_stream(opener(), name="film.mkv", size=len(STREAMED))
+        status, body, headers = await request(url)
+        assert status == 200
+        assert body == STREAMED
+        assert headers["Accept-Ranges"] == "bytes"
+        assert int(headers["Content-Length"]) == len(STREAMED)
+
+    async def test_a_range(self, server):
+        seen: list = []
+        _, url = server.publish_stream(
+            opener(record=seen), name="film.mkv", size=len(STREAMED)
+        )
+        status, body, headers = await request(url, headers={"Range": "bytes=1000-2999"})
+        assert status == 206
+        assert body == STREAMED[1000:3000]
+        assert headers["Content-Range"] == f"bytes 1000-2999/{len(STREAMED)}"
+        assert int(headers["Content-Length"]) == 2000
+        assert seen == [(1000, 2999)]  # only what was asked for is read
+
+    async def test_the_last_bytes(self, server):
+        _, url = server.publish_stream(opener(), name="f", size=len(STREAMED))
+        status, body, _ = await request(url, headers={"Range": "bytes=-100"})
+        assert status == 206
+        assert body == STREAMED[-100:]
+
+    async def test_head_reads_nothing_from_telegram(self, server):
+        seen: list = []
+        _, url = server.publish_stream(opener(record=seen), name="f", size=len(STREAMED))
+        status, body, headers = await request(url, "HEAD")
+        assert status == 200
+        assert int(headers["Content-Length"]) == len(STREAMED)
+        assert body == b""
+        assert seen == []
+
+    async def test_an_impossible_range(self, server):
+        _, url = server.publish_stream(opener(), name="f", size=len(STREAMED))
+        status, _, headers = await request(url, headers={"Range": f"bytes={len(STREAMED)}-"})
+        assert status == 416
+        assert headers["Content-Range"] == f"bytes */{len(STREAMED)}"
+
+    async def test_unpublished_is_gone(self, server):
+        stream_id, url = server.publish_stream(opener(), name="f", size=len(STREAMED))
+        server.unpublish_stream(stream_id)
+        assert (await request(url))[0] == 404
+
+    async def test_expired_streams_are_swept(self, server):
+        stream_id, _ = server.publish_stream(opener(), name="f", size=10, ttl=60)
+        server.sweep(now=time.time() + 120)
+        assert stream_id not in server._streams  # noqa: SLF001
+
+    async def test_a_file_token_does_not_open_a_stream(self, server, sample):
+        file_url = server.publish(sample)
+        assert (await request(file_url.replace("/f/", "/s/")))[0] == 404
+
+    async def test_concurrent_pulls_are_bounded(self, server):
+        # PikPak may fetch ranges in parallel; each is a read from the user's
+        # own Telegram account, so only a few run at once.
+        running = 0
+        peak = 0
+        release = asyncio.Event()
+
+        async def gate():
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            await release.wait()
+            running -= 1
+
+        _, url = server.publish_stream(opener(gate=gate), name="f", size=len(STREAMED))
+        pulls = [
+            asyncio.create_task(request(url, headers={"Range": f"bytes={i}-{i + 9}"}))
+            for i in range(STREAM_CONCURRENCY + 3)
+        ]
+        await asyncio.sleep(0.3)
+        assert peak == STREAM_CONCURRENCY
+        release.set()
+        results = await asyncio.gather(*pulls)
+        assert all(status == 206 for status, _, _ in results)

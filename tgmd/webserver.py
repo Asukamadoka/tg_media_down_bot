@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
 import time
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
@@ -30,6 +32,16 @@ log = logging.getLogger(__name__)
 # Files are unregistered once PikPak has taken them, but a crash mid-transfer
 # should not leak entries forever.
 _SWEEP_INTERVAL = 300.0
+
+# How many requests may pull one stream at the same time. PikPak may fetch a
+# file in several ranges at once; each is a separate read from the user's
+# Telegram account, so it is bounded.
+STREAM_CONCURRENCY = 4
+
+_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+StreamOpener = Callable[[int, int], AsyncIterator[bytes]]
+"""Given inclusive start and end offsets, yields the bytes in between."""
 
 
 class RouteProvider(Protocol):
@@ -46,6 +58,49 @@ class ServedFile:
     delete_on_expiry: bool = False
 
 
+@dataclass
+class ServedStream:
+    """A file served straight from Telegram, never written to disk."""
+
+    open: StreamOpener
+    name: str
+    size: int
+    expires_at: float
+    gate: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(STREAM_CONCURRENCY)
+    )
+
+
+class RangeNotSatisfiable(ValueError):
+    """The Range header asks for bytes the file does not have."""
+
+
+def parse_range(header: str | None, size: int) -> tuple[int, int] | None:
+    """Inclusive (start, end) for a single-range ``Range`` header.
+
+    None means "the whole file": no header, or one this does not handle (a
+    multi-range request), which RFC 9110 allows a server to ignore.
+    """
+    if not header:
+        return None
+    match = _RANGE_RE.match(header.strip())
+    if match is None:
+        return None
+    first, last = match.groups()
+    if not first and not last:
+        raise RangeNotSatisfiable(header)
+    if not first:  # the final N bytes
+        length = int(last)
+        if length == 0:
+            raise RangeNotSatisfiable(header)
+        return max(size - length, 0), size - 1
+    start = int(first)
+    end = min(int(last), size - 1) if last else size - 1
+    if start >= size or start > end:
+        raise RangeNotSatisfiable(header)
+    return start, end
+
+
 class FileServer:
     """Serves registered local files at unguessable, expiring URLs."""
 
@@ -56,6 +111,7 @@ class FileServer:
         self._secret = secret
         self._portal = portal
         self._files: dict[str, ServedFile] = {}
+        self._streams: dict[str, ServedStream] = {}
         self._runner: web.AppRunner | None = None
         self._sweeper: asyncio.Task | None = None
 
@@ -71,6 +127,7 @@ class FileServer:
         app.router.add_get("/healthz", self._handle_health)
         # add_get also registers HEAD, which PikPak uses to size a file first.
         app.router.add_get("/f/{token}/{name}", self._handle_file)
+        app.router.add_get("/s/{token}/{name}", self._handle_stream)
         if self._portal is not None:
             self._portal.register(app.router)
 
@@ -130,6 +187,25 @@ class FileServer:
         for file_id in [fid for fid, served in self._files.items() if served.path == path]:
             self._files.pop(file_id, None)
 
+    def publish_stream(
+        self, opener: StreamOpener, *, name: str, size: int, ttl: int | None = None
+    ) -> tuple[str, str]:
+        """Serve a file straight from Telegram. Returns ``(stream_id, url)``."""
+        if not self.usable:
+            raise RuntimeError(
+                "the HTTP file server is not running or has no public base URL"
+            )
+        stream_id = "s" + secrets.token_urlsafe(12)
+        expires_at = time.time() + (ttl or self._config.url_ttl)
+        self._streams[stream_id] = ServedStream(
+            open=opener, name=name, size=size, expires_at=expires_at
+        )
+        token = make_token(self._secret, stream_id, int(expires_at))
+        return stream_id, f"{self._config.base_url}/s/{token}/{quote(name)}"
+
+    def unpublish_stream(self, stream_id: str) -> None:
+        self._streams.pop(stream_id, None)
+
     def delete_on_expiry(self, path: Path) -> None:
         """Delete ``path`` from disk once its last URL has expired.
 
@@ -143,6 +219,8 @@ class FileServer:
     def sweep(self, now: float | None = None) -> int:
         """Drop expired registrations, deleting files marked for it."""
         now = time.time() if now is None else now
+        for stream_id in [sid for sid, s in self._streams.items() if s.expires_at <= now]:
+            self._streams.pop(stream_id, None)
         stale = [fid for fid, served in self._files.items() if served.expires_at <= now]
         for file_id in stale:
             served = self._files.pop(file_id)
@@ -188,6 +266,50 @@ class FileServer:
                 "Cache-Control": "no-store",
             },
         )
+
+    async def _handle_stream(self, request: web.Request) -> web.StreamResponse:
+        """Serve a byte range straight from Telegram (PIKPAK_STREAM).
+
+        PikPak sizes a file with HEAD, then may pull several ranges at once,
+        so both have to be exact: the Content-Length and Content-Range are
+        computed from the size Telegram reported, never guessed.
+        """
+        try:
+            stream_id = verify_token(self._secret, request.match_info["token"])
+        except TokenError as exc:
+            log.info("rejected stream request: %s", exc)
+            raise web.HTTPNotFound(text="not found") from None
+        served = self._streams.get(stream_id)
+        if served is None or served.expires_at <= time.time():
+            raise web.HTTPNotFound(text="not found")
+
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Type": "application/octet-stream",
+            "Content-Disposition": content_disposition(served.name),
+            "Cache-Control": "no-store",
+        }
+        try:
+            wanted = parse_range(request.headers.get("Range"), served.size)
+        except RangeNotSatisfiable:
+            headers["Content-Range"] = f"bytes */{served.size}"
+            raise web.HTTPRequestRangeNotSatisfiable(headers=headers) from None
+        start, end = wanted if wanted is not None else (0, served.size - 1)
+        if wanted is not None:
+            headers["Content-Range"] = f"bytes {start}-{end}/{served.size}"
+
+        response = web.StreamResponse(status=206 if wanted else 200, headers=headers)
+        response.content_length = end - start + 1
+        await response.prepare(request)
+        if request.method == "HEAD" or served.size == 0:
+            await response.write_eof()
+            return response
+
+        async with served.gate:
+            async for chunk in served.open(start, end):
+                await response.write(chunk)
+        await response.write_eof()
+        return response
 
     # --------------------------------------------------------------- sweeper
 

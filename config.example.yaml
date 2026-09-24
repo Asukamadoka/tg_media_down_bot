@@ -47,6 +47,8 @@ pikpak:
   folder: /TelegramMedia    # created on demand
   # How long to poll an offline-download task before replying "still running".
   task_timeout: 600
+  # Serve Telegram media to PikPak straight from Telegram, never from disk.
+  stream: false
   # Let users connect their own account: /pikpak login opens a Mini App when
   # http.public_base_url is HTTPS, and /setup pikpak works in any private
   # chat. Only the token is stored, never the password.
