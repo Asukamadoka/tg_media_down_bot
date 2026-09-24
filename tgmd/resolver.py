@@ -31,6 +31,7 @@ from telethon.tl.functions.messages import (
 )
 from telethon.tl.types import ChatInviteAlready, ChatInvitePeek, PeerChannel
 
+from .i18n import Explained
 from .links import MessageRef, to_peer_id
 
 log = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ _ALBUM_WINDOW = 12
 _DIALOG_PRIME_INTERVAL = 600.0
 
 
-class ResolveError(RuntimeError):
+class ResolveError(Explained, RuntimeError):
     """The link cannot be resolved, with a message meant for the user."""
 
 
@@ -78,19 +79,14 @@ class Resolver:
         try:
             invite = await self._client(CheckChatInviteRequest(hash=invite_hash))
         except (InviteHashInvalidError, InviteHashExpiredError) as exc:
-            raise ResolveError(
-                "that invite link is invalid or has expired"
-            ) from exc
+            raise ResolveError(key="err.resolve.invite_invalid") from exc
 
         if isinstance(invite, (ChatInviteAlready, ChatInvitePeek)):
             return invite.chat
 
         title = getattr(invite, "title", "that chat")
         if not self._auto_join:
-            raise ResolveError(
-                f"the account is not a member of “{title}”. Join it first, or "
-                "enable download.auto_join_invites."
-            )
+            raise ResolveError(key="err.resolve.not_member_invite", title=title)
 
         try:
             updates = await self._client(ImportChatInviteRequest(hash=invite_hash))
@@ -98,11 +94,11 @@ class Resolver:
             invite = await self._client(CheckChatInviteRequest(hash=invite_hash))
             return getattr(invite, "chat", None)
         except (InviteHashInvalidError, InviteHashExpiredError) as exc:
-            raise ResolveError("that invite link is invalid or has expired") from exc
+            raise ResolveError(key="err.resolve.invite_invalid") from exc
 
         chats = getattr(updates, "chats", None) or []
         if not chats:
-            raise ResolveError(f"joined “{title}” but Telegram returned no chat")
+            raise ResolveError(key="err.resolve.joined_no_chat", title=title)
         log.info("joined chat via invite link: %s", title)
         return chats[0]
 
@@ -116,34 +112,27 @@ class Resolver:
             try:
                 return await self._client.get_entity(peer)
             except ChannelPrivateError as exc:
-                raise ResolveError(
-                    "that chat is private and the account is not a member of it"
-                ) from exc
+                raise ResolveError(key="err.resolve.private") from exc
             except (ValueError, ChannelInvalidError):
                 # Not in the cache yet: list dialogs once, then try again.
                 await self._prime_dialogs()
             try:
                 return await self._client.get_entity(peer)
             except ChannelPrivateError as exc:
-                raise ResolveError(
-                    "that chat is private and the account is not a member of it"
-                ) from exc
+                raise ResolveError(key="err.resolve.private") from exc
             except (ValueError, ChannelInvalidError) as exc:
                 raise ResolveError(
-                    f"chat {to_peer_id(int(ref.chat))} is not reachable. The "
-                    "account reading messages must be a member of it."
+                    key="err.resolve.unreachable", chat=to_peer_id(int(ref.chat))
                 ) from exc
 
         try:
             return await self._client.get_entity(ref.chat)
         except (UsernameNotOccupiedError, UsernameInvalidError) as exc:
-            raise ResolveError(f"no chat called @{ref.chat} exists") from exc
+            raise ResolveError(key="err.resolve.no_username", name=ref.chat) from exc
         except ChannelPrivateError as exc:
-            raise ResolveError(
-                f"@{ref.chat} is private and the account is not a member of it"
-            ) from exc
+            raise ResolveError(key="err.resolve.username_private", name=ref.chat) from exc
         except ValueError as exc:
-            raise ResolveError(f"could not resolve @{ref.chat}") from exc
+            raise ResolveError(key="err.resolve.unresolvable", name=ref.chat) from exc
 
     # -------------------------------------------------------------- messages
 
@@ -152,22 +141,13 @@ class Resolver:
         try:
             result = await self._client.get_messages(entity, ids=ids)
         except MsgIdInvalidError as exc:
-            raise ResolveError(
-                "Telegram rejected those message ids for this chat"
-            ) from exc
+            raise ResolveError(key="err.resolve.bad_ids") from exc
         except ChatAdminRequiredError as exc:
-            raise ResolveError(
-                "the account needs admin rights in that chat to read it"
-            ) from exc
+            raise ResolveError(key="err.resolve.admin_required") from exc
         except ChannelPrivateError as exc:
-            raise ResolveError(
-                "that chat is private and the account is not a member of it"
-            ) from exc
+            raise ResolveError(key="err.resolve.private") from exc
         except FloodWaitError as exc:
-            raise ResolveError(
-                f"Telegram asked us to wait {exc.seconds}s before reading that "
-                "chat again"
-            ) from exc
+            raise ResolveError(key="err.resolve.flood", seconds=exc.seconds) from exc
         if result is None:
             return []
         if not isinstance(result, list):
@@ -207,19 +187,17 @@ class Resolver:
                 GetDiscussionMessageRequest(peer=entity, msg_id=post_id)
             )
         except Exception as exc:  # Telethon raises a variety of RPC errors here
-            raise ResolveError(
-                "that post has no comment thread the account can read"
-            ) from exc
+            raise ResolveError(key="err.resolve.no_thread_access") from exc
 
         messages = getattr(discussion, "messages", None) or []
         if not messages:
-            raise ResolveError("that post has no comment thread")
+            raise ResolveError(key="err.resolve.no_thread")
 
         discussion_chat = await messages[0].get_chat()
         found = await self._fetch(discussion_chat, [comment_id])
         found = [m for m in found if m is not None]
         if not found:
-            raise ResolveError(f"comment {comment_id} no longer exists")
+            raise ResolveError(key="err.resolve.comment_gone", id=comment_id)
         return discussion_chat, found
 
     async def resolve(self, ref: MessageRef) -> tuple[object, list]:
@@ -232,10 +210,7 @@ class Resolver:
         entity = await self.entity(ref)
 
         if ref.is_invite_only:
-            raise ResolveError(
-                "that invite link points at a chat, not at a message. Send a "
-                "message link such as https://t.me/c/123456/789."
-            )
+            raise ResolveError(key="err.resolve.invite_not_message")
 
         if ref.comment_id is not None and ref.ids:
             entity, messages = await self._resolve_comment(
@@ -245,9 +220,7 @@ class Resolver:
 
         messages = [m for m in await self._fetch(entity, list(ref.ids)) if m is not None]
         if not messages:
-            raise ResolveError(
-                f"no message found at {ref.describe()} (it may have been deleted)"
-            )
+            raise ResolveError(key="err.resolve.no_message", where=ref.describe())
 
         if len(messages) == 1 and not ref.single:
             messages = await self._expand_album(entity, messages[0])

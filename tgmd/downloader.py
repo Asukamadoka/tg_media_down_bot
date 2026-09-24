@@ -22,6 +22,7 @@ from telethon.tl.types import (
     MessageMediaWebPage,
 )
 
+from .i18n import Explained
 from .parallel import (
     MAX_CONNECTIONS,
     MIN_PARALLEL_SIZE,
@@ -55,7 +56,7 @@ class DownloadCancelled(Exception):
     """The user cancelled the job while it was downloading."""
 
 
-class DownloadError(RuntimeError):
+class DownloadError(Explained, RuntimeError):
     """The download failed, with a message meant for the user."""
 
 
@@ -175,8 +176,7 @@ def ensure_disk_space(target_dir: Path, needed: int | None) -> None:
     usage = shutil.disk_usage(target_dir)
     if usage.free < needed + _DISK_HEADROOM:
         raise DownloadError(
-            f"not enough free disk space: {needed / 1024 / 1024:.0f} MiB needed, "
-            f"{usage.free / 1024 / 1024:.0f} MiB free"
+            key="err.download.disk", needed=needed / 1024 / 1024, free=usage.free / 1024 / 1024
         )
 
 
@@ -372,14 +372,12 @@ class Downloader:
                 error: Exception = exc
             else:
                 if result is None:
-                    raise DownloadError("Telegram returned no file for that message")
+                    raise DownloadError(key="err.download.no_file")
                 return Path(result)
 
             if isinstance(error, FloodWaitError):
                 if error.seconds > _FLOOD_WAIT_CEILING:
-                    raise DownloadError(
-                        f"Telegram asked us to wait {error.seconds}s; try again later"
-                    ) from error
+                    raise DownloadError(key="err.download.flood", seconds=error.seconds) from error
                 log.info("flood wait for %ss on attempt %d", error.seconds, attempt)
                 await asyncio.sleep(error.seconds + 1)
             else:
@@ -388,9 +386,7 @@ class Downloader:
                     await asyncio.sleep(2**attempt)
             last_error = error
 
-        raise DownloadError(
-            f"download failed after {_MAX_ATTEMPTS} attempts: {last_error}"
-        )
+        raise DownloadError(key="err.download.attempts", attempts=_MAX_ATTEMPTS, error=last_error)
 
     async def stream(self, message, start: int, end: int) -> AsyncIterator[bytes]:
         """Yield bytes ``start`` to ``end`` (inclusive) of the message's file.

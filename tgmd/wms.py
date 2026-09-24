@@ -39,7 +39,7 @@ from . import bootstrap, i18n
 from .buttons import callback_buttons
 from .config import Config, load_config
 from .db import Database
-from .i18n import t
+from .i18n import describe, t
 from .pikpak import PikPakError, PikPakService
 from .utils import escape_html
 
@@ -69,7 +69,7 @@ def provider_for(config: Config, pikpak: PikPakService):
         try:
             return await pikpak.client(user_id)
         except PikPakError as exc:
-            raise AccountUnavailable(str(exc)) from exc
+            raise AccountUnavailable(str(exc), shown=describe(exc)) from exc
 
     return provider
 

@@ -18,6 +18,7 @@ from telethon.tl.types import DocumentAttributeAudio, DocumentAttributeVideo
 from .config import Config
 from .db import Database
 from .downloader import MediaInfo
+from .i18n import Explained, t
 from .pikpak import PikPakError, PikPakService
 from .utils import escape_html, human_size, unique_path
 from .webserver import FileServer
@@ -30,7 +31,7 @@ ProgressCallback = Callable[[int, int], Awaitable[None] | None]
 CAPTION_LIMIT = 1024
 
 
-class DeliveryError(RuntimeError):
+class DeliveryError(Explained, RuntimeError):
     """Delivery failed, with a message meant for the user."""
 
 
@@ -163,8 +164,7 @@ class Delivery:
         limit = self._config.delivery.max_upload_bytes
         if size > limit:
             raise TooLargeToUpload(
-                f"{human_size(size)} is over the {human_size(limit)} a bot can "
-                "upload"
+                key="err.delivery.too_large", size=human_size(size), limit=human_size(limit)
             )
 
         try:
@@ -178,16 +178,14 @@ class Delivery:
                 progress_callback=self._wrap_progress(progress),
             )
         except FloodWaitError as exc:
-            raise DeliveryError(
-                f"Telegram asked us to wait {exc.seconds}s before uploading again"
-            ) from exc
+            raise DeliveryError(key="err.delivery.flood", seconds=exc.seconds) from exc
         except Exception as exc:
-            raise DeliveryError(f"upload failed: {exc}") from exc
+            raise DeliveryError(key="err.delivery.upload_failed", error=exc) from exc
 
         if cache_key:
             await self._store_in_cache(cache_key, path, info)
 
-        return DeliveryResult(mode="telegram", summary=f"sent {human_size(size)}")
+        return DeliveryResult(mode="telegram", summary=t("delivery.sent", size=human_size(size)))
 
     # ----------------------------------------------------------------- local
 
@@ -209,8 +207,8 @@ class Delivery:
         size = path.stat().st_size if path.exists() else (info.size or 0)
         return DeliveryResult(
             mode="local",
-            summary=f"saved to <code>{escape_html(self.local_address(path))}</code> "
-            f"({human_size(size)})",
+            summary=t("delivery.saved_local", path=escape_html(self.local_address(path)),
+                      size=human_size(size)),
             kept_local=True,
             remote_path=str(path),
         )
@@ -292,16 +290,9 @@ class Delivery:
 
     async def _check_pikpak_reachable(self, user_id: int | None) -> None:
         if user_id is not None and not await self._pikpak.available_for(user_id):
-            raise DeliveryError(
-                "no PikPak account is connected. Use /pikpak login to connect "
-                "yours, or ask the operator to configure a shared account."
-            )
+            raise DeliveryError(key="err.delivery.no_pikpak")
         if not self._files.usable:
-            raise DeliveryError(
-                "PikPak cannot fetch Telegram media without the HTTP file "
-                "server. Set HTTP_ENABLED=true and PUBLIC_BASE_URL, or use "
-                "/mode local. Magnet and URL transfers work without it."
-            )
+            raise DeliveryError(key="err.delivery.needs_http")
 
     async def _hand_to_pikpak(
         self, url: str, info: MediaInfo, *, folder, user_id, release
@@ -315,7 +306,7 @@ class Delivery:
             status = await self._pikpak.wait_for_task(task, user_id=user_id)
         except PikPakError as exc:
             release()
-            raise DeliveryError(str(exc)) from exc
+            raise DeliveryError(key="err.passthrough", error=exc) from exc
         finally:
             # Stop serving as soon as PikPak is done with it. While a task is
             # still running the URL has to stay alive, so it is left to expire.
@@ -327,17 +318,14 @@ class Delivery:
         if status is DownloadStatus.done:
             return DeliveryResult(
                 mode="pikpak",
-                summary=f"saved to PikPak <code>{escape_html(remote)}</code>",
+                summary=t("delivery.saved_pikpak", path=escape_html(remote)),
                 remote_path=remote,
             )
         if status is DownloadStatus.error:
-            raise DeliveryError("PikPak reported an error fetching the file")
+            raise DeliveryError(key="err.delivery.pikpak_error")
         return DeliveryResult(
             mode="pikpak",
-            summary=(
-                f"PikPak is still fetching <code>{escape_html(info.file_name)}</code>; "
-                "it will appear in your drive shortly"
-            ),
+            summary=t("delivery.pikpak_fetching", name=escape_html(info.file_name)),
             kept_local=True,
             remote_path=remote,
         )
@@ -355,15 +343,13 @@ class Delivery:
                 url, folder=folder, user_id=user_id
             )
         except PikPakError as exc:
-            raise DeliveryError(str(exc)) from exc
+            raise DeliveryError(key="err.passthrough", error=exc) from exc
 
         target = folder or self._config.pikpak.folder
         return DeliveryResult(
             mode="pikpak",
-            summary=(
-                f"queued in PikPak: <code>{escape_html(task.name)}</code> → "
-                f"{escape_html(target)}"
-            ),
+            summary=t("delivery.pikpak_queued", name=escape_html(task.name),
+                      folder=escape_html(target)),
             remote_path=f"{target}/{task.name}",
         )
 

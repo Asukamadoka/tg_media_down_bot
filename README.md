@@ -415,10 +415,11 @@ directly, no channel needed.
 - `download.max_batch` caps range links. A wider range is truncated and the
   bot reports it.
 - Bot messages are English by default. `TGMD_LANG=zh` (or `language: zh`)
-  switches the catalogue in `tgmd/i18n.py`; `/help`, `/mode`, `/status`,
-  `/stats`, `/pikpak`, `/cache`, `/claim`, the queue and progress messages and
-  the command menu are translated. `/setup`, `/verify` and the PikPak login
-  page are not yet.
+  switches the catalogue in `tgmd/i18n.py`. Everything a person reads is
+  translated: replies, progress, the command menu, `/setup`, `/verify` (and
+  `python -m tgmd.verify`), the PikPak login page and error messages. Command
+  names and their keywords stay English, and so do the log and the error
+  text stored in the database.
 
 ## Development
 

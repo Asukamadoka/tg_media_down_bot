@@ -100,6 +100,39 @@ def t(key: str, /, lang: str | None = None, **kwargs: object) -> str:
         return text
 
 
+class Explained(Exception):
+    """An error a person will read.
+
+    ``str(exc)`` stays English, for the log (log lines are never translated).
+    Raised with a catalogue ``key`` and its arguments, :meth:`display` gives
+    the reader's language. An argument that is itself an :class:`Explained`
+    error is displayed too, so a wrapped PikPak error reads naturally inside
+    a delivery error. Without an explicit message the English catalogue
+    entry is the message, so the text lives in one place.
+    """
+
+    def __init__(self, message: str = "", *, key: str | None = None, **kwargs: object) -> None:
+        if not message and key is not None:
+            message = t(key, lang=DEFAULT_LANGUAGE, **kwargs)
+        super().__init__(message)
+        self.key = key
+        self.kwargs = kwargs
+
+    def display(self, lang: str | None = None) -> str:
+        if self.key is None:
+            return str(self)
+        args = {
+            name: value.display(lang) if isinstance(value, Explained) else value
+            for name, value in self.kwargs.items()
+        }
+        return t(self.key, lang=lang, **args)
+
+
+def describe(exc: BaseException, lang: str | None = None) -> str:
+    """What to show a person for ``exc``: translated when it can be."""
+    return exc.display(lang) if isinstance(exc, Explained) else str(exc)
+
+
 def display_mode(mode: str, /, lang: str | None = None) -> str:
     """A delivery mode as a person should read it. The stored value is unchanged."""
     key = f"mode.name.{mode}"
@@ -554,6 +587,395 @@ CATALOG: dict[str, dict[str, str]] = {
             '(HTTP_ENABLED and PUBLIC_BASE_URL)'
         ),
         'wms.panel.no_https': 'PUBLIC_BASE_URL is {url}; Telegram opens Mini Apps only over HTTPS',
+        'setup.status.title': '<b>Setup</b>',
+        'setup.status.bot': '✅ <b>Bot account</b> — connected, you are talking to it',
+        'setup.status.source_env': 'from the environment',
+        'setup.status.source_chat': 'from an in-chat login',
+        'setup.status.source_file': 'from a session file',
+        'setup.status.reading_ok': '✅ <b>Reading account</b> — connected {source}',
+        'setup.status.reading_missing': (
+            '⬜ <b>Reading account</b> — needed for private and save-restricted chats\n'
+            '    <code>/setup telegram</code> to sign in here'
+        ),
+        'setup.status.pikpak_own': 'your own account',
+        'setup.status.pikpak_shared': 'the shared account',
+        'setup.status.pikpak_ok': '✅ <b>PikPak</b> — {which}',
+        'setup.status.pikpak_missing': (
+            '⬜ <b>PikPak</b> — optional, for cloud transfers\n'
+            '    <code>/setup pikpak</code> to sign in here'
+        ),
+        'setup.status.cache_ok': '✅ <b>Upload cache</b> — configured',
+        'setup.status.cache_missing': (
+            '⬜ <b>Upload cache</b> — optional. Add me to a private channel as admin, then send <co'
+            'de>/cache</code> in that channel.'
+        ),
+        'setup.status.ready': 'You can start sending links. /help lists what I take.',
+        'setup.status.public_only': (
+            'Public channels already work. Private ones need the reading account.'
+        ),
+        'setup.pikpak.disabled': 'The operator has disabled per-user PikPak logins.',
+        'setup.private_only': 'Message me directly to sign in, not in a group.',
+        'setup.pikpak.form': (
+            '\n'
+            '\n'
+            'Prefer a form? <code>/pikpak login</code> opens one inside Telegram instead.'
+        ),
+        'setup.pikpak.start': (
+            '<b>Connect PikPak</b>\n'
+            '\n'
+            'Send me the email or phone number your PikPak account uses.{alternative}\n'
+            '\n'
+            'I delete each message as soon as I have read it, and only the access token is stored, '
+            'never your password.\n'
+            'Send any other command to stop.'
+        ),
+        'setup.telegram.pinned': (
+            '<code>TG_USER_SESSION</code> is set in the environment, so a login here would be ignor'
+            'ed. Remove it first, or keep using the session you have.'
+        ),
+        'setup.telegram.start': (
+            '<b>Connect a reading account</b>\n'
+            '\n'
+            'This signs a normal Telegram account in to me, so I can read chats a bot cannot: priva'
+            'te channels you are in, and channels that block saving.\n'
+            '\n'
+            '⚠️ I am about to ask for a login code. That is only safe because <b>you run this bot y'
+            'ourself</b>. Never give a Telegram login code to a bot or person you do not operate.\n'
+            '\n'
+            'Send the phone number of the account to use, with its country code, like <code>+861380'
+            '0138000</code>.\n'
+            'Send any other command to stop.'
+        ),
+        'setup.timeout': 'That setup step timed out. Start again when ready.',
+        'setup.failed': (
+            '❌ That did not work: {error}\n'
+            'Start again when ready.'
+        ),
+        'setup.cannot_delete': 'I could not delete that message; please delete it yourself.',
+        'setup.pikpak.bad_account': 'That does not look like an email or phone number.',
+        'setup.pikpak.ask_password': (
+            'Account: <code>{account}</code>\n'
+            '\n'
+            'Now send the password. I will delete it immediately.'
+        ),
+        'setup.pikpak.signing_in': 'Signing in to PikPak…',
+        'setup.retry_password': (
+            '❌ {error}\n'
+            '\n'
+            'Send the password again, or any command to stop.'
+        ),
+        'setup.pikpak.connected': (
+            '✅ PikPak connected as <code>{account}</code>.\n'
+            '\n'
+            'Your transfers now go to your own drive. <code>/pikpak</code> shows quota, <code>/pikp'
+            'ak logout</code> disconnects it.'
+        ),
+        'setup.telegram.bad_phone': (
+            'That does not look like a phone number. Include the country code, like <code>+86138001'
+            '38000</code>.'
+        ),
+        'setup.telegram.phone_invalid': 'Telegram says that phone number is not valid.',
+        'setup.telegram.flood': 'Telegram is rate-limiting logins for {seconds}s. Try later.',
+        'setup.telegram.code_sent': (
+            'Telegram is sending a login code to that account, in the Telegram app itself.\n'
+            '\n'
+            'Send me the code. Put a space or dash between the digits if Telegram refuses to let yo'
+            'u copy it, for example <code>1 2 3 4 5</code>. I delete it immediately.'
+        ),
+        'setup.telegram.no_digits': 'I could not find any digits in that.',
+        'setup.telegram.expired': 'That login expired. Start again with /setup telegram.',
+        'setup.telegram.signing_in': 'Signing in…',
+        'setup.telegram.two_step': (
+            'That account has two-step verification. Send its password; I delete it immediately and'
+            ' never store it.'
+        ),
+        'setup.telegram.code_wrong': 'That code is wrong. Send it again.',
+        'setup.telegram.code_expired': 'That code expired. Start again with /setup telegram.',
+        'setup.telegram.checking': 'Checking the password…',
+        'setup.telegram.saved': (
+            '✅ Signed in as <code>{label}</code> and saved.\n'
+            '\n'
+            'Restart the bot to start using it.'
+        ),
+        'setup.telegram.not_adopted': (
+            '✅ Signed in as <code>{label}</code> and saved, but could not bring it into service no'
+            'w ({error}). Restart the bot.'
+        ),
+        'setup.telegram.connected': (
+            '✅ Reading account connected: <code>{account}</code>\n'
+            '\n'
+            'Private and save-restricted chats work now, with no restart. Send me a link to try it.'
+            '\n'
+            '\n'
+            'The session is stored on this server and is as sensitive as the account password. Revo'
+            'ke it any time from Telegram → Settings → Devices.'
+        ),
+        'err.resolve.invite_invalid': 'that invite link is invalid or has expired',
+        'err.resolve.not_member_invite': (
+            'the account is not a member of “{title}”. Join it first, or enable download.auto_join_'
+            'invites.'
+        ),
+        'err.resolve.joined_no_chat': 'joined “{title}” but Telegram returned no chat',
+        'err.resolve.private': 'that chat is private and the account is not a member of it',
+        'err.resolve.unreachable': (
+            'chat {chat} is not reachable. The account reading messages must be a member of it.'
+        ),
+        'err.resolve.no_username': 'no chat called @{name} exists',
+        'err.resolve.username_private': '@{name} is private and the account is not a member of it',
+        'err.resolve.unresolvable': 'could not resolve @{name}',
+        'err.resolve.bad_ids': 'Telegram rejected those message ids for this chat',
+        'err.resolve.admin_required': 'the account needs admin rights in that chat to read it',
+        'err.resolve.flood': 'Telegram asked us to wait {seconds}s before reading that chat again',
+        'err.resolve.no_thread_access': 'that post has no comment thread the account can read',
+        'err.resolve.no_thread': 'that post has no comment thread',
+        'err.resolve.comment_gone': 'comment {id} no longer exists',
+        'err.resolve.invite_not_message': (
+            'that invite link points at a chat, not at a message. Send a message link such as https'
+            '://t.me/c/123456/789.'
+        ),
+        'err.resolve.no_message': 'no message found at {where} (it may have been deleted)',
+        'err.pikpak.login_failed': 'PikPak login failed: {error}',
+        'err.pikpak.session_expired': (
+            'your PikPak session has expired. Use /pikpak login to connect your account again.'
+        ),
+        'err.pikpak.no_account': (
+            'no PikPak account is connected and none is configured on the server. Use /pikpak login'
+            ' to connect yours.'
+        ),
+        'err.pikpak.rejected': 'PikPak rejected those credentials: {error}',
+        'err.pikpak.folder_open': 'could not open PikPak folder {folder}: {error}',
+        'err.pikpak.folder_create': 'could not create PikPak folder {folder}',
+        'err.pikpak.transfer_refused': 'PikPak refused the transfer: {error}',
+        'err.pikpak.not_share': '{url} is not a PikPak share link',
+        'err.pikpak.share_unreadable_detail': 'could not read the share link: {error}',
+        'err.pikpak.share_unreadable': 'could not read the share link',
+        'err.pikpak.share_unexpected': 'PikPak returned an unexpected share response',
+        'err.pikpak.share_status': (
+            'the share link is not usable (status {status}); it may be expired or need a password'
+        ),
+        'err.pikpak.share_empty': 'the share link contains no files',
+        'err.pikpak.share_save_failed': 'saving the share failed: {error}',
+        'err.pikpak.quota': 'could not read PikPak quota: {error}',
+        'err.link.chat_id': 'not a numeric chat id: {value!r}',
+        'err.link.range': 'range {start}-{end} covers too many messages (limit {limit})',
+        'err.link.no_path': 'the link has no path, so it points at no chat',
+        'err.link.phone': 'that is a phone-number link, not an invite link',
+        'err.link.bad_invite': 'malformed invite hash: {hash!r}',
+        'err.link.c_needs_ids': 'a t.me/c link needs both a chat id and a message id',
+        'err.link.not_chat': 't.me/{name} is not a chat link',
+        'err.link.bad_username': '{name!r} is not a valid Telegram username',
+        'err.link.no_message_id': '{chat} has no message id in the link',
+        'err.link.bad_id': '{value!r} is not a message id or range',
+        'err.passthrough': '{error}',
+        'err.delivery.flood': 'Telegram asked us to wait {seconds}s before uploading again',
+        'err.delivery.upload_failed': 'upload failed: {error}',
+        'err.delivery.no_pikpak': (
+            'no PikPak account is connected. Use /pikpak login to connect yours, or ask the operato'
+            'r to configure a shared account.'
+        ),
+        'err.delivery.needs_http': (
+            'PikPak cannot fetch Telegram media without the HTTP file server. Set HTTP_ENABLED=true'
+            ' and PUBLIC_BASE_URL, or use /mode local. Magnet and URL transfers work without it.'
+        ),
+        'err.delivery.pikpak_error': 'PikPak reported an error fetching the file',
+        'err.delivery.too_large': '{size} is over the {limit} a bot can upload',
+        'delivery.sent': 'sent {size}',
+        'delivery.saved_local': 'saved to <code>{path}</code> ({size})',
+        'delivery.saved_pikpak': 'saved to PikPak <code>{path}</code>',
+        'delivery.pikpak_fetching': (
+            'PikPak is still fetching <code>{name}</code>; it will appear in your drive shortly'
+        ),
+        'delivery.pikpak_queued': 'queued in PikPak: <code>{name}</code> → {folder}',
+        'err.download.flood': 'Telegram asked us to wait {seconds}s; try again later',
+        'err.download.disk': (
+            'not enough free disk space: {needed:.0f} MiB needed, {free:.0f} MiB free'
+        ),
+        'err.download.no_file': 'Telegram returned no file for that message',
+        'err.download.attempts': 'download failed after {attempts} attempts: {error}',
+        'err.token.empty': 'the bot token is empty; get one from @BotFather',
+        'err.token.colon': 'a bot token looks like 123456789:AA... — one colon, id first',
+        'err.token.bad_id': 'the part before the colon should be the numeric bot id, got {value!r}',
+        'err.token.secret_length': (
+            'the secret after the colon is {length} characters; BotFather issues about 35'
+        ),
+        'err.claim.taken': 'this bot already has an admin, so it cannot be claimed again',
+        'err.claim.no_code': (
+            'no claim code has been issued. Restart the bot and read the code from its log.'
+        ),
+        'err.claim.wrong': 'that claim code is wrong',
+        'verify.check.configuration': 'configuration',
+        'verify.check.configuration_note': 'configuration note',
+        'verify.check.access_control': 'access control',
+        'verify.check.bot_token': 'bot token',
+        'verify.check.directories': 'directories',
+        'verify.check.bot_identity': 'bot identity',
+        'verify.check.bot_created': 'bot created',
+        'verify.check.user_session': 'user session',
+        'verify.check.account_separation': 'account separation',
+        'verify.check.history_access': 'history access',
+        'verify.check.cache_chat': 'cache chat',
+        'verify.check.forward_fast_path': 'forward fast path',
+        'verify.check.pikpak_account': 'pikpak account',
+        'verify.check.pikpak_folder': 'pikpak folder',
+        'verify.check.pikpak_login': 'pikpak login',
+        'verify.check.http_server': 'http server',
+        'verify.check.public_reachability': 'public reachability',
+        'verify.check.database': 'database',
+        'verify.no_checks': 'no checks ran',
+        'verify.verdict.failed': '{count} check(s) failed — the bot will not work as configured',
+        'verify.verdict.warnings': 'everything essential passed, with {count} warning(s)',
+        'verify.verdict.ok': 'everything passed',
+        'verify.config.ok': 'loaded and internally consistent',
+        'verify.access.open': (
+            'open to every Telegram user; the bot can read anything your account can see'
+        ),
+        'verify.access.none': (
+            'no admin or allowed user ids, so every request will be refused. Send /claim with the c'
+            "ode from the bot's log, or set ADMIN_USER_IDS."
+        ),
+        'verify.access.ok': '{admins} admin(s), {users} additional user(s)',
+        'verify.token.ok': 'well-formed, names bot id {id}',
+        'verify.bot.no_token': 'no usable token to check',
+        'verify.timeout': 'timed out connecting to Telegram',
+        'verify.bot.sign_in_failed': (
+            'could not sign in as the bot: {error}. Check the token with @BotFather, and check that'
+            ' this host can open a direct TCP connection to Telegram — MTProto is not plain HTTPS, '
+            'so an HTTPS-only proxy will block it.'
+        ),
+        'verify.bot.read_failed': 'could not read the bot account: {error}',
+        'verify.bot.created': '{account} — {link}',
+        'verify.bot.no_username': '{account} — no username',
+        'verify.bot.not_bot': 'that token belongs to an account Telegram does not mark as a bot',
+        'verify.bot.mismatch': (
+            'the token names bot id {expected} but the account that answered is {actual}'
+        ),
+        'verify.bot.ok': 'id {id} matches the token, and is a bot',
+        'verify.user.missing': (
+            'not configured. Without one, only chats the bot itself is in can be read. Sign one in '
+            'from Telegram with /setup telegram.'
+        ),
+        'verify.user.connect_failed': 'could not connect: {error}',
+        'verify.user.not_authorised': (
+            'the session from {source} is not authorised; sign in again with /setup telegram'
+        ),
+        'verify.user.read_failed': 'could not read the account: {error}',
+        'verify.user.is_bot': 'that session belongs to a bot; downloads need a real account',
+        'verify.user.ok': '{account} from {source}, authorised{premium}',
+        'verify.user.premium': ' Telegram Premium',
+        'verify.source.in_chat': 'an in-chat login',
+        'verify.accounts.need_both': 'needs both accounts',
+        'verify.accounts.same': 'the bot and the reading account are the same account',
+        'verify.accounts.ok': 'bot {bot} reads through account {user}',
+        'verify.history.failed': 'could not list dialogs: {error}',
+        'verify.history.empty': 'the account has no chats, so there is nothing to download from',
+        'verify.history.ok': 'the account can list its chats',
+        'verify.cache.unset': 'not configured; every request re-downloads (set CACHE_CHAT_ID)',
+        'verify.cache.cannot_see': (
+            'the bot cannot see chat {chat}: {error}. Add the bot to it as an administrator.'
+        ),
+        'verify.cache.not_admin': (
+            'the bot is in chat {chat} but is not an administrator; it may not be able to post or r'
+            'ead back uploads'
+        ),
+        'verify.cache.ok': 'the bot administrates chat {chat}',
+        'verify.cache.no_bot': 'cannot be checked without a working bot',
+        'verify.forward.bot_reads': (
+            'the bot reads for itself and re-sends forwardable files directly'
+        ),
+        'verify.forward.no_cache': (
+            'no cache channel, so forwardable files are downloaded and re-uploaded. Send /cache in '
+            'a private channel to make them instant.'
+        ),
+        'verify.forward.cannot_see': (
+            'the reading account cannot see cache channel {chat} ({error}). Add it to the channel, '
+            'with permission to post.'
+        ),
+        'verify.forward.ok': 'the reading account can forward into {chat}',
+        'verify.forward.cannot_post': (
+            'the reading account is in {chat} but cannot post there; make it an admin with permissi'
+            'on to post'
+        ),
+        'verify.pikpak.ok': '{username} signed in, {used} of {limit} used',
+        'verify.pikpak.folder': 'transfers land in {folder}',
+        'verify.pikpak.no_shared': 'no shared account configured; users connect their own instead',
+        'verify.login.disabled': 'disabled (pikpak.allow_user_login)',
+        'verify.login.needs_https': (
+            'the Mini App needs HTTP_ENABLED=true and an HTTPS PUBLIC_BASE_URL; until then users co'
+            'nnect with /setup pikpak'
+        ),
+        'verify.login.ok': '/pikpak login opens {url}/pikpak/app in Telegram',
+        'verify.http.disabled': (
+            'disabled; magnet and URL transfers still work, Telegram media cannot reach PikPak'
+        ),
+        'verify.http.bind_failed': (
+            'could not bind {host}:{port}: {error}. If the bot is already running, this port is exp'
+            'ected to be busy.'
+        ),
+        'verify.http.bound': 'bound {host}:{port}',
+        'verify.reach.ok': '{url} answers, so PikPak can fetch files',
+        'verify.reach.status': '{url} answered HTTP {status}; check the reverse proxy',
+        'verify.reach.failed': (
+            'could not fetch {url} from this host ({error}). Verify from outside; NAT hairpinning o'
+            'ften breaks a self-test.'
+        ),
+        'verify.db.ok': 'opened {path}',
+        'verify.db.failed': 'could not open {path}: {error}',
+        'verify.live.user_missing': 'not configured; only chats the bot itself is in can be read',
+        'verify.live.user_ok': '{account}, authorised',
+        'verify.live.source_own': 'your own account',
+        'verify.live.source_shared': 'the shared account ({username})',
+        'verify.live.no_pikpak': (
+            'no account connected for you and none configured on the server; use /pikpak login'
+        ),
+        'verify.live.pikpak_ok': '{source}, {used} of {limit} used',
+        'verify.live.pikpak_failed': '{source}: {error}',
+        'verify.live.login_ok': '/pikpak login opens the Mini App',
+        'verify.live.login_none': 'no Mini App ({reason}); /setup pikpak works',
+        'verify.live.http_ok': 'serving at {url}',
+        'verify.live.no_url': 'no public URL set',
+        'verify.live.http_disabled': 'disabled; Telegram media cannot be transferred to PikPak',
+        'verify.cli.config_error': 'configuration error: {error}',
+        'verify.cli.start': 'Verifying tg_media_down_bot setup…',
+        'portal.title': 'Connect PikPak',
+        'portal.heading': 'Connect your PikPak account',
+        'portal.sub': (
+            'This page belongs to your own media-downloader bot. It is not operated by PikPak.'
+        ),
+        'portal.username': 'PikPak email or phone',
+        'portal.password': 'PikPak password',
+        'portal.connect': 'Connect',
+        'portal.note': (
+            'Telegram tells me who you are, so there is no login link to leak. Your password is sen'
+            't to PikPak once to obtain an access token; only the token is stored. Disconnect any t'
+            'ime with {command}.'
+        ),
+        'portal.js.connecting': 'Connecting…',
+        'portal.js.connected': 'PikPak connected',
+        'portal.js.connected_sub': 'Transfers now go to your own PikPak account.',
+        'portal.js.failed': 'That did not work.',
+        'portal.js.unreachable': 'Could not reach the bot: {error}',
+        'portal.err.disabled': 'Per-user PikPak logins are disabled.',
+        'portal.err.malformed': 'Malformed request.',
+        'portal.err.identity': (
+            'Telegram could not confirm who you are. Reopen this page from the bot.'
+        ),
+        'portal.err.not_allowed': 'You are not allowed to use this bot.',
+        'portal.err.throttled': 'Too many attempts. Wait a few minutes.',
+        'portal.err.fields': 'Enter both fields.',
+        'portal.reason.disabled': (
+            'the operator has disabled per-user PikPak logins (pikpak.allow_user_login)'
+        ),
+        'portal.reason.no_http': (
+            "the bot's HTTP server is not running with a public address, so there is nowhere to ser"
+            've the login form. Set HTTP_ENABLED=true and PUBLIC_BASE_URL.'
+        ),
+        'portal.reason.not_attached': 'the login form is not attached to the HTTP server',
+        'portal.reason.plain_http': (
+            'PUBLIC_BASE_URL is {url}, which is plain HTTP. Telegram only opens Mini Apps over HTTP'
+            'S; put a TLS reverse proxy in front of the bot.'
+        ),
+        'err.session.not_a_session': 'that is not a Telegram session string: {error}',
+        'err.session.not_authorized': 'the new session is not authorized',
     },
     "zh": {
         'help.body': (
@@ -964,5 +1386,342 @@ CATALOG: dict[str, dict[str, str]] = {
             'bot 没有可以提供面板的公网 HTTPS 地址（HTTP_ENABLED 与 PUBLIC_BASE_URL）'
         ),
         'wms.panel.no_https': 'PUBLIC_BASE_URL 是 {url}；Telegram 只通过 HTTPS 打开 Mini App',
+        'setup.status.title': '<b>配置</b>',
+        'setup.status.bot': '✅ <b>机器人账号</b> — 已连接，你正在和它对话',
+        'setup.status.source_env': '来自环境变量',
+        'setup.status.source_chat': '来自聊天内登录',
+        'setup.status.source_file': '来自会话文件',
+        'setup.status.reading_ok': '✅ <b>读取账号</b> — 已连接，{source}',
+        'setup.status.reading_missing': (
+            '⬜ <b>读取账号</b> — 私有频道和禁止保存的频道需要它\n'
+            '    发 <code>/setup telegram</code> 在这里登录'
+        ),
+        'setup.status.pikpak_own': '你自己的账号',
+        'setup.status.pikpak_shared': '共享账号',
+        'setup.status.pikpak_ok': '✅ <b>PikPak</b> — {which}',
+        'setup.status.pikpak_missing': (
+            '⬜ <b>PikPak</b> — 可选，用于转存到云盘\n'
+            '    发 <code>/setup pikpak</code> 在这里登录'
+        ),
+        'setup.status.cache_ok': '✅ <b>上传缓存</b> — 已配置',
+        'setup.status.cache_missing': (
+            '⬜ <b>上传缓存</b> — 可选。把我加进一个私有频道并设为管理员，然后在那个频道里发 <code>'
+            '/cache</code>。'
+        ),
+        'setup.status.ready': '现在可以发链接了。/help 列出我能接收的内容。',
+        'setup.status.public_only': '公开频道已经可以用了。私有频道需要读取账号。',
+        'setup.pikpak.disabled': '运营者关闭了个人 PikPak 登录。',
+        'setup.private_only': '请私聊我登录，不要在群里。',
+        'setup.pikpak.form': (
+            '\n'
+            '\n'
+            '想用表单？<code>/pikpak login</code> 会在 Telegram 里打开一个。'
+        ),
+        'setup.pikpak.start': (
+            '<b>连接 PikPak</b>\n'
+            '\n'
+            '请发送你 PikPak 账号的邮箱或手机号。{alternative}\n'
+            '\n'
+            '每条消息我读完就删，只保存访问令牌，从不保存密码。\n'
+            '发送任意其他命令即可中止。'
+        ),
+        'setup.telegram.pinned': (
+            '环境变量里设了 <code>TG_USER_SESSION</code>，在这里登录会被忽略。请先去掉它，或者继续'
+            '用现有的会话。'
+        ),
+        'setup.telegram.start': (
+            '<b>连接读取账号</b>\n'
+            '\n'
+            '这会把一个普通 Telegram 账号登录到我这里，让我能读取机器人读不到的聊天：你所在的私有频'
+            '道，以及禁止保存的频道。\n'
+            '\n'
+            '⚠️ 接下来我会要登录验证码。这只因为<b>这个机器人是你自己运行的</b>才是安全的。绝不要把'
+            ' Telegram 登录验证码交给不是你自己运营的机器人或任何人。\n'
+            '\n'
+            '请发送要使用的账号的手机号，带国家码，例如 <code>+8613800138000</code>。\n'
+            '发送任意其他命令即可中止。'
+        ),
+        'setup.timeout': '这一步配置超时了。准备好后请重新开始。',
+        'setup.failed': (
+            '❌ 没有成功：{error}\n'
+            '准备好后请重新开始。'
+        ),
+        'setup.cannot_delete': '我删不掉那条消息，请你自己删除。',
+        'setup.pikpak.bad_account': '这看起来不像邮箱或手机号。',
+        'setup.pikpak.ask_password': (
+            '账号：<code>{account}</code>\n'
+            '\n'
+            '现在请发送密码。我会立刻删除它。'
+        ),
+        'setup.pikpak.signing_in': '正在登录 PikPak……',
+        'setup.retry_password': (
+            '❌ {error}\n'
+            '\n'
+            '请重新发送密码，或发送任意命令中止。'
+        ),
+        'setup.pikpak.connected': (
+            '✅ PikPak 已连接：<code>{account}</code>。\n'
+            '\n'
+            '你的转存现在会进你自己的网盘。<code>/pikpak</code> 查看容量，<code>/pikpak logout</cod'
+            'e> 断开连接。'
+        ),
+        'setup.telegram.bad_phone': (
+            '这看起来不像手机号。请带上国家码，例如 <code>+8613800138000</code>。'
+        ),
+        'setup.telegram.phone_invalid': 'Telegram 说这个手机号无效。',
+        'setup.telegram.flood': 'Telegram 限制了登录频率，需等待 {seconds} 秒。请稍后再试。',
+        'setup.telegram.code_sent': (
+            'Telegram 正在把登录验证码发到那个账号的 Telegram 应用里。\n'
+            '\n'
+            '请把验证码发给我。如果 Telegram 不让你直接复制，在数字之间加空格或短横线，例如 <code>1'
+            ' 2 3 4 5</code>。我会立刻删除它。'
+        ),
+        'setup.telegram.no_digits': '里面没有找到任何数字。',
+        'setup.telegram.expired': '这次登录已过期。请用 /setup telegram 重新开始。',
+        'setup.telegram.signing_in': '正在登录……',
+        'setup.telegram.two_step': (
+            '这个账号开启了两步验证。请发送它的密码；我会立刻删除，且从不保存。'
+        ),
+        'setup.telegram.code_wrong': '验证码不对，请重新发送。',
+        'setup.telegram.code_expired': '验证码已过期。请用 /setup telegram 重新开始。',
+        'setup.telegram.checking': '正在核对密码……',
+        'setup.telegram.saved': (
+            '✅ 已登录 <code>{label}</code> 并保存。\n'
+            '\n'
+            '重启机器人后开始使用。'
+        ),
+        'setup.telegram.not_adopted': (
+            '✅ 已登录 <code>{label}</code> 并保存，但现在没法启用它（{error}）。请重启机器人。'
+        ),
+        'setup.telegram.connected': (
+            '✅ 读取账号已连接：<code>{account}</code>\n'
+            '\n'
+            '私有频道和禁止保存的频道现在就能用，无需重启。发个链接试试。\n'
+            '\n'
+            '会话保存在这台服务器上，敏感程度等同于账号密码。随时可以在 Telegram → 设置 → 设备 里撤'
+            '销。'
+        ),
+        'err.resolve.invite_invalid': '邀请链接无效或已过期',
+        'err.resolve.not_member_invite': (
+            '账号还不是「{title}」的成员。请先加入，或开启 download.auto_join_invites。'
+        ),
+        'err.resolve.joined_no_chat': '已加入「{title}」，但 Telegram 没有返回这个聊天',
+        'err.resolve.private': '这个聊天是私密的，账号不是它的成员',
+        'err.resolve.unreachable': '无法访问聊天 {chat}。读取消息的账号必须是它的成员。',
+        'err.resolve.no_username': '不存在名为 @{name} 的聊天',
+        'err.resolve.username_private': '@{name} 是私密的，账号不是它的成员',
+        'err.resolve.unresolvable': '无法解析 @{name}',
+        'err.resolve.bad_ids': 'Telegram 拒绝了这个聊天里的这些消息 ID',
+        'err.resolve.admin_required': '账号需要该聊天的管理员权限才能读取',
+        'err.resolve.flood': 'Telegram 要求等待 {seconds} 秒后再读取这个聊天',
+        'err.resolve.no_thread_access': '这条帖子没有账号能读取的评论区',
+        'err.resolve.no_thread': '这条帖子没有评论区',
+        'err.resolve.comment_gone': '评论 {id} 已不存在',
+        'err.resolve.invite_not_message': (
+            '这个邀请链接指向的是聊天，不是消息。请发送消息链接，例如 https://t.me/c/123456/789。'
+        ),
+        'err.resolve.no_message': '在 {where} 没有找到消息（可能已被删除）',
+        'err.pikpak.login_failed': 'PikPak 登录失败：{error}',
+        'err.pikpak.session_expired': '你的 PikPak 登录已过期。请用 /pikpak login 重新连接账号。',
+        'err.pikpak.no_account': (
+            '没有连接 PikPak 账号，服务器上也没有配置。请用 /pikpak login 连接你的账号。'
+        ),
+        'err.pikpak.rejected': 'PikPak 拒绝了这组凭据：{error}',
+        'err.pikpak.folder_open': '无法打开 PikPak 文件夹 {folder}：{error}',
+        'err.pikpak.folder_create': '无法创建 PikPak 文件夹 {folder}',
+        'err.pikpak.transfer_refused': 'PikPak 拒绝了这次转存：{error}',
+        'err.pikpak.not_share': '{url} 不是 PikPak 分享链接',
+        'err.pikpak.share_unreadable_detail': '无法读取分享链接：{error}',
+        'err.pikpak.share_unreadable': '无法读取分享链接',
+        'err.pikpak.share_unexpected': 'PikPak 返回了无法识别的分享信息',
+        'err.pikpak.share_status': '分享链接不可用（状态 {status}），可能已过期或需要提取码',
+        'err.pikpak.share_empty': '分享链接里没有文件',
+        'err.pikpak.share_save_failed': '转存分享失败：{error}',
+        'err.pikpak.quota': '无法读取 PikPak 容量：{error}',
+        'err.link.chat_id': '不是数字形式的聊天 ID：{value!r}',
+        'err.link.range': '范围 {start}-{end} 包含的消息太多（上限 {limit}）',
+        'err.link.no_path': '链接没有路径，指不到任何聊天',
+        'err.link.phone': '这是电话号码链接，不是邀请链接',
+        'err.link.bad_invite': '邀请码格式不对：{hash!r}',
+        'err.link.c_needs_ids': 't.me/c 链接需要同时带有聊天 ID 和消息 ID',
+        'err.link.not_chat': 't.me/{name} 不是聊天链接',
+        'err.link.bad_username': '{name!r} 不是有效的 Telegram 用户名',
+        'err.link.no_message_id': '链接里没有 {chat} 的消息 ID',
+        'err.link.bad_id': '{value!r} 不是消息 ID 或范围',
+        'err.passthrough': '{error}',
+        'err.delivery.flood': 'Telegram 要求等待 {seconds} 秒后再上传',
+        'err.delivery.upload_failed': '上传失败：{error}',
+        'err.delivery.no_pikpak': (
+            '没有连接 PikPak 账号。请用 /pikpak login 连接你的账号，或请管理员配置共享账号。'
+        ),
+        'err.delivery.needs_http': (
+            '没有 HTTP 文件服务器，PikPak 无法拉取 Telegram 媒体。请设置 HTTP_ENABLED=true 和 PUBLI'
+            'C_BASE_URL，或改用 /mode local。磁力链接和 URL 转存不受影响。'
+        ),
+        'err.delivery.pikpak_error': 'PikPak 报告拉取文件时出错',
+        'err.delivery.too_large': '{size} 超过了机器人可上传的 {limit}',
+        'delivery.sent': '已发送 {size}',
+        'delivery.saved_local': '已保存到 <code>{path}</code>（{size}）',
+        'delivery.saved_pikpak': '已存入 PikPak <code>{path}</code>',
+        'delivery.pikpak_fetching': 'PikPak 仍在拉取 <code>{name}</code>，稍后会出现在网盘里',
+        'delivery.pikpak_queued': '已加入 PikPak 离线下载：<code>{name}</code> → {folder}',
+        'err.download.flood': 'Telegram 要求等待 {seconds} 秒，请稍后再试',
+        'err.download.disk': '磁盘空间不足：需要 {needed:.0f} MiB，剩余 {free:.0f} MiB',
+        'err.download.no_file': 'Telegram 没有返回这条消息的文件',
+        'err.download.attempts': '重试 {attempts} 次后下载仍然失败：{error}',
+        'err.token.empty': '机器人令牌为空，请向 @BotFather 申请一个',
+        'err.token.colon': '机器人令牌形如 123456789:AA...：只有一个冒号，前面是 ID',
+        'err.token.bad_id': '冒号前面应该是数字形式的机器人 ID，实际是 {value!r}',
+        'err.token.secret_length': '冒号后面的密钥有 {length} 个字符，BotFather 发的一般约 35 个',
+        'err.claim.taken': '这个机器人已经有管理员，不能再被认领',
+        'err.claim.no_code': '还没有生成认领码。请重启机器人，从日志里读取认领码。',
+        'err.claim.wrong': '认领码不对',
+        'verify.check.configuration': '配置',
+        'verify.check.configuration_note': '配置提示',
+        'verify.check.access_control': '访问控制',
+        'verify.check.bot_token': '机器人令牌',
+        'verify.check.directories': '目录',
+        'verify.check.bot_identity': '机器人身份',
+        'verify.check.bot_created': '机器人账号',
+        'verify.check.user_session': '用户会话',
+        'verify.check.account_separation': '账号分离',
+        'verify.check.history_access': '历史读取',
+        'verify.check.cache_chat': '缓存聊天',
+        'verify.check.forward_fast_path': '转发快路',
+        'verify.check.pikpak_account': 'PikPak 账号',
+        'verify.check.pikpak_folder': 'PikPak 文件夹',
+        'verify.check.pikpak_login': 'PikPak 登录',
+        'verify.check.http_server': 'HTTP 服务',
+        'verify.check.public_reachability': '公网可达',
+        'verify.check.database': '数据库',
+        'verify.no_checks': '没有运行任何检查',
+        'verify.verdict.failed': '{count} 项检查失败——按当前配置机器人无法工作',
+        'verify.verdict.warnings': '关键项全部通过，有 {count} 条警告',
+        'verify.verdict.ok': '全部通过',
+        'verify.config.ok': '已加载，各项配置互相一致',
+        'verify.access.open': '对所有 Telegram 用户开放；机器人能读取你的账号能看到的一切',
+        'verify.access.none': (
+            '没有管理员或允许的用户 ID，所有请求都会被拒绝。请用机器人日志里的认领码发送 /claim，或'
+            '设置 ADMIN_USER_IDS。'
+        ),
+        'verify.access.ok': '{admins} 个管理员，另有 {users} 个用户',
+        'verify.token.ok': '格式正确，对应机器人 ID {id}',
+        'verify.bot.no_token': '没有可用的令牌可供检查',
+        'verify.timeout': '连接 Telegram 超时',
+        'verify.bot.sign_in_failed': (
+            '无法以机器人身份登录：{error}。请在 @BotFather 核对令牌，并确认这台主机能直接与 Telegr'
+            'am 建立 TCP 连接——MTProto 不是普通的 HTTPS，只放行 HTTPS 的代理会挡住它。'
+        ),
+        'verify.bot.read_failed': '无法读取机器人账号：{error}',
+        'verify.bot.created': '{account} — {link}',
+        'verify.bot.no_username': '{account} — 没有用户名',
+        'verify.bot.not_bot': '这个令牌属于一个 Telegram 没有标记为机器人的账号',
+        'verify.bot.mismatch': '令牌对应机器人 ID {expected}，但应答的账号是 {actual}',
+        'verify.bot.ok': 'ID {id} 与令牌一致，并且是机器人',
+        'verify.user.missing': (
+            '未配置。没有它，只能读取机器人自己所在的聊天。请在 Telegram 里用 /setup telegram 登录'
+            '一个。'
+        ),
+        'verify.user.connect_failed': '无法连接：{error}',
+        'verify.user.not_authorised': '来自 {source} 的会话未授权；请用 /setup telegram 重新登录',
+        'verify.user.read_failed': '无法读取账号：{error}',
+        'verify.user.is_bot': '这个会话属于机器人；下载需要真人账号',
+        'verify.user.ok': '{account}，来自 {source}，已授权{premium}',
+        'verify.user.premium': '，Telegram Premium',
+        'verify.source.in_chat': '聊天内登录（in-chat login）',
+        'verify.accounts.need_both': '需要两个账号都可用',
+        'verify.accounts.same': '机器人和读取账号是同一个账号',
+        'verify.accounts.ok': '机器人 {bot} 通过账号 {user} 读取',
+        'verify.history.failed': '无法列出会话：{error}',
+        'verify.history.empty': '这个账号没有任何聊天，无处可下载',
+        'verify.history.ok': '账号可以列出自己的聊天',
+        'verify.cache.unset': '未配置；每次请求都会重新下载（设置 CACHE_CHAT_ID）',
+        'verify.cache.cannot_see': (
+            '机器人看不到聊天 {chat}：{error}。请把机器人加为该聊天的管理员。'
+        ),
+        'verify.cache.not_admin': (
+            '机器人在聊天 {chat} 里但不是管理员；可能无法发帖或读回上传的文件'
+        ),
+        'verify.cache.ok': '机器人是聊天 {chat} 的管理员',
+        'verify.cache.no_bot': '没有可用的机器人，无法检查',
+        'verify.forward.bot_reads': '机器人自己读取，可转发的文件直接重发',
+        'verify.forward.no_cache': (
+            '没有缓存频道，可转发的文件也要下载再上传。在私有频道里发送 /cache 即可秒传。'
+        ),
+        'verify.forward.cannot_see': (
+            '读取账号看不到缓存频道 {chat}（{error}）。请把它加入频道，并给予发帖权限。'
+        ),
+        'verify.forward.ok': '读取账号可以转发到 {chat}',
+        'verify.forward.cannot_post': (
+            '读取账号在 {chat} 里但不能发帖；请把它设为有发帖权限的管理员'
+        ),
+        'verify.pikpak.ok': '{username} 已登录，已用 {used} / {limit}',
+        'verify.pikpak.folder': '转存到 {folder}',
+        'verify.pikpak.no_shared': '未配置共享账号；由用户各自连接自己的账号',
+        'verify.login.disabled': '已关闭（pikpak.allow_user_login）',
+        'verify.login.needs_https': (
+            'Mini App 需要 HTTP_ENABLED=true 和 HTTPS 的 PUBLIC_BASE_URL；在此之前用户用 /setup pik'
+            'pak 连接'
+        ),
+        'verify.login.ok': '/pikpak login 会在 Telegram 里打开 {url}/pikpak/app',
+        'verify.http.disabled': '已关闭；磁力和 URL 转存照常，Telegram 媒体无法送到 PikPak',
+        'verify.http.bind_failed': (
+            '无法绑定 {host}:{port}：{error}。如果机器人正在运行，端口被占用是正常的。'
+        ),
+        'verify.http.bound': '已绑定 {host}:{port}',
+        'verify.reach.ok': '{url} 有应答，PikPak 可以拉取文件',
+        'verify.reach.status': '{url} 返回 HTTP {status}；请检查反向代理',
+        'verify.reach.failed': (
+            '无法从本机访问 {url}（{error}）。请从外网核实；NAT 回环常导致自测失败。'
+        ),
+        'verify.db.ok': '已打开 {path}',
+        'verify.db.failed': '无法打开 {path}：{error}',
+        'verify.live.user_missing': '未配置；只能读取机器人自己所在的聊天',
+        'verify.live.user_ok': '{account}，已授权',
+        'verify.live.source_own': '你自己的账号',
+        'verify.live.source_shared': '共享账号（{username}）',
+        'verify.live.no_pikpak': '你没有连接账号，服务器上也没有配置；请用 /pikpak login',
+        'verify.live.pikpak_ok': '{source}，已用 {used} / {limit}',
+        'verify.live.pikpak_failed': '{source}：{error}',
+        'verify.live.login_ok': '/pikpak login 会打开 Mini App',
+        'verify.live.login_none': '没有 Mini App（{reason}）；可以用 /setup pikpak',
+        'verify.live.http_ok': '服务地址 {url}',
+        'verify.live.no_url': '未设置公网地址',
+        'verify.live.http_disabled': '已关闭；Telegram 媒体无法转存到 PikPak',
+        'verify.cli.config_error': '配置错误：{error}',
+        'verify.cli.start': '正在检查 tg_media_down_bot 的配置…',
+        'portal.title': '连接 PikPak',
+        'portal.heading': '连接你的 PikPak 账号',
+        'portal.sub': '这个页面属于你自己的媒体下载机器人，不是由 PikPak 运营的。',
+        'portal.username': 'PikPak 邮箱或手机号',
+        'portal.password': 'PikPak 密码',
+        'portal.connect': '连接',
+        'portal.note': (
+            'Telegram 会告诉我你是谁，所以没有可泄露的登录链接。你的密码只发给 PikPak 一次，用来换'
+            '取访问令牌；只保存令牌。随时可以用 {command} 断开。'
+        ),
+        'portal.js.connecting': '连接中…',
+        'portal.js.connected': 'PikPak 已连接',
+        'portal.js.connected_sub': '之后的转存会进入你自己的 PikPak 账号。',
+        'portal.js.failed': '没有成功。',
+        'portal.js.unreachable': '连不上机器人：{error}',
+        'portal.err.disabled': '已关闭按用户登录 PikPak。',
+        'portal.err.malformed': '请求格式不对。',
+        'portal.err.identity': 'Telegram 无法确认你的身份。请从机器人里重新打开这个页面。',
+        'portal.err.not_allowed': '你无权使用这个机器人。',
+        'portal.err.throttled': '尝试次数太多，请等几分钟。',
+        'portal.err.fields': '请把两项都填上。',
+        'portal.reason.disabled': '运营者关闭了按用户登录 PikPak（pikpak.allow_user_login）',
+        'portal.reason.no_http': (
+            '机器人的 HTTP 服务没有以公网地址运行，登录表单无处可放。请设置 HTTP_ENABLED=true 和 PU'
+            'BLIC_BASE_URL。'
+        ),
+        'portal.reason.not_attached': '登录表单没有挂到 HTTP 服务上',
+        'portal.reason.plain_http': (
+            'PUBLIC_BASE_URL 是 {url}，这是明文 HTTP。Telegram 只通过 HTTPS 打开 Mini App；请在机器'
+            '人前面加一个 TLS 反向代理。'
+        ),
+        'err.session.not_a_session': '这不是 Telegram 会话字符串：{error}',
+        'err.session.not_authorized': '新会话未授权',
     },
 }

@@ -29,6 +29,7 @@ from pikpakapi.PikpakException import PikpakException
 
 from .config import PikPakConfig
 from .db import Database
+from .i18n import Explained
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ def user_token_key(user_id: int) -> str:
     return f"{TOKEN_KEY}:{user_id}"
 
 
-class PikPakError(RuntimeError):
+class PikPakError(Explained, RuntimeError):
     """A PikPak operation failed in a way worth showing to the user."""
 
 
@@ -200,7 +201,7 @@ class PikPakService:
         try:
             await client.login()
         except PikpakException as exc:
-            raise PikPakError(f"PikPak login failed: {exc}") from exc
+            raise PikPakError(key="err.pikpak.login_failed", error=exc) from exc
         await self._persist(client, key=TOKEN_KEY)
         self._shared = client
         log.info("logged in to the shared PikPak account")
@@ -223,18 +224,12 @@ class PikPakService:
                     return own
                 # Falling back to the shared account here would put this
                 # user's files in somebody else's drive without telling them.
-                raise PikPakError(
-                    "your PikPak session has expired. Use /pikpak login to "
-                    "connect your account again."
-                )
+                raise PikPakError(key="err.pikpak.session_expired")
 
         if self._shared is not None:
             return self._shared
         if not self.configured:
-            raise PikPakError(
-                "no PikPak account is connected and none is configured on the "
-                "server. Use /pikpak login to connect yours."
-            )
+            raise PikPakError(key="err.pikpak.no_account")
         async with self._lock:
             return await self._shared_client()
 
@@ -251,7 +246,7 @@ class PikPakService:
         try:
             await client.login()
         except PikpakException as exc:
-            raise PikPakError(f"PikPak rejected those credentials: {exc}") from exc
+            raise PikPakError(key="err.pikpak.rejected", error=exc) from exc
 
         await self._persist(client, key=user_token_key(user_id))
         # Drop the credentials from memory too; the token is all we need now.
@@ -290,9 +285,9 @@ class PikPakService:
         try:
             resolved = await client.path_to_id(folder, create=True)
         except PikpakException as exc:
-            raise PikPakError(f"could not open PikPak folder {folder}: {exc}") from exc
+            raise PikPakError(key="err.pikpak.folder_open", folder=folder, error=exc) from exc
         if not resolved:
-            raise PikPakError(f"could not create PikPak folder {folder}")
+            raise PikPakError(key="err.pikpak.folder_create", folder=folder)
         return resolved[-1].get("id")
 
     # ------------------------------------------------------- offline download
@@ -311,7 +306,7 @@ class PikPakService:
         try:
             result = await client.offline_download(url, parent_id=parent_id, name=name)
         except PikpakException as exc:
-            raise PikPakError(f"PikPak refused the transfer: {exc}") from exc
+            raise PikPakError(key="err.pikpak.transfer_refused", error=exc) from exc
 
         task = result.get("task") or {}
         file_info = result.get("file") or {}
@@ -367,35 +362,32 @@ class PikPakService:
         """
         match = _SHARE_ID_RE.search(share_url)
         if not match:
-            raise PikPakError(f"{share_url} is not a PikPak share link")
+            raise PikPakError(key="err.pikpak.not_share", url=share_url)
         share_id = match.group(1)
 
         client = await self.client(user_id)
         try:
             info = await client.get_share_info(share_url, pass_code=pass_code or "")
         except PikpakException as exc:
-            raise PikPakError(f"could not read the share link: {exc}") from exc
+            raise PikPakError(key="err.pikpak.share_unreadable_detail", error=exc) from exc
         if isinstance(info, ValueError):
-            raise PikPakError("could not read the share link")
+            raise PikPakError(key="err.pikpak.share_unreadable")
         if not isinstance(info, dict):
-            raise PikPakError("PikPak returned an unexpected share response")
+            raise PikPakError(key="err.pikpak.share_unexpected")
 
         status = info.get("share_status")
         if status and status not in ("OK", "SHARE_STATUS_OK"):
-            raise PikPakError(
-                f"the share link is not usable (status {status}); "
-                "it may be expired or need a password"
-            )
+            raise PikPakError(key="err.pikpak.share_status", status=status)
 
         files = info.get("files") or []
         file_ids = [f.get("id") for f in files if f.get("id")]
         if not file_ids:
-            raise PikPakError("the share link contains no files")
+            raise PikPakError(key="err.pikpak.share_empty")
 
         try:
             await client.restore(share_id, info.get("pass_code_token") or "", file_ids)
         except PikpakException as exc:
-            raise PikPakError(f"saving the share failed: {exc}") from exc
+            raise PikPakError(key="err.pikpak.share_save_failed", error=exc) from exc
 
         return [str(f.get("name") or f.get("id")) for f in files if f.get("id")]
 
@@ -407,7 +399,7 @@ class PikPakService:
         try:
             info = await client.get_quota_info()
         except PikpakException as exc:
-            raise PikPakError(f"could not read PikPak quota: {exc}") from exc
+            raise PikPakError(key="err.pikpak.quota", error=exc) from exc
         raw = info.get("quota") or {}
         try:
             return Quota(used=int(raw.get("usage", 0)), limit=int(raw.get("limit", 0)))

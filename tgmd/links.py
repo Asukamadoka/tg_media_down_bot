@@ -30,6 +30,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, unquote, urlparse
 
+from .i18n import Explained, describe
+
 # Hard ceiling on how many message ids a single range link may expand to. The
 # queue layer applies the (much smaller) configured limit on top of this; this
 # one only exists so a hostile "t.me/x/1-999999999" cannot exhaust memory.
@@ -82,7 +84,7 @@ _BARE_TG_RE = re.compile(
 )
 
 
-class LinkError(ValueError):
+class LinkError(Explained, ValueError):
     """The text looked like a Telegram link but cannot be acted on."""
 
 
@@ -157,11 +159,11 @@ def normalize_chat_id(value: str | int) -> int:
     negative = text.startswith("-")
     digits = text.lstrip("-")
     if not digits.isdigit():
-        raise LinkError(f"not a numeric chat id: {value!r}")
+        raise LinkError(key="err.link.chat_id", value=value)
     if negative and digits.startswith("100"):
         digits = digits[3:]
     if not digits:
-        raise LinkError(f"not a numeric chat id: {value!r}")
+        raise LinkError(key="err.link.chat_id", value=value)
     return int(digits)
 
 
@@ -182,10 +184,7 @@ def _parse_ids(segment: str) -> tuple[int, ...] | None:
     if start > end:
         start, end = end, start
     if end - start + 1 > MAX_RANGE_SPAN:
-        raise LinkError(
-            f"range {start}-{end} covers too many messages "
-            f"(limit {MAX_RANGE_SPAN})"
-        )
+        raise LinkError(key="err.link.range", start=start, end=end, limit=MAX_RANGE_SPAN)
     return tuple(range(start, end + 1))
 
 
@@ -271,7 +270,7 @@ def parse_message_link(text: str) -> MessageRef | None:
 
     parts = [unquote(p) for p in parsed.path.split("/") if p]
     if not parts:
-        raise LinkError("the link has no path, so it points at no chat")
+        raise LinkError(key="err.link.no_path")
 
     single, comment, thread = _query_flags(parsed.query)
 
@@ -286,11 +285,9 @@ def parse_message_link(text: str) -> MessageRef | None:
 
     if invite_hash is not None:
         if invite_hash.isdigit():
-            raise LinkError(
-                "that is a phone-number link, not an invite link"
-            )
+            raise LinkError(key="err.link.phone")
         if not _INVITE_HASH_RE.match(invite_hash):
-            raise LinkError(f"malformed invite hash: {invite_hash!r}")
+            raise LinkError(key="err.link.bad_invite", hash=invite_hash)
         ids = _parse_ids(parts[-1]) if parts else None
         return MessageRef(
             chat=0,
@@ -308,28 +305,24 @@ def parse_message_link(text: str) -> MessageRef | None:
 
     if parts[0] == "c":
         if len(parts) < 3:
-            raise LinkError(
-                "a t.me/c link needs both a chat id and a message id"
-            )
+            raise LinkError(key="err.link.c_needs_ids")
         chat: str | int = normalize_chat_id(parts[1])
         rest = parts[2:]
     else:
         username = parts[0]
         if username.lower() in RESERVED_PATHS:
-            raise LinkError(f"t.me/{username} is not a chat link")
+            raise LinkError(key="err.link.not_chat", name=username)
         if not _USERNAME_RE.match(username):
-            raise LinkError(f"{username!r} is not a valid Telegram username")
+            raise LinkError(key="err.link.bad_username", name=username)
         chat = username
         rest = parts[1:]
 
     if not rest:
-        raise LinkError(
-            f"{parse_message_link_target(chat)} has no message id in the link"
-        )
+        raise LinkError(key="err.link.no_message_id", chat=parse_message_link_target(chat))
 
     ids = _parse_ids(rest[-1])
     if ids is None:
-        raise LinkError(f"{rest[-1]!r} is not a message id or range")
+        raise LinkError(key="err.link.bad_id", value=rest[-1])
 
     topic_id = thread
     if len(rest) >= 2:
@@ -393,7 +386,7 @@ def extract_links(text: str) -> LinkBundle:
         try:
             ref = parse_message_link(token)
         except LinkError as exc:
-            bundle.errors.append(f"{token} — {exc}")
+            bundle.errors.append(f"{token} — {describe(exc)}")
             continue
 
         if ref is not None:

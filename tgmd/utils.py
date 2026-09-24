@@ -64,6 +64,16 @@ def progress_bar(fraction: float, width: int = 12) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+def display_width(text: str) -> int:
+    """Terminal columns ``text`` takes: wide (CJK) characters count two, combining marks none."""
+    width = 0
+    for char in text:
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    return width
+
+
 def sanitize_component(name: str, *, fallback: str = "unnamed") -> str:
     """Make one path component safe to write on any filesystem."""
     text = unicodedata.normalize("NFC", name or "")

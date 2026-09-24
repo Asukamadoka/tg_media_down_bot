@@ -456,6 +456,20 @@ class TestBatches:
         assert row["status"] == "failed"
         assert "no chat called @x" in harness.bot.last_status
 
+    async def test_the_reader_gets_their_language_the_database_english(self, make):
+        from tgmd import i18n
+
+        error = ResolveError(key="err.resolve.no_username", name="x")
+        harness = await make(resolver=FakeResolver(error=error))
+        previous = i18n.language()
+        i18n.set_language("zh")
+        try:
+            row = await harness.run(await harness.job("local"))
+        finally:
+            i18n.set_language(previous)
+        assert "不存在名为 @x 的聊天" in harness.bot.last_status
+        assert row["error"] == "no chat called @x exists"
+
 
 class TestRobustness:
     async def test_an_unexpected_error_closes_the_status_and_spares_the_worker(self, make):

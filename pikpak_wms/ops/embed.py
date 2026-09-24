@@ -42,9 +42,10 @@ shared between the loops the command line opens one after another."""
 class AccountUnavailable(AuthError):
     """The bot has no PikPak account WMS could use."""
 
-    def __init__(self, detail: str) -> None:
+    def __init__(self, detail: str, *, shown: str | None = None) -> None:
+        # ``detail`` is for the log; ``shown`` is the same reason in the reader's language.
         super().__init__(f"no PikPak account for WMS: {detail}", key="error.no_account",
-                         detail=detail)
+                         detail=shown or detail)
 
 
 class EmbeddedWms:

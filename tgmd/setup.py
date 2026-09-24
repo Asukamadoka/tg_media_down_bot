@@ -44,6 +44,7 @@ from telethon.sessions import StringSession
 
 from .config import Config
 from .db import Database
+from .i18n import describe, t
 from .identity import describe_account
 from .pikpak import PikPakError, PikPakService
 from .portal import PikPakLoginPortal
@@ -142,46 +143,30 @@ class SetupWizard:
         pikpak_ready = await self._pikpak.available_for(user_id)
         pikpak_own = await self._pikpak.has_user_session(user_id)
 
-        lines = ["<b>Setup</b>", ""]
-        lines.append("✅ <b>Bot account</b> — connected, you are talking to it")
+        lines = [t("setup.status.title"), ""]
+        lines.append(t("setup.status.bot"))
 
         if reading:
-            source = "from the environment" if self.session_pinned_by_env else (
-                "from an in-chat login" if stored else "from a session file"
+            source = t("setup.status.source_env") if self.session_pinned_by_env else (
+                t("setup.status.source_chat") if stored else t("setup.status.source_file")
             )
-            lines.append(f"✅ <b>Reading account</b> — connected {source}")
+            lines.append(t("setup.status.reading_ok", source=source))
         else:
-            lines.append(
-                "⬜ <b>Reading account</b> — needed for private and "
-                "save-restricted chats\n"
-                "    <code>/setup telegram</code> to sign in here"
-            )
+            lines.append(t("setup.status.reading_missing"))
 
         if pikpak_ready:
-            which = "your own account" if pikpak_own else "the shared account"
-            lines.append(f"✅ <b>PikPak</b> — {which}")
+            which = t("setup.status.pikpak_own") if pikpak_own else t("setup.status.pikpak_shared")
+            lines.append(t("setup.status.pikpak_ok", which=which))
         else:
-            lines.append(
-                "⬜ <b>PikPak</b> — optional, for cloud transfers\n"
-                "    <code>/setup pikpak</code> to sign in here"
-            )
+            lines.append(t("setup.status.pikpak_missing"))
 
         if self._config.delivery.cache_chat_id:
-            lines.append("✅ <b>Upload cache</b> — configured")
+            lines.append(t("setup.status.cache_ok"))
         else:
-            lines.append(
-                "⬜ <b>Upload cache</b> — optional. Add me to a private channel "
-                "as admin, then send <code>/cache</code> in that channel."
-            )
+            lines.append(t("setup.status.cache_missing"))
 
         lines.append("")
-        if reading:
-            lines.append("You can start sending links. /help lists what I take.")
-        else:
-            lines.append(
-                "Public channels already work. Private ones need the reading "
-                "account."
-            )
+        lines.append(t("setup.status.ready") if reading else t("setup.status.public_only"))
         return "\n".join(lines)
 
     # ------------------------------------------------------------- entrypoints
@@ -224,68 +209,38 @@ class SetupWizard:
     async def begin_pikpak(self, event) -> None:
         """Start the PikPak conversation, offering the web page as well."""
         if not self._pikpak.user_login_allowed:
-            await event.reply(
-                "The operator has disabled per-user PikPak logins."
-            )
+            await event.reply(t("setup.pikpak.disabled"))
             return
 
         # The password comes next, and it does not belong in a group.
         if not event.is_private:
-            await event.reply("Message me directly to sign in, not in a group.")
+            await event.reply(t("setup.private_only"))
             return
 
         alternative = ""
         if self._portal.miniapp_url is not None:
-            alternative = (
-                "\n\nPrefer a form? <code>/pikpak login</code> opens one inside "
-                "Telegram instead."
-            )
+            alternative = t("setup.pikpak.form")
 
         await self.cancel(event.sender_id)
         self._conversations[event.sender_id] = Conversation(
             user_id=event.sender_id, step=Step.PIKPAK_EMAIL
         )
-        await event.reply(
-            "<b>Connect PikPak</b>\n\n"
-            "Send me the email or phone number your PikPak account uses."
-            f"{alternative}\n\n"
-            "I delete each message as soon as I have read it, and only the "
-            "access token is stored, never your password.\n"
-            "Send any other command to stop.",
-            parse_mode="html",
-        )
+        await event.reply(t("setup.pikpak.start", alternative=alternative), parse_mode="html")
 
     async def begin_telegram(self, event) -> None:
         """Start the Telegram user-session conversation."""
         if self.session_pinned_by_env:
-            await event.reply(
-                "<code>TG_USER_SESSION</code> is set in the environment, so a "
-                "login here would be ignored. Remove it first, or keep using "
-                "the session you have.",
-                parse_mode="html",
-            )
+            await event.reply(t("setup.telegram.pinned"), parse_mode="html")
             return
         if not event.is_private:
-            await event.reply("Message me directly to sign in, not in a group.")
+            await event.reply(t("setup.private_only"))
             return
 
         await self.cancel(event.sender_id)
         self._conversations[event.sender_id] = Conversation(
             user_id=event.sender_id, step=Step.TG_PHONE
         )
-        await event.reply(
-            "<b>Connect a reading account</b>\n\n"
-            "This signs a normal Telegram account in to me, so I can read "
-            "chats a bot cannot: private channels you are in, and channels "
-            "that block saving.\n\n"
-            "⚠️ I am about to ask for a login code. That is only safe because "
-            "<b>you run this bot yourself</b>. Never give a Telegram login "
-            "code to a bot or person you do not operate.\n\n"
-            "Send the phone number of the account to use, with its country "
-            "code, like <code>+8613800138000</code>.\n"
-            "Send any other command to stop.",
-            parse_mode="html",
-        )
+        await event.reply(t("setup.telegram.start"), parse_mode="html")
 
     # --------------------------------------------------------------- dispatch
 
@@ -301,7 +256,7 @@ class SetupWizard:
             return False
         if conversation.stale:
             await self._expire(user_id)
-            await event.reply("That setup step timed out. Start again when ready.")
+            await event.reply(t("setup.timeout"))
             return True
 
         text = (event.raw_text or "").strip()
@@ -325,8 +280,7 @@ class SetupWizard:
             log.exception("setup step %s failed", conversation.step)
             await self.cancel(user_id)
             await event.reply(
-                f"❌ That did not work: {escape_html(str(exc))}\nStart again when ready.",
-                parse_mode="html",
+                t("setup.failed", error=escape_html(describe(exc))), parse_mode="html"
             )
         return True
 
@@ -336,30 +290,26 @@ class SetupWizard:
             await event.delete()
         except Exception:
             log.debug("could not delete a secret message", exc_info=True)
-            await event.reply(
-                "I could not delete that message; please delete it yourself."
-            )
+            await event.reply(t("setup.cannot_delete"))
 
     # ----------------------------------------------------------------- PikPak
 
     async def _pikpak_email(self, event, conversation: Conversation, text: str) -> None:
         if "@" not in text and not text.lstrip("+").isdigit():
-            await event.reply("That does not look like an email or phone number.")
+            await event.reply(t("setup.pikpak.bad_account"))
             return
         conversation.email = text
         conversation.step = Step.PIKPAK_PASSWORD
         await self._forget(event)
         await event.respond(
-            f"Account: <code>{escape_html(text)}</code>\n\n"
-            "Now send the password. I will delete it immediately.",
-            parse_mode="html",
+            t("setup.pikpak.ask_password", account=escape_html(text)), parse_mode="html"
         )
 
     async def _pikpak_password(
         self, event, conversation: Conversation, text: str
     ) -> None:
         await self._forget(event)
-        notice = await event.respond("Signing in to PikPak…")
+        notice = await event.respond(t("setup.pikpak.signing_in"))
         try:
             account = await self._pikpak.login_with_password(
                 conversation.user_id, conversation.email or "", text
@@ -367,19 +317,13 @@ class SetupWizard:
         except PikPakError as exc:
             conversation.step = Step.PIKPAK_PASSWORD
             await notice.edit(
-                f"❌ {escape_html(str(exc))}\n\nSend the password again, or any "
-                "command to stop.",
-                parse_mode="html",
+                t("setup.retry_password", error=escape_html(describe(exc))), parse_mode="html"
             )
             return
 
         await self.cancel(conversation.user_id)
         await notice.edit(
-            f"✅ PikPak connected as <code>{escape_html(account)}</code>.\n\n"
-            "Your transfers now go to your own drive. "
-            "<code>/pikpak</code> shows quota, <code>/pikpak logout</code> "
-            "disconnects it.",
-            parse_mode="html",
+            t("setup.pikpak.connected", account=escape_html(account)), parse_mode="html"
         )
 
     # --------------------------------------------------------------- Telegram
@@ -389,11 +333,7 @@ class SetupWizard:
     ) -> None:
         phone = text.replace(" ", "").replace("-", "")
         if not phone.lstrip("+").isdigit() or len(phone.lstrip("+")) < 6:
-            await event.reply(
-                "That does not look like a phone number. Include the country "
-                "code, like <code>+8613800138000</code>.",
-                parse_mode="html",
-            )
+            await event.reply(t("setup.telegram.bad_phone"), parse_mode="html")
             return
 
         client = TelegramClient(
@@ -406,14 +346,12 @@ class SetupWizard:
             sent = await client.send_code_request(phone)
         except PhoneNumberInvalidError:
             await client.disconnect()
-            await event.reply("Telegram says that phone number is not valid.")
+            await event.reply(t("setup.telegram.phone_invalid"))
             return
         except FloodWaitError as exc:
             await client.disconnect()
             await self.cancel(conversation.user_id)
-            await event.reply(
-                f"Telegram is rate-limiting logins for {exc.seconds}s. Try later."
-            )
+            await event.reply(t("setup.telegram.flood", seconds=exc.seconds))
             return
         except BaseException:
             # Not attached to the conversation yet, so cancel() cannot reach
@@ -426,31 +364,24 @@ class SetupWizard:
         conversation.client = client
         conversation.step = Step.TG_CODE
         await self._forget(event)
-        await event.respond(
-            "Telegram is sending a login code to that account, in the Telegram "
-            "app itself.\n\n"
-            "Send me the code. Put a space or dash between the digits if "
-            "Telegram refuses to let you copy it, for example "
-            "<code>1 2 3 4 5</code>. I delete it immediately.",
-            parse_mode="html",
-        )
+        await event.respond(t("setup.telegram.code_sent"), parse_mode="html")
 
     async def _telegram_code(
         self, event, conversation: Conversation, text: str
     ) -> None:
         code = "".join(character for character in text if character.isdigit())
         if not code:
-            await event.reply("I could not find any digits in that.")
+            await event.reply(t("setup.telegram.no_digits"))
             return
 
         client = conversation.client
         if client is None:  # pragma: no cover - defensive
             await self.cancel(conversation.user_id)
-            await event.reply("That login expired. Start again with /setup telegram.")
+            await event.reply(t("setup.telegram.expired"))
             return
 
         await self._forget(event)
-        notice = await event.respond("Signing in…")
+        notice = await event.respond(t("setup.telegram.signing_in"))
         try:
             await client.sign_in(
                 phone=conversation.phone,
@@ -459,19 +390,14 @@ class SetupWizard:
             )
         except SessionPasswordNeededError:
             conversation.step = Step.TG_PASSWORD
-            await notice.edit(
-                "That account has two-step verification. Send its password; "
-                "I delete it immediately and never store it."
-            )
+            await notice.edit(t("setup.telegram.two_step"))
             return
         except PhoneCodeInvalidError:
-            await notice.edit("That code is wrong. Send it again.")
+            await notice.edit(t("setup.telegram.code_wrong"))
             return
         except PhoneCodeExpiredError:
             await self.cancel(conversation.user_id)
-            await notice.edit(
-                "That code expired. Start again with /setup telegram."
-            )
+            await notice.edit(t("setup.telegram.code_expired"))
             return
 
         await self._finish_telegram(conversation, notice)
@@ -482,18 +408,16 @@ class SetupWizard:
         client = conversation.client
         if client is None:  # pragma: no cover - defensive
             await self.cancel(conversation.user_id)
-            await event.reply("That login expired. Start again with /setup telegram.")
+            await event.reply(t("setup.telegram.expired"))
             return
 
         await self._forget(event)
-        notice = await event.respond("Checking the password…")
+        notice = await event.respond(t("setup.telegram.checking"))
         try:
             await client.sign_in(password=text)
         except Exception as exc:  # noqa: BLE001 - any failure means "try again"
             await notice.edit(
-                f"❌ {escape_html(str(exc))}\n\nSend the password again, or any "
-                "command to stop.",
-                parse_mode="html",
+                t("setup.retry_password", error=escape_html(describe(exc))), parse_mode="html"
             )
             return
 
@@ -516,11 +440,8 @@ class SetupWizard:
 
         label = describe_account(account)
         if self._adopt_session is None:
-            await notice.edit(
-                f"✅ Signed in as <code>{escape_html(label)}</code> and saved.\n\n"
-                "Restart the bot to start using it.",
-                parse_mode="html",
-            )
+            await notice.edit(t("setup.telegram.saved", label=escape_html(label)),
+                              parse_mode="html")
             return
 
         try:
@@ -528,22 +449,14 @@ class SetupWizard:
         except Exception as exc:
             log.exception("could not adopt the new user session")
             await notice.edit(
-                f"✅ Signed in as <code>{escape_html(label)}</code> and saved, "
-                f"but could not bring it into service now ({escape_html(str(exc))}). "
-                "Restart the bot.",
+                t("setup.telegram.not_adopted", label=escape_html(label),
+                  error=escape_html(describe(exc))),
                 parse_mode="html",
             )
             return
 
-        await notice.edit(
-            f"✅ Reading account connected: <code>{escape_html(adopted)}</code>\n\n"
-            "Private and save-restricted chats work now, with no restart. "
-            "Send me a link to try it.\n\n"
-            "The session is stored on this server and is as sensitive as the "
-            "account password. Revoke it any time from Telegram → Settings → "
-            "Devices.",
-            parse_mode="html",
-        )
+        await notice.edit(t("setup.telegram.connected", account=escape_html(adopted)),
+                          parse_mode="html")
 
 
 async def stored_user_session(db: Database) -> str | None:

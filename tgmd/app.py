@@ -35,6 +35,10 @@ from .wms_panel import WmsPanel
 log = logging.getLogger(__name__)
 
 
+class SessionError(i18n.Explained, RuntimeError):
+    """A session from the setup wizard that cannot be put into service."""
+
+
 def setup_logging(level: str) -> None:
     """Configure root logging, keeping Telethon's own chatter down."""
     logging.basicConfig(
@@ -215,9 +219,7 @@ class Application:
             session = StringSession(session_string)
         except ValueError as exc:
             # Telethon's own message here is just "Not a valid string".
-            raise RuntimeError(
-                f"that is not a Telegram session string: {exc}"
-            ) from exc
+            raise SessionError(key="err.session.not_a_session", error=exc) from exc
 
         client = TelegramClient(
             session,
@@ -228,7 +230,7 @@ class Application:
         await client.connect()
         if not await client.is_user_authorized():
             await client.disconnect()
-            raise RuntimeError("the new session is not authorized")
+            raise SessionError(key="err.session.not_authorized")
 
         account = await client.get_me()
         previous, self.user = self.user, client

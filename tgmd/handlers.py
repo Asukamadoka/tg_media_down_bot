@@ -11,7 +11,7 @@ from .buttons import callback_buttons, webview_button
 from .config import MODES, Config
 from .db import Database
 from .downloader import has_downloadable_media
-from .i18n import display_mode, display_state, t
+from .i18n import describe, display_mode, display_state, t
 from .links import LinkBundle, extract_links
 from .pikpak import PikPakError, PikPakService
 from .portal import PikPakLoginPortal
@@ -366,7 +366,7 @@ class BotHandlers:
             quota = await self._pikpak.quota(user_id=user_id)
         except PikPakError as exc:
             await event.reply(
-                t("error.generic", error=escape_html(str(exc))), parse_mode="html"
+                t("error.generic", error=escape_html(describe(exc))), parse_mode="html"
             )
             return
 
@@ -425,7 +425,7 @@ class BotHandlers:
         except bootstrap.ClaimError as exc:
             log.info("failed claim attempt by %s: %s", event.sender_id, exc)
             await event.reply(
-                t("error.generic", error=escape_html(str(exc))), parse_mode="html"
+                t("error.generic", error=escape_html(describe(exc))), parse_mode="html"
             )
             return
 
@@ -474,7 +474,7 @@ class BotHandlers:
             permissions = await self._bot.get_permissions(chat_id, "me")
         except Exception as exc:  # noqa: BLE001 - relay Telegram's reason, whatever it is
             await event.reply(
-                t("cache.cannot_see", error=escape_html(str(exc))),
+                t("cache.cannot_see", error=escape_html(describe(exc))),
                 parse_mode="html",
             )
             return
@@ -554,7 +554,7 @@ class BotHandlers:
         except Exception as exc:
             log.exception("/verify failed")
             await notice.edit(
-                t("verify.failed", error=escape_html(str(exc))), parse_mode="html"
+                t("verify.failed", error=escape_html(describe(exc))), parse_mode="html"
             )
             return
 
@@ -817,7 +817,7 @@ class BotHandlers:
         except QueueFull as exc:
             await self._db.finish_job(job_id, "failed", error=str(exc))
             await event.reply(
-                t("error.generic", error=escape_html(str(exc))), parse_mode="html"
+                t("error.generic", error=escape_html(describe(exc))), parse_mode="html"
             )
             return
         await event.reply(
@@ -838,7 +838,7 @@ class BotHandlers:
                 queued.append(job.id)
             except QueueFull as exc:
                 await self._db.finish_job(job.id, "failed", error=str(exc))
-                rejected.append(str(exc))
+                rejected.append(describe(exc))
 
         for ref in bundle.messages:
             if not self._has_user_client and ref.is_private:

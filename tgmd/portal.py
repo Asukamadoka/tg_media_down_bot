@@ -21,13 +21,16 @@ any real deployment it was never the one offered.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Callable
+from html import escape
 
 from aiohttp import web
 
 from .config import HttpConfig, PikPakConfig
+from .i18n import describe, language, t
 from .miniapp import InitDataError, validate_init_data
 from .pikpak import PikPakError, PikPakService
 
@@ -94,16 +97,31 @@ code { font-size: .85em; }
 
 
 _MINIAPP_SCRIPT = """
+const S = JSON.parse(document.getElementById('strings').textContent);
 const tg = window.Telegram && window.Telegram.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
 const form = document.getElementById('f');
 const errorBox = document.getElementById('e');
 const button = document.getElementById('b');
+function done() {
+  const card = document.createElement('main');
+  card.className = 'card';
+  const mark = document.createElement('p');
+  mark.className = 'ok';
+  mark.textContent = '\\u2705';
+  const title = document.createElement('h1');
+  title.textContent = S.connected;
+  const sub = document.createElement('p');
+  sub.className = 'sub';
+  sub.textContent = S.connected_sub;
+  card.append(mark, title, sub);
+  document.body.replaceChildren(card);
+}
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   errorBox.textContent = '';
   button.disabled = true;
-  button.textContent = 'Connecting…';
+  button.textContent = S.connecting;
   try {
     const response = await fetch(window.location.pathname, {
       method: 'POST',
@@ -116,55 +134,67 @@ form.addEventListener('submit', async (event) => {
     });
     const result = await response.json();
     if (response.ok && result.ok) {
-      document.body.innerHTML =
-        '<main class="card"><p class="ok">\\u2705</p><h1>PikPak connected</h1>' +
-        '<p class="sub">Transfers now go to your own PikPak account.</p></main>';
+      done();
       if (tg) { setTimeout(() => tg.close(), 1600); }
       return;
     }
-    errorBox.textContent = result.error || 'That did not work.';
+    errorBox.textContent = result.error || S.failed;
   } catch (problem) {
-    errorBox.textContent = 'Could not reach the bot: ' + problem;
+    errorBox.textContent = S.unreachable.replace('{error}', String(problem));
   }
   button.disabled = false;
-  button.textContent = 'Connect';
+  button.textContent = S.connect;
 });
 """
+
+# Text the script needs, handed over as one JSON object rather than spliced
+# into JavaScript source, so a translation containing a quote cannot break it.
+_SCRIPT_KEYS = {
+    "connect": "portal.connect",
+    "connecting": "portal.js.connecting",
+    "connected": "portal.js.connected",
+    "connected_sub": "portal.js.connected_sub",
+    "failed": "portal.js.failed",
+    "unreachable": "portal.js.unreachable",
+}
 
 
 def render_miniapp() -> str:
     """The Mini App page, which Telegram opens inside its own client.
 
     Identity comes from Telegram's signed initData rather than a one-time
-    link, so there is no token in the URL at all.
+    link, so there is no token in the URL at all. The page speaks the bot's
+    language, like everything else the bot says.
     """
+    strings = {name: t(key) for name, key in _SCRIPT_KEYS.items()}
+    # "</" cannot appear inside the JSON, so the script element cannot be closed early.
+    payload = json.dumps(strings, ensure_ascii=False).replace("</", "<\\/")
     return (
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        f'<!doctype html><html lang="{language()}"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         '<meta name="robots" content="noindex, nofollow">'
-        "<title>Connect PikPak</title>"
+        f"<title>{escape(t('portal.title'))}</title>"
         f"<style>{_STYLE}</style>"
         '<script src="https://telegram.org/js/telegram-web-app.js"></script>'
         "</head><body>"
         '<main class="card">'
-        "<h1>Connect your PikPak account</h1>"
-        '<p class="sub">This page belongs to your own media-downloader bot. '
-        "It is not operated by PikPak.</p>"
+        f"<h1>{escape(t('portal.heading'))}</h1>"
+        f'<p class="sub">{escape(t("portal.sub"))}</p>'
         '<form id="f">'
-        '<label for="username">PikPak email or phone</label>'
+        f'<label for="username">{escape(t("portal.username"))}</label>'
         '<input id="username" name="username" type="text" autocomplete="username" '
         'autocapitalize="none" spellcheck="false" required>'
-        '<label for="password">PikPak password</label>'
+        f'<label for="password">{escape(t("portal.password"))}</label>'
         '<input id="password" name="password" type="password" '
         'autocomplete="current-password" required>'
-        '<button id="b" type="submit">Connect</button>'
+        f'<button id="b" type="submit">{escape(t("portal.connect"))}</button>'
         "</form>"
         '<p class="error" id="e" style="background:none;border:0;padding:0"></p>'
-        '<p class="note">Telegram tells me who you are, so there is no login '
-        "link to leak. Your password is sent to PikPak once to obtain an "
-        "access token; only the token is stored. Disconnect any time with "
-        "<code>/pikpak logout</code>.</p>"
+        '<p class="note">'
+        + escape(t("portal.note", command="\0")).replace("\0", "<code>/pikpak logout</code>")
+        + "</p>"
         "</main>"
+        f'<script type="application/json" id="strings">{payload}</script>'
         f"<script>{_MINIAPP_SCRIPT}</script>"
         "</body></html>"
     )
@@ -202,24 +232,13 @@ class PikPakLoginPortal:
     def unavailable_reason(self) -> str | None:
         """Why the Mini App cannot be offered right now, or None when it can."""
         if not self._pikpak_config.allow_user_login:
-            return (
-                "the operator has disabled per-user PikPak logins "
-                "(pikpak.allow_user_login)"
-            )
+            return t("portal.reason.disabled")
         if not self._http.usable:
-            return (
-                "the bot's HTTP server is not running with a public address, so "
-                "there is nowhere to serve the login form. Set HTTP_ENABLED=true "
-                "and PUBLIC_BASE_URL."
-            )
+            return t("portal.reason.no_http")
         if not self._running:
-            return "the login form is not attached to the HTTP server"
+            return t("portal.reason.not_attached")
         if not self._http.base_url.startswith("https://"):
-            return (
-                f"PUBLIC_BASE_URL is {self._http.base_url}, which is plain HTTP. "
-                "Telegram only opens Mini Apps over HTTPS; put a TLS reverse "
-                "proxy in front of the bot."
-            )
+            return t("portal.reason.plain_http", url=self._http.base_url)
         return None
 
     @property
@@ -257,14 +276,14 @@ class PikPakLoginPortal:
             )
 
         if not self._pikpak_config.allow_user_login:
-            return problem("Per-user PikPak logins are disabled.", 403)
+            return problem(t("portal.err.disabled"), 403)
 
         try:
             body = await request.json()
         except ValueError:  # JSONDecodeError; the server side checks no content type
-            return problem("Malformed request.", 400)
+            return problem(t("portal.err.malformed"), 400)
         if not isinstance(body, dict):
-            return problem("Malformed request.", 400)
+            return problem(t("portal.err.malformed"), 400)
 
         try:
             init_data = validate_init_data(
@@ -272,29 +291,25 @@ class PikPakLoginPortal:
             )
         except InitDataError as exc:
             log.info("rejected a Mini App submission: %s", exc)
-            return problem(
-                "Telegram could not confirm who you are. Reopen this page from "
-                "the bot.",
-                401,
-            )
+            return problem(t("portal.err.identity"), 401)
 
         user_id = init_data.user.id
         if not self._is_allowed(user_id):
             log.info("refused a Mini App login from user %s, who is not allowed", user_id)
-            return problem("You are not allowed to use this bot.", 403)
+            return problem(t("portal.err.not_allowed"), 403)
         if self._throttled(user_id):
-            return problem("Too many attempts. Wait a few minutes.", 429)
+            return problem(t("portal.err.throttled"), 429)
         self._attempts.setdefault(user_id, []).append(time.time())
 
         username = str(body.get("username") or "").strip()
         password = str(body.get("password") or "")
         if not username or not password:
-            return problem("Enter both fields.", 400)
+            return problem(t("portal.err.fields"), 400)
 
         try:
             await self._pikpak.login_with_password(user_id, username, password)
         except PikPakError as exc:
-            return problem(str(exc), 401)
+            return problem(describe(exc), 401)
 
         log.info("user %s connected PikPak through the Mini App", user_id)
         return web.json_response({"ok": True}, headers=_SECURITY_HEADERS)
