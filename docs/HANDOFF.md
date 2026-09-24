@@ -931,3 +931,82 @@ eval 报告里有模型后端的准确率和平均延迟，请把两个模型的
 2. **Claude 模型的选择**：默认 `claude-opus-5`（效果最好）。句子很短，按一句几百 token 算单次花费很低，但用户如果想更省，可以设 `NL_CLAUDE_MODEL=claude-haiku-4-5`。这要用户来决定，我没有替用户降级。
 3. **「最近 N 个月」按 N×30 天、「去年」按日历年**，是 rules 后端的约定，计划里会写明。用户若希望「上个月」「最近一个月」表示别的意思，告诉我改。
 4. **媒体目录的宿主机路径**（阶段 2d 的待决问题）决定了「下载到 NAS」最终落在哪里。
+
+## 阶段 4 · 中文化第二批
+
+范围按 CC_BRIEF §6：`setup.py`、`portal.py`、`verify.py`，以及用户会直接看到的异常消息。
+
+### 这一阶段做了什么
+
+- **异常：带 key，展示时翻译**（`tgmd/i18n.py` 的 `Explained` 和 `describe()`）。
+  - 用户会看到的异常类都继承 `Explained`：`ResolveError`、`PikPakError`、`LinkError`、`DeliveryError`（含 `TooLargeToUpload`）、`DownloadError`、`BotTokenError`、`ClaimError`、`QueueFull`，另外新增一个 `SessionError`（`/setup telegram` 收尾时接管会话失败）。
+  - 抛出时只写 `key` 和参数，比如 `ResolveError(key="err.resolve.no_username", name=...)`。英文原文只在目录里存一份，`str(exc)` 取的就是这份英文，所以**日志和数据库里仍是英文**（红线 4）。
+  - 展示给人看的地方一律用 `describe(exc)`，按当前语言出文本。涉及 handlers、tasks、setup、verify、portal、links，以及 WMS 的「没有账号」提示。
+  - 包在外面的错误会把里面的错误一起翻译。例如 PikPak 的错误经 `DeliveryError` 转一手，读者看到的是整句中文。
+  - 共 68 处抛出点，覆盖 CC_BRIEF 估的约 76 条；差额是阶段 1 删掉的那部分，加上几处重复文案合并成同一个 key。
+  - 仍保持英文、只进日志的有：`ConfigError`、`TokenError`、`InitDataError`，这是原计划。
+  - 顺手修了一处：`QueueFull` 以前把**已翻译**的文字写进 `jobs.error`，现在写英文。批量任务的失败摘要同理：给人看的是译文，落库的是英文。
+- **`setup.py`**：整个向导（状态、PikPak 登录、Telegram 登录、超时、重试）改成走 `t()`。新增 43 条目录项，英文原文一字未改。
+- **`verify.py` 和 `/verify`**：
+  - 每条检查结果和总评都走 `t()`。
+  - 检查名分两层：`Check.name` 仍是稳定的英文 id（测试和代码都按它找），另加一个 `Check.label` 负责显示。
+  - `python -m tgmd.verify` 也按 `TGMD_LANG` 或配置里的 `language` 说话。配置加载失败时的报错也一样。
+- **命令行对齐**：`ljust` 按字符数补空格，中文一个字占两列，列就歪了。新增 `tgmd.utils.display_width`（全角和宽字符记 2 列，组合符记 0 列），按显示宽度补齐。实际输出：
+
+  ```
+  ✓ 配置        已加载，各项配置互相一致
+  ✓ 机器人令牌  格式正确，对应机器人 ID 123456789
+  ! 用户会话    未配置。没有它，只能读取机器人自己所在的聊天。请在 Telegram 里用 /setup telegram 登录一个。
+  - 缓存聊天    未配置；每次请求都会重新下载（设置 CACHE_CHAT_ID）
+  ✓ HTTP 服务   已绑定 0.0.0.0:8080
+  ```
+- **PikPak 登录 Mini App（`portal.py`）**：
+  - 页面文案走 `t()` 并做 HTML 转义。
+  - JS 要用的文案放在 `<script type="application/json">` 里，以 JSON 注入，`</` 已转义，做法与 M4 仓储面板一致。
+  - 连接成功后的页面改用 DOM 节点加 `textContent` 拼出来，不再拼 `innerHTML`。
+  - `<html lang>` 跟随语言。CC_BRIEF 说的两处硬编码，另一处在阶段 1 已随「一次性登录链接」页面一起删除，现存的只有这一处。
+  - 接口返回的错误和 `unavailable_reason()` 都已翻译。
+- **投递结果摘要**（已发送、已保存到…、已存入 PikPak、PikPak 仍在拉取、已加入离线下载）也进了目录。这几条原本不在 §6 的清单上，但用户每次下载都会看到。
+- **目录规模**：178 → 397 条（+219：setup 43、异常 64、verify 88、portal 22、会话 2），en 和 zh 两边键完全一致。
+
+### 验收证据
+
+- 新增 `tests/test_i18n_batch2.py`，26 个测试：
+  - **AST 扫描 `tgmd/` 全部源码**：上面每个异常类的每一处抛出都必须带 `key=`、不带位置参数的英文消息，而且 key 在 en 和 zh 里都存在（目前 68 处）。
+  - **AST 扫描所有 `t("…")` 字面量**：key 必须存在于目录中。当前零缺失。
+  - `str(exc)` 是英文、`describe(exc)` 是中文；嵌套错误整句翻译；外部库的错误原样透传；链接解析错误以中文进入回复。
+  - verify 报告：检查 id 不变而标签翻译；en 和 zh 下详情列按显示宽度对齐；`TGMD_LANG=zh` 时命令行输出「配置错误：…」。
+  - Mini App 页：`lang` 跟随语言；中文页上除 PikPak、Telegram 和 `/pikpak logout` 以外没有可见的英文；译文里写 `</script>` 也关不掉脚本；标题里的 HTML 会被转义。
+- `tests/test_tasks.py` 加了 1 个测试：中文环境下任务失败时，状态消息是中文，`jobs.error` 是英文。
+- `tests/test_i18n.py` 的占位符一致性和命令名不翻译两项测试照常通过（`{value!r}`、`{needed:.0f}` 这类带转换或格式的占位符，两种语言也一致）。
+- 测试 961 → 988（+27），3.11 与 3.12 全绿；ruff 零告警。
+- 改动（代码与测试，不含 README 和本文件）：21 个文件，+1384 / −470 行。大头是 `tgmd/i18n.py` 的目录（+759）和新测试（+259）。
+
+### NAS 上要改什么
+
+什么都不用改。语言仍由 `TGMD_LANG`（或 `BOT_LANG`、配置里的 `language`）决定，没有新增环境变量。已经设了 `TGMD_LANG=zh` 的，更新镜像、重启之后，向导、`/verify` 和登录页就是中文。
+
+### 用户需要在 Telegram 里做什么
+
+1. `/verify`：检查名和说明都应是中文，末尾一句中文总评。
+2. `/setup`：状态页和每一步提示都是中文。
+3. `/pikpak login` 打开 Mini App：标题「连接你的 PikPak 账号」；故意输错密码，红字提示应以「PikPak 拒绝了这组凭据：」开头，冒号后面是 PikPak 返回的原文。
+4. 发一个不存在的频道链接，比如 `https://t.me/nosuch_channel_xyz/1`：应回复「不存在名为 @nosuch_channel_xyz 的聊天」或「无法解析 @nosuch_channel_xyz」，具体是哪一句取决于 Telegram 返回哪种错误。
+
+### 给 Cowork 的核验手段
+
+```bash
+docker compose run --rm -e TGMD_LANG=zh bot python -m tgmd.verify   # 中文、列对齐
+docker compose run --rm -e TGMD_LANG=en bot python -m tgmd.verify   # 英文输出与阶段 3 相同
+docker compose logs bot | grep -P '[\x{4e00}-\x{9fff}]'              # 红线 4：除文件名、聊天标题这类用户数据外，日志里不应有中文
+```
+
+### 怎么回滚
+
+镜像回滚到 M6 的 `sha-6ba289b`。本阶段没有数据库或配置改动。
+
+### 待决问题
+
+1. **Mini App 用哪种语言**：现在跟随 bot 的全局语言，和仓储面板一致。Telegram 的 initData 里带有用户自己的 `language_code`，但页面在拿到它之前就已经渲染好了。要不要做成按用户语言显示，需要用户决定；目前全局只有一个语言，我没有扩大范围。
+2. **外部原文不翻**：PikPak 库和 Telethon 返回的错误原文（如 `invalid_grant`、RPC 错误名）会原样出现在中文句子里。这些文本来自外部，没法可靠地翻译。
+3. **`python -m tgmd.verify` 的「配置提示」行仍是英文**：内容来自 `Config.validate()`，写给运维看，里面全是环境变量名，和 `ConfigError` 一样按原计划只用英文。如果希望这些提示也出中文，需要再开一批。

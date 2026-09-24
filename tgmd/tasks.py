@@ -25,7 +25,7 @@ from .downloader import (
     has_downloadable_media,
 )
 from .forwarder import Forwarder, Outcome, forwardable
-from .i18n import t
+from .i18n import Explained, describe, t
 from .links import MessageRef
 from .pikpak import PikPakError, PikPakService
 from .reporter import Reporter
@@ -100,7 +100,7 @@ def saved_to_pikpak(job: Job) -> bool:
     return job.kind in (JobKind.URL, JobKind.SHARE) or job.mode == "pikpak"
 
 
-class QueueFull(RuntimeError):
+class QueueFull(Explained, RuntimeError):
     """The user already has as many jobs pending as they are allowed."""
 
 
@@ -172,9 +172,7 @@ class JobQueue:
         """Queue a job, returning its position in line."""
         limit = self._config.download.max_queue_per_user
         if len(self.pending_for(job.user_id)) >= limit:
-            raise QueueFull(
-                t("job.queue_full", limit=limit)
-            )
+            raise QueueFull(key="job.queue_full", limit=limit)
         self._jobs[job.id] = job
         await self._queue.put(job)
         return self._queue.qsize()
@@ -245,7 +243,7 @@ class JobQueue:
             # Each runner reports the failures it expects. Anything else would
             # leave the status message frozen mid-way, so close it here and
             # let the worker record the failure.
-            await reporter.close(t("error.generic", error=escape_html(str(exc))))
+            await reporter.close(t("error.generic", error=escape_html(describe(exc))))
             raise
         if self._after_pikpak is not None and saved_to_pikpak(job):
             try:
@@ -278,7 +276,7 @@ class JobQueue:
             job.state = JobState.FAILED
             job.detail = str(exc)
             await reporter.close(
-                t("error.generic", error=escape_html(str(exc)))
+                t("error.generic", error=escape_html(describe(exc)))
             )
             await self._db.finish_job(job.id, "failed", error=str(exc))
             return
@@ -298,7 +296,7 @@ class JobQueue:
             job.state = JobState.FAILED
             job.detail = str(exc)
             await reporter.close(
-                t("error.generic", error=escape_html(str(exc)))
+                t("error.generic", error=escape_html(describe(exc)))
             )
             await self._db.finish_job(job.id, "failed", error=str(exc))
             return
@@ -357,7 +355,7 @@ class JobQueue:
             job.state = JobState.FAILED
             job.detail = str(exc)
             await reporter.close(
-                t("error.generic", error=escape_html(str(exc)))
+                t("error.generic", error=escape_html(describe(exc)))
             )
             await self._db.finish_job(job.id, "failed", error=str(exc))
             return
@@ -380,7 +378,7 @@ class JobQueue:
             job.state = JobState.FAILED
             job.detail = str(exc)
             await reporter.close(
-                t("error.generic", error=escape_html(str(exc)))
+                t("error.generic", error=escape_html(describe(exc)))
             )
             await self._db.finish_job(job.id, "failed", error=str(exc))
             return
@@ -395,7 +393,7 @@ class JobQueue:
 
         succeeded = 0
         skipped = 0
-        failures: list[str] = []
+        failures: list[tuple[int, BaseException]] = []
 
         for index, message in enumerate(messages, start=1):
             if job.cancel.is_set():
@@ -423,10 +421,10 @@ class JobQueue:
             except DownloadCancelled:
                 break
             except (DownloadError, DeliveryError, ResolveError) as exc:
-                failures.append(f"{message.id}: {exc}")
+                failures.append((message.id, exc))
                 log.info("job %d message %s failed: %s", job.id, message.id, exc)
             except Exception as exc:  # unexpected, but one message must not kill the job
-                failures.append(f"{message.id}: {exc}")
+                failures.append((message.id, exc))
                 log.exception("job %d message %s crashed", job.id, message.id)
 
         await self._finalize(
@@ -664,7 +662,7 @@ class JobQueue:
             # bandwidth, so the file stays on disk and the user is told why.
             log.info("job %d falling back to local: %s", job.id, exc)
             result = await self._delivery.to_local(path, info, keep_at=unique_path(keep_at))
-            result.summary = f"{exc}; {result.summary}"
+            result.summary = f"{escape_html(describe(exc))}; {result.summary}"
             return result
 
     async def _finalize(
@@ -673,7 +671,7 @@ class JobQueue:
         reporter: Reporter,
         succeeded: int,
         skipped: int,
-        failures: list[str],
+        failures: list[tuple[int, BaseException]],
         total: int,
         truncated: bool,
         cap: int,
@@ -695,7 +693,9 @@ class JobQueue:
         if job.cache_hint and total > 1:
             notes.append(t("job.hint_cache").strip())
         if failures:
-            shown = "\n".join(f"• {escape_html(item)}" for item in failures[:5])
+            shown = "\n".join(
+                f"• {message_id}: {escape_html(describe(exc))}" for message_id, exc in failures[:5]
+            )
             if len(failures) > 5:
                 shown += t("job.note_more", count=len(failures) - 5)
             notes.append(t("job.note_failed", count=len(failures), shown=shown))
@@ -724,7 +724,8 @@ class JobQueue:
             await reporter.close(t("job.nothing_delivered"))
 
         await self._db.finish_job(
-            job.id, status, error="; ".join(failures[:3]) or None
+            job.id, status,
+            error="; ".join(f"{message_id}: {exc}" for message_id, exc in failures[:3]) or None,
         )
 
 

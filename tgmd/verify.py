@@ -37,6 +37,7 @@ from .clients import user_session_source
 from .config import Config, ConfigError, load_config
 from .db import Database
 from .forwarder import resolve_peer
+from .i18n import describe, language_from_environment, set_language, t
 from .identity import (
     BotToken,
     BotTokenError,
@@ -68,7 +69,7 @@ def check_configuration(report: Report, config: Config) -> None:
     except ConfigError as exc:
         report.add(Check.fail("configuration", str(exc)))
         return
-    report.add(Check.ok("configuration", "loaded and internally consistent"))
+    report.add(Check.ok("configuration", t("verify.config.ok")))
     for warning in warnings:
         report.add(Check.warn("configuration note", warning))
 
@@ -80,8 +81,7 @@ def check_access_control(report: Report, config: Config) -> None:
         report.add(
             Check.warn(
                 "access control",
-                "open to every Telegram user; the bot can read anything your "
-                "account can see",
+                t("verify.access.open"),
             )
         )
         return
@@ -89,16 +89,15 @@ def check_access_control(report: Report, config: Config) -> None:
         report.add(
             Check.fail(
                 "access control",
-                "no admin or allowed user ids, so every request will be refused. "
-                "Send /claim with the code from the bot's log, or set ADMIN_USER_IDS.",
+                t("verify.access.none"),
             )
         )
         return
     report.add(
         Check.ok(
             "access control",
-            f"{len(access.admin_user_ids)} admin(s), "
-            f"{len(access.allowed_user_ids)} additional user(s)",
+            t("verify.access.ok", admins=len(access.admin_user_ids),
+              users=len(access.allowed_user_ids)),
         )
     )
 
@@ -108,10 +107,10 @@ def check_token(report: Report, config: Config) -> BotToken | None:
     try:
         token = parse_bot_token(config.telegram.bot_token)
     except BotTokenError as exc:
-        report.add(Check.fail("bot token", str(exc)))
+        report.add(Check.fail("bot token", describe(exc)))
         return None
     report.add(
-        Check.ok("bot token", f"well-formed, names bot id {token.bot_id}")
+        Check.ok("bot token", t("verify.token.ok", id=token.bot_id))
     )
     return token
 
@@ -151,7 +150,7 @@ async def connect_bot(
 ) -> tuple[TelegramClient | None, object | None]:
     """Confirm the bot exists and that it is the bot the token names."""
     if token is None:
-        report.add(Check.skip("bot identity", "no usable token to check"))
+        report.add(Check.skip("bot identity", t("verify.bot.no_token")))
         return None, None
 
     # An in-memory session keeps this from touching the running bot's session
@@ -166,17 +165,14 @@ async def connect_bot(
         )
     except TimeoutError:
         report.add(
-            Check.fail("bot identity", "timed out connecting to Telegram")
+            Check.fail("bot identity", t("verify.timeout"))
         )
         return None, None
     except Exception as exc:
         report.add(
             Check.fail(
                 "bot identity",
-                f"could not sign in as the bot: {exc}. Check the token with "
-                "@BotFather, and check that this host can open a direct TCP "
-                "connection to Telegram — MTProto is not plain HTTPS, so an "
-                "HTTPS-only proxy will block it.",
+                t("verify.bot.sign_in_failed", error=exc),
             )
         )
         return None, None
@@ -184,7 +180,7 @@ async def connect_bot(
     try:
         me = await client.get_me()
     except Exception as exc:
-        report.add(Check.fail("bot identity", f"could not read the bot account: {exc}"))
+        report.add(Check.fail("bot identity", t("verify.bot.read_failed", error=exc)))
         await client.disconnect()
         return None, None
 
@@ -198,27 +194,28 @@ def check_bot_identity(report: Report, me, token: BotToken | None) -> None:
     report.add(
         Check.ok(
             "bot created",
-            describe_account(me) + (f" — {link}" if link else " — no username"),
+            t("verify.bot.created", account=describe_account(me), link=link)
+            if link
+            else t("verify.bot.no_username", account=describe_account(me)),
         )
     )
     if not getattr(me, "bot", False):
         report.add(
             Check.fail(
                 "bot identity",
-                "that token belongs to an account Telegram does not mark as a bot",
+                t("verify.bot.not_bot"),
             )
         )
     elif token is not None and me.id != token.bot_id:
         report.add(
             Check.fail(
                 "bot identity",
-                f"the token names bot id {token.bot_id} but the account that "
-                f"answered is {me.id}",
+                t("verify.bot.mismatch", expected=token.bot_id, actual=me.id),
             )
         )
     elif token is not None:
         report.add(
-            Check.ok("bot identity", f"id {me.id} matches the token, and is a bot")
+            Check.ok("bot identity", t("verify.bot.ok", id=me.id))
         )
 
 
@@ -235,22 +232,23 @@ async def connect_user(
         report.add(
             Check.warn(
                 "user session",
-                "not configured. Without one, only chats the bot itself is in "
-                "can be read. Sign one in from Telegram with /setup telegram.",
+                t("verify.user.missing"),
             )
         )
         return None, None
     session, source = chosen
+    if source == "an in-chat login":  # the label clients.py logs, in English
+        source = t("verify.source.in_chat")
 
     telegram = config.telegram
     client = TelegramClient(session, telegram.api_id, telegram.api_hash)
     try:
         await asyncio.wait_for(client.connect(), timeout=_NETWORK_TIMEOUT)
     except TimeoutError:
-        report.add(Check.fail("user session", "timed out connecting to Telegram"))
+        report.add(Check.fail("user session", t("verify.timeout")))
         return None, None
     except Exception as exc:
-        report.add(Check.fail("user session", f"could not connect: {exc}"))
+        report.add(Check.fail("user session", t("verify.user.connect_failed", error=exc)))
         return None, None
 
     try:
@@ -258,15 +256,14 @@ async def connect_user(
             report.add(
                 Check.fail(
                     "user session",
-                    f"the session from {source} is not authorised; sign in "
-                    "again with /setup telegram",
+                    t("verify.user.not_authorised", source=source),
                 )
             )
             await client.disconnect()
             return None, None
         me = await client.get_me()
     except Exception as exc:
-        report.add(Check.fail("user session", f"could not read the account: {exc}"))
+        report.add(Check.fail("user session", t("verify.user.read_failed", error=exc)))
         await client.disconnect()
         return None, None
 
@@ -274,16 +271,16 @@ async def connect_user(
         report.add(
             Check.fail(
                 "user session",
-                "that session belongs to a bot; downloads need a real account",
+                t("verify.user.is_bot"),
             )
         )
         return client, me
 
-    premium = " Telegram Premium" if getattr(me, "premium", False) else ""
+    premium = t("verify.user.premium") if getattr(me, "premium", False) else ""
     report.add(
         Check.ok(
             "user session",
-            f"{describe_account(me)} from {source}, authorised{premium}",
+            t("verify.user.ok", account=describe_account(me), source=source, premium=premium),
         )
     )
     return client, me
@@ -292,20 +289,20 @@ async def connect_user(
 def check_distinct_accounts(report: Report, bot_me, user_me) -> None:
     """The bot and the reading account must not be the same account."""
     if bot_me is None or user_me is None:
-        report.add(Check.skip("account separation", "needs both accounts"))
+        report.add(Check.skip("account separation", t("verify.accounts.need_both")))
         return
     if getattr(bot_me, "id", None) == getattr(user_me, "id", None):
         report.add(
             Check.fail(
                 "account separation",
-                "the bot and the reading account are the same account",
+                t("verify.accounts.same"),
             )
         )
         return
     report.add(
         Check.ok(
             "account separation",
-            f"bot {bot_me.id} reads through account {user_me.id}",
+            t("verify.accounts.ok", bot=bot_me.id, user=user_me.id),
         )
     )
 
@@ -317,17 +314,17 @@ async def check_read_access(report: Report, user: TelegramClient) -> None:
             user.get_dialogs(limit=1), timeout=_NETWORK_TIMEOUT
         )
     except Exception as exc:
-        report.add(Check.fail("history access", f"could not list dialogs: {exc}"))
+        report.add(Check.fail("history access", t("verify.history.failed", error=exc)))
         return
     if not dialogs:
         report.add(
             Check.warn(
                 "history access",
-                "the account has no chats, so there is nothing to download from",
+                t("verify.history.empty"),
             )
         )
         return
-    report.add(Check.ok("history access", "the account can list its chats"))
+    report.add(Check.ok("history access", t("verify.history.ok")))
 
 
 async def check_cache_chat(report: Report, config: Config, bot: TelegramClient) -> None:
@@ -337,7 +334,7 @@ async def check_cache_chat(report: Report, config: Config, bot: TelegramClient) 
         report.add(
             Check.skip(
                 "cache chat",
-                "not configured; every request re-downloads (set CACHE_CHAT_ID)",
+                t("verify.cache.unset"),
             )
         )
         return
@@ -349,8 +346,7 @@ async def check_cache_chat(report: Report, config: Config, bot: TelegramClient) 
         report.add(
             Check.fail(
                 "cache chat",
-                f"the bot cannot see chat {cache_chat_id}: {exc}. Add the bot to "
-                "it as an administrator.",
+                t("verify.cache.cannot_see", chat=cache_chat_id, error=exc),
             )
         )
         return
@@ -359,12 +355,11 @@ async def check_cache_chat(report: Report, config: Config, bot: TelegramClient) 
         report.add(
             Check.warn(
                 "cache chat",
-                f"the bot is in chat {cache_chat_id} but is not an administrator; "
-                "it may not be able to post or read back uploads",
+                t("verify.cache.not_admin", chat=cache_chat_id),
             )
         )
         return
-    report.add(Check.ok("cache chat", f"the bot administrates chat {cache_chat_id}"))
+    report.add(Check.ok("cache chat", t("verify.cache.ok", chat=cache_chat_id)))
 
 
 async def check_forward_path(report: Report, config: Config, user) -> None:
@@ -372,7 +367,7 @@ async def check_forward_path(report: Report, config: Config, user) -> None:
     name = "forward fast path"
     if user is None:
         report.add(
-            Check.ok(name, "the bot reads for itself and re-sends forwardable files directly")
+            Check.ok(name, t("verify.forward.bot_reads"))
         )
         return
     cache_chat_id = config.delivery.cache_chat_id
@@ -380,8 +375,7 @@ async def check_forward_path(report: Report, config: Config, user) -> None:
         report.add(
             Check.warn(
                 name,
-                "no cache channel, so forwardable files are downloaded and "
-                "re-uploaded. Send /cache in a private channel to make them instant.",
+                t("verify.forward.no_cache"),
             )
         )
         return
@@ -393,8 +387,7 @@ async def check_forward_path(report: Report, config: Config, user) -> None:
         report.add(
             Check.warn(
                 name,
-                f"the reading account cannot see cache channel {cache_chat_id} ({exc}). "
-                "Add it to the channel, with permission to post.",
+                t("verify.forward.cannot_see", chat=cache_chat_id, error=exc),
             )
         )
         return
@@ -405,13 +398,12 @@ async def check_forward_path(report: Report, config: Config, user) -> None:
     else:
         can_post = not (permissions.is_banned or permissions.has_left)
     if can_post:
-        report.add(Check.ok(name, f"the reading account can forward into {cache_chat_id}"))
+        report.add(Check.ok(name, t("verify.forward.ok", chat=cache_chat_id)))
     else:
         report.add(
             Check.warn(
                 name,
-                f"the reading account is in {cache_chat_id} but cannot post there; "
-                "make it an admin with permission to post",
+                t("verify.forward.cannot_post", chat=cache_chat_id),
             )
         )
 
@@ -427,41 +419,40 @@ async def check_pikpak(report: Report, config: Config, db: Database) -> None:
         try:
             quota = await service.quota()
         except PikPakError as exc:
-            report.add(Check.fail("pikpak account", str(exc)))
+            report.add(Check.fail("pikpak account", describe(exc)))
         else:
             report.add(
                 Check.ok(
                     "pikpak account",
-                    f"{config.pikpak.username} signed in, "
-                    f"{human_size(quota.used)} of {human_size(quota.limit)} used",
+                    t("verify.pikpak.ok", username=config.pikpak.username,
+                      used=human_size(quota.used), limit=human_size(quota.limit)),
                 )
             )
             report.add(
-                Check.ok("pikpak folder", f"transfers land in {config.pikpak.folder}")
+                Check.ok("pikpak folder", t("verify.pikpak.folder", folder=config.pikpak.folder))
             )
     else:
         report.add(
             Check.skip(
                 "pikpak account",
-                "no shared account configured; users connect their own instead",
+                t("verify.pikpak.no_shared"),
             )
         )
 
     if not config.pikpak.allow_user_login:
-        report.add(Check.skip("pikpak login", "disabled (pikpak.allow_user_login)"))
+        report.add(Check.skip("pikpak login", t("verify.login.disabled")))
     elif not (config.http.usable and config.http.base_url.startswith("https://")):
         report.add(
             Check.warn(
                 "pikpak login",
-                "the Mini App needs HTTP_ENABLED=true and an HTTPS "
-                "PUBLIC_BASE_URL; until then users connect with /setup pikpak",
+                t("verify.login.needs_https"),
             )
         )
     else:
         report.add(
             Check.ok(
                 "pikpak login",
-                f"/pikpak login opens {config.http.base_url}/pikpak/app in Telegram",
+                t("verify.login.ok", url=config.http.base_url),
             )
         )
 
@@ -475,8 +466,7 @@ async def check_http(report: Report, config: Config, db: Database) -> None:
         report.add(
             Check.skip(
                 "http server",
-                "disabled; magnet and URL transfers still work, Telegram media "
-                "cannot reach PikPak",
+                t("verify.http.disabled"),
             )
         )
         return
@@ -498,14 +488,15 @@ async def check_http(report: Report, config: Config, db: Database) -> None:
         report.add(
             Check.warn(
                 "http server",
-                f"could not bind {config.http.host}:{config.http.port}: {exc}. "
-                "If the bot is already running, this port is expected to be busy.",
+                t("verify.http.bind_failed", host=config.http.host,
+                  port=config.http.port, error=exc),
             )
         )
         return
 
     report.add(
-        Check.ok("http server", f"bound {config.http.host}:{config.http.port}")
+        Check.ok("http server", t("verify.http.bound", host=config.http.host,
+                                  port=config.http.port))
     )
 
     url = f"{config.http.base_url}/healthz"
@@ -519,13 +510,13 @@ async def check_http(report: Report, config: Config, db: Database) -> None:
             body = await response.text()
         if status == 200 and "ok" in body:
             report.add(
-                Check.ok("public reachability", f"{url} answers, so PikPak can fetch files")
+                Check.ok("public reachability", t("verify.reach.ok", url=url))
             )
         else:
             report.add(
                 Check.warn(
                     "public reachability",
-                    f"{url} answered HTTP {status}; check the reverse proxy",
+                    t("verify.reach.status", url=url, status=status),
                 )
             )
     except Exception as exc:
@@ -536,8 +527,7 @@ async def check_http(report: Report, config: Config, db: Database) -> None:
         report.add(
             Check.warn(
                 "public reachability",
-                f"could not fetch {url} from this host ({detail}). Verify from "
-                "outside; NAT hairpinning often breaks a self-test.",
+                t("verify.reach.failed", url=url, error=detail),
             )
         )
     finally:
@@ -558,9 +548,10 @@ async def run_checks(config: Config) -> Report:
     db = Database(config.download.db_path)
     try:
         await db.connect()
-        report.add(Check.ok("database", f"opened {config.download.db_path}"))
+        report.add(Check.ok("database", t("verify.db.ok", path=config.download.db_path)))
     except Exception as exc:
-        report.add(Check.fail("database", f"could not open {config.download.db_path}: {exc}"))
+        report.add(Check.fail("database", t("verify.db.failed", path=config.download.db_path,
+                                           error=exc)))
         return report
 
     # An admin claimed with /claim and a session from /setup telegram live in
@@ -584,7 +575,7 @@ async def run_checks(config: Config) -> Report:
             # Say so rather than dropping the line: a missing check reads as a
             # passing one.
             report.add(
-                Check.skip("cache chat", "cannot be checked without a working bot")
+                Check.skip("cache chat", t("verify.cache.no_bot"))
             )
     finally:
         for client in (bot, user):
@@ -623,7 +614,7 @@ async def run_live_checks(
     try:
         bot_me = await bot.get_me()
     except Exception as exc:
-        report.add(Check.fail("bot identity", f"could not read the bot account: {exc}"))
+        report.add(Check.fail("bot identity", t("verify.bot.read_failed", error=exc)))
         bot_me = None
 
     if bot_me is not None:
@@ -634,17 +625,19 @@ async def run_live_checks(
         report.add(
             Check.warn(
                 "user session",
-                "not configured; only chats the bot itself is in can be read",
+                t("verify.live.user_missing"),
             )
         )
     else:
         try:
             user_me = await user.get_me()
             report.add(
-                Check.ok("user session", f"{describe_account(user_me)}, authorised")
+                Check.ok(
+                    "user session", t("verify.live.user_ok", account=describe_account(user_me))
+                )
             )
         except Exception as exc:
-            report.add(Check.fail("user session", f"could not read the account: {exc}"))
+            report.add(Check.fail("user session", t("verify.user.read_failed", error=exc)))
 
     check_distinct_accounts(report, bot_me, user_me)
     if user is not None and user_me is not None:
@@ -654,9 +647,9 @@ async def run_live_checks(
 
     # PikPak, from the point of view of the person who asked.
     if await pikpak.has_user_session(for_user_id):
-        source = "your own account"
+        source = t("verify.live.source_own")
     elif pikpak.configured:
-        source = f"the shared account ({config.pikpak.username})"
+        source = t("verify.live.source_shared", username=config.pikpak.username)
     else:
         source = None
 
@@ -664,8 +657,7 @@ async def run_live_checks(
         report.add(
             Check.warn(
                 "pikpak account",
-                "no account connected for you and none configured on the server; "
-                "use /pikpak login",
+                t("verify.live.no_pikpak"),
             )
         )
     else:
@@ -674,33 +666,35 @@ async def run_live_checks(
             report.add(
                 Check.ok(
                     "pikpak account",
-                    f"{source}, {human_size(quota.used)} of "
-                    f"{human_size(quota.limit)} used",
+                    t("verify.live.pikpak_ok", source=source,
+                      used=human_size(quota.used), limit=human_size(quota.limit)),
                 )
             )
         except PikPakError as exc:
-            report.add(Check.fail("pikpak account", f"{source}: {exc}"))
+            report.add(Check.fail("pikpak account", t("verify.live.pikpak_failed", source=source,
+                                                   error=describe(exc))))
 
     reason = portal.unavailable_reason()
     if reason is None:
-        report.add(Check.ok("pikpak login", "/pikpak login opens the Mini App"))
+        report.add(Check.ok("pikpak login", t("verify.live.login_ok")))
     else:
         report.add(
-            Check.warn("pikpak login", f"no Mini App ({reason}); /setup pikpak works")
+            Check.warn("pikpak login", t("verify.live.login_none", reason=reason))
         )
 
     if config.http.enabled:
         report.add(
             Check.ok(
                 "http server",
-                f"serving at {config.http.base_url or 'no public URL set'}",
+                t("verify.live.http_ok",
+                  url=config.http.base_url or t("verify.live.no_url")),
             )
         )
     else:
         report.add(
             Check.skip(
                 "http server",
-                "disabled; Telegram media cannot be transferred to PikPak",
+                t("verify.live.http_disabled"),
             )
         )
 
@@ -712,13 +706,16 @@ async def _main(config_path: Path | None) -> int:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
     logging.getLogger("telethon").setLevel(logging.ERROR)
 
+    # The environment says the language even when the config does not load.
+    set_language(language_from_environment())
     try:
         config = load_config(config_path)
     except ConfigError as exc:
-        print(f"configuration error: {exc}", file=sys.stderr)
+        print(t("verify.cli.config_error", error=exc), file=sys.stderr)
         return 2
+    set_language(config.language)
 
-    print("Verifying tg_media_down_bot setup…\n")
+    print(t("verify.cli.start") + "\n")
     report = await run_checks(config)
     print(report.render_text())
     return 0 if report.ok else 1

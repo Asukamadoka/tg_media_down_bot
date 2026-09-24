@@ -18,12 +18,13 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .utils import escape_html
+from .i18n import CATALOG, DEFAULT_LANGUAGE, Explained, t
+from .utils import display_width, escape_html
 
 _TOKEN_RE = re.compile(r"^(?P<bot_id>\d{5,16}):(?P<secret>[A-Za-z0-9_-]{30,64})$")
 
 
-class BotTokenError(ValueError):
+class BotTokenError(Explained, ValueError):
     """The bot token is not shaped like one BotFather issues."""
 
 
@@ -42,23 +43,16 @@ def parse_bot_token(token: str) -> BotToken:
     """
     candidate = (token or "").strip()
     if not candidate:
-        raise BotTokenError("the bot token is empty; get one from @BotFather")
+        raise BotTokenError(key="err.token.empty")
     if candidate.count(":") != 1:
-        raise BotTokenError(
-            "a bot token looks like 123456789:AA... — one colon, id first"
-        )
+        raise BotTokenError(key="err.token.colon")
 
     match = _TOKEN_RE.match(candidate)
     if match is None:
         bot_id, _, secret = candidate.partition(":")
         if not bot_id.isdigit():
-            raise BotTokenError(
-                f"the part before the colon should be the numeric bot id, got {bot_id!r}"
-            )
-        raise BotTokenError(
-            f"the secret after the colon is {len(secret)} characters; "
-            "BotFather issues about 35"
-        )
+            raise BotTokenError(key="err.token.bad_id", value=bot_id)
+        raise BotTokenError(key="err.token.secret_length", length=len(secret))
 
     return BotToken(bot_id=int(match.group("bot_id")), secret=match.group("secret"))
 
@@ -110,6 +104,12 @@ class Check:
     status: Status
     detail: str = ""
 
+    @property
+    def label(self) -> str:
+        """The name as a person reads it; ``name`` itself stays a stable English id."""
+        key = "verify.check." + self.name.replace(" ", "_")
+        return t(key) if key in CATALOG[DEFAULT_LANGUAGE] else self.name
+
     @classmethod
     def ok(cls, name: str, detail: str = "") -> Check:
         return cls(name, Status.OK, detail)
@@ -152,20 +152,26 @@ class Report:
     def verdict(self) -> str:
         """One sentence summarising the run."""
         if self.failed:
-            return f"{len(self.failed)} check(s) failed — the bot will not work as configured"
+            return t("verify.verdict.failed", count=len(self.failed))
         warnings = self.count(Status.WARN)
         if warnings:
-            return f"everything essential passed, with {warnings} warning(s)"
-        return "everything passed"
+            return t("verify.verdict.warnings", count=warnings)
+        return t("verify.verdict.ok")
 
     def render_text(self) -> str:
-        """Aligned plain-text report for a terminal."""
+        """Aligned plain-text report for a terminal.
+
+        Aligned by display width, not ``len``: a CJK character takes two
+        terminal columns, so ``ljust`` would leave the details ragged.
+        """
         if not self.checks:
-            return "no checks ran"
-        width = max(len(check.name) for check in self.checks)
+            return t("verify.no_checks")
+        labels = [check.label for check in self.checks]
+        width = max(display_width(label) for label in labels)
         lines = [
-            f"{check.status.symbol} {check.name.ljust(width)}  {check.detail}".rstrip()
-            for check in self.checks
+            f"{check.status.symbol} {label}{' ' * (width - display_width(label))}  "
+            f"{check.detail}".rstrip()
+            for check, label in zip(self.checks, labels, strict=True)
         ]
         lines.append("")
         lines.append(self.verdict())
@@ -174,7 +180,7 @@ class Report:
     def render_html(self) -> str:
         """Telegram-flavoured HTML, for the in-chat /verify command."""
         lines = [
-            f"{check.status.emoji} <b>{escape_html(check.name)}</b>"
+            f"{check.status.emoji} <b>{escape_html(check.label)}</b>"
             + (f"\n    <code>{escape_html(check.detail)}</code>" if check.detail else "")
             for check in self.checks
         ]

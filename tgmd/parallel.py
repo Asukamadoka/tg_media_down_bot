@@ -184,7 +184,7 @@ async def download_parts(
                     except FloodWaitError as exc:
                         if exc.seconds > flood_ceiling:
                             raise DownloadError(
-                                f"Telegram asked us to wait {exc.seconds}s; try again later"
+                                key="err.download.flood", seconds=exc.seconds
                             ) from exc
                         log.info("flood wait of %ss during a parallel download", exc.seconds)
                         if on_flood_wait is not None:

@@ -30,6 +30,7 @@ import secrets
 
 from .config import Config
 from .db import Database
+from .i18n import Explained
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ CACHE_CHAT_KEY = "runtime_cache_chat_id"
 CLAIM_CODE_BYTES = 8
 
 
-class ClaimError(RuntimeError):
+class ClaimError(Explained, RuntimeError):
     """A claim attempt was refused, with a reason meant for the user."""
 
 
@@ -140,18 +141,13 @@ async def announce_claim(db: Database, config: Config, bot_username: str | None)
 async def claim_admin(db: Database, config: Config, code: str, user_id: int) -> None:
     """Make ``user_id`` an admin if ``code`` matches. Raises on refusal."""
     if not await claim_available(db, config):
-        raise ClaimError(
-            "this bot already has an admin, so it cannot be claimed again"
-        )
+        raise ClaimError(key="err.claim.taken")
 
     expected = await db.kv_get(CLAIM_CODE_KEY)
     if not expected:
-        raise ClaimError(
-            "no claim code has been issued. Restart the bot and read the code "
-            "from its log."
-        )
+        raise ClaimError(key="err.claim.no_code")
     if not secrets.compare_digest(code.strip(), expected):
-        raise ClaimError("that claim code is wrong")
+        raise ClaimError(key="err.claim.wrong")
 
     await add_runtime_admin(db, config, user_id)
     # Spent: a code that still worked afterwards would be a standing backdoor.
