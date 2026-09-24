@@ -146,6 +146,21 @@ class HttpConfig:
 
 
 @dataclass
+class WmsSettings:
+    """The PikPak warehouse (pikpak_wms) inside the bot. Off unless asked for."""
+
+    enabled: bool = False
+    """Run WMS's scheduled jobs in the bot process (WMS_ENABLED)."""
+
+    account: int | None = None
+    """Whose PikPak drive WMS manages (WMS_ACCOUNT, a Telegram user id). Unset:
+    the first admin who connected an account, else the shared account."""
+
+    shared_account: bool = False
+    """WMS_ACCOUNT=shared: always the shared account from the environment."""
+
+
+@dataclass
 class Config:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     access: AccessConfig = field(default_factory=AccessConfig)
@@ -153,6 +168,7 @@ class Config:
     delivery: DeliveryConfig = field(default_factory=DeliveryConfig)
     pikpak: PikPakConfig = field(default_factory=PikPakConfig)
     http: HttpConfig = field(default_factory=HttpConfig)
+    wms: WmsSettings = field(default_factory=WmsSettings)
     log_level: str = "INFO"
     language: str = i18n.DEFAULT_LANGUAGE
     """Which catalogue :func:`tgmd.i18n.t` reads. Never affects stored values."""
@@ -500,6 +516,16 @@ def load_config(path: Path | None = None) -> Config:
         url_ttl=_env_int("HTTP_URL_TTL", int(_get(data, "http", "url_ttl", default=3600))),
     )
 
+    account_raw = os.environ.get("WMS_ACCOUNT") or _get(data, "wms", "account", default="")
+    account_ids = parse_id_list(account_raw)
+    wms = WmsSettings(
+        enabled=parse_bool(
+            os.environ.get("WMS_ENABLED"), parse_bool(_get(data, "wms", "enabled", default=False))
+        ),
+        account=account_ids[0] if account_ids else None,
+        shared_account=str(account_raw).strip().lower() == "shared",
+    )
+
     return Config(
         telegram=telegram,
         access=access,
@@ -507,6 +533,7 @@ def load_config(path: Path | None = None) -> Config:
         delivery=delivery,
         pikpak=pikpak,
         http=http,
+        wms=wms,
         log_level=_env_str("LOG_LEVEL", str(_get(data, "log_level", default="INFO"))).upper(),
         # POSIX LANG is deliberately not consulted: images set it to C.UTF-8
         # for unrelated reasons, and that is not a UI decision.

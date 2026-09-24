@@ -19,6 +19,11 @@ ENV SESSION_DIR=/data/sessions \
     DATA_DIR=/data/db \
     DOWNLOAD_DIR=/data/downloads
 
+# `wms ...` runs the warehouse command line on the bot's own PikPak account:
+#   docker compose run --rm bot wms plans
+RUN printf '#!/bin/sh\nexec python -m tgmd.wms "$@"\n' > /usr/local/bin/wms \
+    && chmod 755 /usr/local/bin/wms
+
 RUN useradd --create-home --uid 10001 tgmd \
     && mkdir -p /data/sessions /data/db /data/downloads \
     && chown -R tgmd:tgmd /data /app

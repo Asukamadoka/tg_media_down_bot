@@ -145,10 +145,28 @@ class Config(BaseModel):
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
 
 
+def _first_existing(env: str, name: str, default: Path) -> Path:
+    """The ``env`` path when set; else ``$DATA_DIR/<name>`` if it exists; else ``default``.
+
+    ``$DATA_DIR`` comes second so a container keeps its WMS files on the
+    data volume (``/data/db`` in the image) with no extra setting, while a
+    checkout keeps using ``config/``.
+    """
+    raw = os.environ.get(env, "").strip()
+    if raw:
+        return Path(raw)
+    on_volume = data_dir() / name
+    return on_volume if on_volume.exists() else default
+
+
 def config_path() -> Path:
-    """``WMS_CONFIG`` when set, else ``config/wms.yaml``."""
-    raw = os.environ.get("WMS_CONFIG", "").strip()
-    return Path(raw) if raw else DEFAULT_CONFIG_PATH
+    """``WMS_CONFIG``, else ``$DATA_DIR/wms.yaml`` if present, else ``config/wms.yaml``."""
+    return _first_existing("WMS_CONFIG", "wms.yaml", DEFAULT_CONFIG_PATH)
+
+
+def rules_path() -> Path:
+    """``WMS_RULES``, else ``$DATA_DIR/rules.yaml`` if present, else ``config/rules.yaml``."""
+    return _first_existing("WMS_RULES", "rules.yaml", DEFAULT_RULES_PATH)
 
 
 def load_config(path: Path | None = None) -> Config:

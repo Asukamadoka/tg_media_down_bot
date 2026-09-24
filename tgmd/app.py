@@ -29,6 +29,7 @@ from .resolver import Resolver
 from .setup import SetupWizard, stored_user_session
 from .tasks import JobQueue
 from .webserver import FileServer
+from .wms import WmsInBot
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ class Application:
         self.bot = None
         self.user = None
         self.route: MediaRoute | None = None
+        self.wms: WmsInBot | None = None
         self._stopping = asyncio.Event()
 
     async def start(self) -> None:
@@ -143,6 +145,10 @@ class Application:
         )
         self.handlers.attach_wizard(self.wizard)
         self.handlers.register()
+
+        # The warehouse runs on the PikPak account connected above (WMS_ENABLED).
+        self.wms = WmsInBot(config, self.pikpak)
+        await self.wms.start()
 
         # Write the command menu and profile text ourselves, so nobody has to
         # paste them into @BotFather.
@@ -241,6 +247,8 @@ class Application:
 
     async def stop(self) -> None:
         log.info("shutting down")
+        if self.wms is not None:
+            await self.wms.stop()
         if self.queue is not None:
             await self.queue.stop()
         if self.file_server is not None:

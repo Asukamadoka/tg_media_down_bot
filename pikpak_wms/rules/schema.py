@@ -8,7 +8,6 @@ a rule touches.
 
 from __future__ import annotations
 
-import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +16,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from ..config import DEFAULT_RULES_PATH
+from ..config import rules_path
 from ..core.errors import WmsError
 from ..core.models import normalize_path
 from . import template as templates
@@ -246,12 +245,6 @@ class RuleSet(_Strict):
                 raise RulesError(f"no rule called {', '.join(missing)}")
             return [known[name] for name in names]
         return [r for r in self.rules if r.enabled and (stage is None or r.stage == stage)]
-
-
-def rules_path() -> Path:
-    """``WMS_RULES`` when set, else ``config/rules.yaml``."""
-    raw = os.environ.get("WMS_RULES", "").strip()
-    return Path(raw) if raw else DEFAULT_RULES_PATH
 
 
 def parse_rules(data: Any, *, origin: str = "rules") -> RuleSet:
