@@ -311,3 +311,57 @@ class TestPlatformConfiguration:
         config = load_config(write_config(tmp_path, MINIMAL_YAML))
         assert config.http.port == 8080
         assert not config.http.enabled
+
+
+class TestMediaDirectory:
+    def test_it_defaults_to_the_download_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path / "dl"))
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.download.media_root == tmp_path / "dl"
+
+    def test_it_can_point_at_a_nas_share(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MEDIA_DIR", "/media/nas")
+        monkeypatch.setenv("LOCAL_URL_PREFIX", "smb://10.10.10.2/media/")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.download.media_root == Path("/media/nas")
+        assert config.download.local_url_prefix == "smb://10.10.10.2/media/"
+
+    def test_the_default_layout_keeps_the_original_name(self, tmp_path):
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.download.media_template == "{chat}/{name}"
+
+    def test_an_unknown_field_in_the_media_template_is_fatal(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MEDIA_TEMPLATE", "{chat}/{nope}")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        with pytest.raises(ConfigError, match="media_template"):
+            config.validate()
+
+    def test_auto_is_a_valid_default_mode(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEFAULT_MODE", "auto")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        config.validate()
+        assert config.delivery.default_mode == "auto"
+
+
+class TestDownloadTuning:
+    def test_four_connections_by_default(self, tmp_path):
+        assert load_config(write_config(tmp_path, MINIMAL_YAML)).download.connections == 4
+
+    def test_more_than_eight_is_capped_with_a_warning(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DOWNLOAD_CONNECTIONS", "32")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert any("using 8" in w for w in config.validate())
+
+    def test_zero_connections_is_fatal(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DOWNLOAD_CONNECTIONS", "0")
+        with pytest.raises(ConfigError, match="connections"):
+            load_config(write_config(tmp_path, MINIMAL_YAML)).validate()
+
+    def test_direct_media_is_off_by_default(self, tmp_path):
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.telegram.direct_media == "off"
+
+    def test_direct_media_rejects_a_typo(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TG_DIRECT_MEDIA", "yes")
+        with pytest.raises(ConfigError, match="TG_DIRECT_MEDIA"):
+            load_config(write_config(tmp_path, MINIMAL_YAML)).validate()

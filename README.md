@@ -179,10 +179,17 @@ rebuilding the image loses nothing.
 
 - **`telegram`** (default) — the bot uploads the file back to you. It uses
   MTProto rather than the HTTP Bot API, so the ceiling is 2 GiB rather than
-  50 MiB. Anything larger stays on disk instead, and the bot says so.
-- **`local`** — the file stays on the server under `DOWNLOAD_DIR` and the bot
-  replies with the path. Useful when the server is also your media host.
+  50 MiB. Anything larger is kept in the media directory instead, and the
+  bot says so.
+- **`local`** — the file is kept on the server, under `MEDIA_DIR` with its
+  original name (`{chat}/{name}` by default, `MEDIA_TEMPLATE` to change it),
+  and the bot replies with where to find it. Kept files are never deleted.
+  Set `LOCAL_URL_PREFIX` (say `smb://10.10.10.2/media/`) and the reply is a
+  path you can paste straight into a file manager.
 - **`pikpak`** — the file is transferred into PikPak. See below.
+- **`auto`** — whatever can be forwarded comes back through Telegram, in
+  seconds (see *Upload cache*); whatever is restricted is downloaded and kept
+  in the media directory, to be watched on the NAS rather than pushed on.
 
 ## PikPak
 
@@ -258,7 +265,7 @@ the credentials are discarded as soon as they have been exchanged for one.
 | Command | Purpose |
 | --- | --- |
 | `/help` | what the bot understands |
-| `/mode [telegram\|local\|pikpak]` | show or set your destination |
+| `/mode [telegram\|local\|pikpak\|auto]` | show or set your destination |
 | `/status` | jobs currently queued or running |
 | `/cancel [id]` | cancel one job, or all of yours |
 | `/stats` | your recent jobs and total transferred |
@@ -286,6 +293,9 @@ The settings worth knowing about:
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `download.concurrent` | 2 | parallel downloads across all users |
+| `download.media_dir` | `DOWNLOAD_DIR` | where kept files go (`MEDIA_DIR`), e.g. a NAS share |
+| `download.media_template` | `{chat}/{name}` | layout under the media directory (`MEDIA_TEMPLATE`) |
+| `download.local_url_prefix` | none | prefix for kept files' paths in replies (`LOCAL_URL_PREFIX`) |
 | `download.connections` | 4 | connections per large file (`DOWNLOAD_CONNECTIONS`, at most 8); 1 turns parallel download off |
 | `telegram.direct_media` | off | `auto` downloads from Telegram's media-only endpoints first, falling back to the ordinary one (`TG_DIRECT_MEDIA`) |
 | `download.max_batch` | 50 | cap on messages expanded from one range link |

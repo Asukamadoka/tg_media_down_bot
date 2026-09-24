@@ -136,7 +136,7 @@ CATALOG: dict[str, dict[str, str]] = {
                          '• media sent or forwarded to me directly\n'
                          '\n'
                          '<b>Commands</b>\n'
-                         '/mode — where files should go: telegram, local or pikpak\n'
+                         '/mode — where files should go: telegram, local, pikpak or auto\n'
                          '/status — what I am working on\n'
                          '/cancel [id] — stop one job, or everything\n'
                          '/stats — your recent jobs\n'
@@ -190,7 +190,9 @@ CATALOG: dict[str, dict[str, str]] = {
                             '\n'
                             '<code>/mode telegram</code> — send the file back to you\n'
                             "<code>/mode local</code> — keep it on the server's disk\n"
-                            '<code>/mode pikpak</code> — transfer it into PikPak'
+                            '<code>/mode pikpak</code> — transfer it into PikPak\n'
+                            '<code>/mode auto</code> — send it back if it can be forwarded, '
+                            'otherwise keep it on the NAS'
                         ),
         'mode.unknown': 'Unknown mode {choice}. Pick one of: {modes}',
         'mode.pikpak_none': (
@@ -205,6 +207,7 @@ CATALOG: dict[str, dict[str, str]] = {
         'mode.name.telegram': 'telegram',
         'mode.name.local': 'local',
         'mode.name.pikpak': 'pikpak',
+        'mode.name.auto': 'auto',
         'status.empty': 'Nothing in your queue.',
         'status.header': '<b>{count} item(s) in your queue</b>',
         'state.queued': 'queued',
@@ -478,7 +481,7 @@ CATALOG: dict[str, dict[str, str]] = {
                          '• 直接发给我或转发给我的媒体\n'
                          '\n'
                          '<b>命令</b>\n'
-                         '/mode — 文件送到哪里：telegram、local 或 pikpak\n'
+                         '/mode — 文件送到哪里：telegram、local、pikpak 或 auto\n'
                          '/status — 我正在处理什么\n'
                          '/cancel [id] — 取消某个任务，或全部取消\n'
                          '/stats — 你最近的任务\n'
@@ -527,7 +530,8 @@ CATALOG: dict[str, dict[str, str]] = {
                             '\n'
                             '<code>/mode telegram</code> — 把文件传回给你\n'
                             '<code>/mode local</code> — 留在服务器磁盘上\n'
-                            '<code>/mode pikpak</code> — 转存进 PikPak'
+                            '<code>/mode pikpak</code> — 转存进 PikPak\n'
+                            '<code>/mode auto</code> — 能转发就秒传给你，受限的存到 NAS'
                         ),
         'mode.unknown': '不认识的模式 {choice}。只能是以下之一：{modes}',
         'mode.pikpak_none': (
@@ -542,6 +546,7 @@ CATALOG: dict[str, dict[str, str]] = {
         'mode.name.telegram': 'telegram（传回给你）',
         'mode.name.local': 'local（留在服务器）',
         'mode.name.pikpak': 'pikpak（转存网盘）',
+        'mode.name.auto': 'auto（能转发就秒传，受限的存 NAS）',
         'status.empty': '你的队列是空的。',
         'status.header': '<b>你的队列里有 {count} 项</b>',
         'state.queued': '排队中',

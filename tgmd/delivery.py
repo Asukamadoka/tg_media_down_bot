@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 from pikpakapi import DownloadStatus
 from telethon import TelegramClient
@@ -17,7 +19,7 @@ from .config import Config
 from .db import Database
 from .downloader import MediaInfo
 from .pikpak import PikPakError, PikPakService
-from .utils import escape_html, human_size
+from .utils import escape_html, human_size, unique_path
 from .webserver import FileServer
 
 log = logging.getLogger(__name__)
@@ -189,19 +191,46 @@ class Delivery:
 
     # ----------------------------------------------------------------- local
 
-    async def to_local(self, path: Path, info: MediaInfo) -> DeliveryResult:
-        """Leave the file on disk and report where it landed."""
+    async def to_local(
+        self, path: Path, info: MediaInfo, *, keep_at: Path | None = None
+    ) -> DeliveryResult:
+        """Keep the file on the NAS and say where it is.
+
+        ``keep_at`` moves it there first, for a file that was downloaded into
+        the working directory and only later turned out to be one to keep
+        (too large to upload, say). Kept files are never deleted afterwards,
+        whatever ``delete_after_delivery`` says: keeping them is the point.
+        """
+        if keep_at is not None and keep_at != path and path.exists():
+            keep_at = unique_path(keep_at)
+            keep_at.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(shutil.move, str(path), str(keep_at))
+            path = keep_at
         size = path.stat().st_size if path.exists() else (info.size or 0)
-        try:
-            shown = path.relative_to(Path.cwd())
-        except ValueError:
-            shown = path
         return DeliveryResult(
             mode="local",
-            summary=f"saved to <code>{escape_html(str(shown))}</code> ({human_size(size)})",
+            summary=f"saved to <code>{escape_html(self.local_address(path))}</code> "
+            f"({human_size(size)})",
             kept_local=True,
             remote_path=str(path),
         )
+
+    def local_address(self, path: Path) -> str:
+        """How the user should find a kept file.
+
+        With LOCAL_URL_PREFIX (say ``smb://10.10.10.2/media/``) it is that plus
+        the path inside the media directory, ready to paste into a file
+        manager. Without it, the path as the container sees it.
+        """
+        download = self._config.download
+        prefix = download.local_url_prefix
+        try:
+            inside = path.resolve().relative_to(download.media_root.resolve())
+        except ValueError:
+            return str(path)
+        if not prefix:
+            return str(download.media_root / inside)
+        return prefix.rstrip("/") + "/" + quote(inside.as_posix())
 
     # ---------------------------------------------------------------- pikpak
 

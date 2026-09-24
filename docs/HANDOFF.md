@@ -322,3 +322,64 @@ docker pull ghcr.io/asukamadoka/tg_media_down_bot:sha-2424ad2
 
 1. **`TG_DIRECT_MEDIA` 何时改成默认 `auto`。** 按简报，等 Cowork 的实测数字。如果实测直连明显更快且稳定，下一个阶段我把默认值改成 `auto`，或者只在 `deploy/restricted-network/docker-compose.yml` 里设 `auto`（后者不影响其他部署方式，我倾向这个）。
 2. **30 分钟的「直连失败冷却」是拍的数。** 如果 NAS 的线路时好时坏，可能需要调短；目前没有做成配置项。
+
+---
+
+## 阶段 2d · 智能路由与媒体目录
+
+### 这一阶段做了什么
+
+- **新模式 `auto`**（默认模式不变，用户自己 `/mode auto` 选）：
+  - 能转发的 → 走 2a 的快路发回 Telegram（没有缓存频道时下载再上传，和 telegram 模式一样）；
+  - 受限的 → 下载到 **NAS 媒体目录**，回复访问路径，不再推到任何地方；
+  - 直接发给 bot 的媒体 → 存进媒体目录（发回给发送者没有意义）。
+  - `auto` 是落库值，按 i18n 红线本身不翻译；显示名为「auto（能转发就秒传，受限的存 NAS）」，帮助文案里 `/mode auto` 保留英文关键词。
+- **媒体目录**：
+  - 新增 `MEDIA_DIR`，**默认等于 `DOWNLOAD_DIR`**，不设时文件的位置与以前一致。
+  - local 模式、auto 模式里受限的文件、超过 2 GB 上传上限而留下的文件，都落在这里。要留下的文件**直接下载到媒体目录**，不在工作目录里转一手。
+  - **保留原文件名**：新增 `MEDIA_TEMPLATE`，默认 `{chat}/{name}`（按频道名分文件夹，文件名就是原名；同名时自动加 ` (1)`，不覆盖）。`FILENAME_TEMPLATE` 只管工作目录里的临时文件，行为不变。
+  - `DELETE_AFTER_DELIVERY` 对留下的文件永远不生效。
+  - 新增可选 `LOCAL_URL_PREFIX`，例如 `smb://10.10.10.2/media/`。设了之后，回复里给出的是「前缀 + 媒体目录内的相对路径」（已做 URL 编码，空格是 `%20`），可以直接粘进文件管理器；不设就显示容器内路径。
+- 顺带修正 `deploy/restricted-network/docker-compose.yml` 里一条过时注释：没有公网地址时开 `HTTP_ENABLED` 已经不会 exit 2 了（阶段 1 A2）。
+
+**一处可察觉的行为变化**：以前 local 模式的文件名带消息编号前缀（`频道/123_视频.mp4`），现在是原文件名（`频道/视频.mp4`），这是简报 2d 的要求。已有的旧文件不动。想要旧格式，设 `MEDIA_TEMPLATE={chat}/{message_id}_{name}`。
+
+### NAS 上要改什么
+
+**必须做的：无。** 不设 `MEDIA_DIR` 时一切照旧。
+
+**要把文件放进 NAS 共享文件夹时**（需要先定下面的待决问题 1）：
+
+1. 在 NAS 上确定媒体共享目录的宿主机路径，并让容器用户能写：`chown -R 10001:10001 <该目录>`，或给 uid 10001 写权限。
+2. 在 `deploy/restricted-network/docker-compose.yml` 的 `bot` 服务里，取消注释并填好（模板里已留好占位）：
+   ```yaml
+   environment:
+     MEDIA_DIR: "/media"
+     LOCAL_URL_PREFIX: "smb://<NAS 地址>/<共享名>/"
+   volumes:
+     - ./data:/data
+     - <NAS 上的媒体共享目录>:/media
+   ```
+3. `docker compose up -d bot`（改了 volumes，`up -d` 会重建 `bot`；`proxy` 不用动）。
+
+### 用户需要在 Telegram 里做什么
+
+想用智能路由时发一次 `/mode auto`。不发就保持原来的模式。
+
+### 给 Cowork 的核验手段
+
+1. `/mode auto`，发一个**可转发**频道的视频链接：应秒到（有缓存频道时）或下载后上传（没有时），媒体目录里不出现新文件。
+2. 发一个**受限**频道的视频链接：回复「saved to …」，文件出现在 `<媒体目录>/<频道名>/<原文件名>`；设了 `LOCAL_URL_PREFIX` 时回复里是 `smb://…` 形式，复制到电脑的文件管理器里应能直接打开。
+3. 同一个受限链接再发一次：出现 `原文件名 (1).扩展名`，旧文件不被覆盖。
+4. 验收第二条「受限频道的视频走并行下载并落到媒体目录」：看日志里这个文件的 `downloaded ...` 行，`over 4 connection(s)`，路径在媒体目录下。
+
+### 怎么回滚
+
+- 不想用 auto：`/mode telegram`。
+- 媒体目录：去掉 `MEDIA_DIR`，文件回到 `DOWNLOAD_DIR`。
+- 整体回滚：镜像 `sha-19b2d80`（阶段 2c）。
+
+### 待决问题
+
+1. **媒体目录的宿主机路径**（简报明确要求不猜）。需要用户和 Cowork 确定：NAS 上哪个共享文件夹、SMB 共享名是什么、局域网访问地址（用于 `LOCAL_URL_PREFIX`）。compose 模板里是占位。
+2. **按频道分文件夹是否符合用户习惯。** 默认 `{chat}/{name}`；也可以是按日期（`{date}/{name}`）或全部平铺（`{name}`）。一行配置就能改，需要用户选。

@@ -207,6 +207,8 @@ class Harness:
                 max_batch=options.pop("max_batch", 10),
                 progress_interval=1,
                 delete_after_delivery=options.pop("delete_after_delivery", True),
+                media_dir=options.pop("media_dir", None),
+                local_url_prefix=options.pop("local_url_prefix", ""),
             ),
             delivery=DeliveryConfig(
                 max_upload_size_mb=options.pop("max_upload_mb", 2000),
@@ -669,3 +671,109 @@ class TestForwardFastPath:
         await harness.run(await harness.job("telegram"))
         assert reader.forwarded == [1]  # the second one never reached the reader
         assert "served from cache" in harness.bot.last_status
+
+
+
+class TestAutoMode:
+    """CC_BRIEF 2d: forwardable goes back through Telegram, restricted stays."""
+
+    async def test_forwardable_is_copied_back_like_telegram_mode(self, make):
+        reader = FakeReader()
+        harness = await make(
+            bot=ForwardingBot(), forward_with=reader, cache_chat_id=CACHE_CHAT
+        )
+        row = await harness.run(await harness.job("auto"))
+        assert row["status"] == "done"
+        assert harness.downloader.downloaded == []
+        assert harness.bot.uploads_to(USER) == ["forwarded-7001"]
+
+    async def test_restricted_is_kept_in_the_media_directory(self, make, tmp_path):
+        media = tmp_path / "nas-media"
+        harness = await make(
+            bot=ForwardingBot(),
+            forward_with=FakeReader(),
+            cache_chat_id=CACHE_CHAT,
+            media_dir=media,
+            resolver=FakeResolver([media_message(1, "Film.mkv")], noforwards=True),
+        )
+        row = await harness.run(await harness.job("auto"))
+        assert row["status"] == "done"
+        # Original name, by chat, and kept despite delete_after_delivery.
+        assert (media / "Some Channel" / "Film.mkv").is_file()
+        assert harness.bot.uploads_to(USER) == []
+        assert harness.files_on_disk() == []  # nothing in the working directory
+
+    async def test_forwardable_without_a_cache_channel_is_still_sent_back(self, make):
+        harness = await make(bot=ForwardingBot(), forward_with=FakeReader())
+        await harness.run(await harness.job("auto"))
+        assert len(harness.bot.uploads_to(USER)) == 1
+        assert harness.files_on_disk() == []
+
+    async def test_without_a_forwarder_the_flags_still_decide(self, make, tmp_path):
+        media = tmp_path / "m"
+        harness = await make(
+            media_dir=media,
+            resolver=FakeResolver([media_message(1)], noforwards=True),
+        )
+        await harness.run(await harness.job("auto"))
+        assert (media / "Some Channel" / "clip.mp4").is_file()
+
+    async def test_media_sent_to_the_bot_is_kept(self, make, tmp_path):
+        media = tmp_path / "m"
+        harness = await make(media_dir=media)
+        job = await harness.job("auto", JobKind.INBOUND, message=media_message(9, "v.mp4"))
+        await harness.run(job)
+        assert (media / "direct" / "v.mp4").is_file()
+
+
+class TestMediaDirectory:
+    async def test_local_mode_keeps_the_original_name(self, make, tmp_path):
+        media = tmp_path / "media"
+        harness = await make(
+            media_dir=media, resolver=FakeResolver([media_message(1, "Holiday 2026.mp4")])
+        )
+        await harness.run(await harness.job("local"))
+        assert (media / "Some Channel" / "Holiday 2026.mp4").is_file()
+
+    async def test_a_name_clash_gets_a_number_not_an_overwrite(self, make, tmp_path):
+        media = tmp_path / "media"
+        harness = await make(
+            media_dir=media,
+            resolver=FakeResolver([media_message(1, "a.mp4"), media_message(2, "a.mp4")]),
+        )
+        await harness.run(await harness.job("local"))
+        assert sorted(p.name for p in (media / "Some Channel").iterdir()) == [
+            "a (1).mp4", "a.mp4",
+        ]
+
+    async def test_the_reply_gives_a_path_to_paste(self, make, tmp_path):
+        harness = await make(
+            media_dir=tmp_path / "media",
+            local_url_prefix="smb://10.10.10.2/media/",
+            resolver=FakeResolver([media_message(1, "Holiday 2026.mp4")]),
+        )
+        await harness.run(await harness.job("local"))
+        assert (
+            "smb://10.10.10.2/media/Some%20Channel/Holiday%202026.mp4"
+            in harness.bot.last_status
+        )
+
+    async def test_without_media_dir_nothing_moves(self, make):
+        # MEDIA_DIR defaults to DOWNLOAD_DIR, so existing deployments keep
+        # finding their files where they always were.
+        harness = await make()
+        await harness.run(await harness.job("local"))
+        assert [p.name for p in harness.files_on_disk()] == ["clip.mp4"]
+
+    async def test_local_files_are_never_deleted(self, make, tmp_path):
+        harness = await make(media_dir=tmp_path / "m", delete_after_delivery=True)
+        await harness.run(await harness.job("local"))
+        assert (tmp_path / "m" / "Some Channel" / "clip.mp4").is_file()
+
+    async def test_too_large_to_upload_is_moved_to_the_media_directory(self, make, tmp_path):
+        media = tmp_path / "media"
+        harness = await make(max_upload_mb=0, media_dir=media)
+        row = await harness.run(await harness.job("telegram"))
+        assert row["status"] == "done"
+        assert (media / "Some Channel" / "clip.mp4").is_file()
+        assert harness.files_on_disk() == []
