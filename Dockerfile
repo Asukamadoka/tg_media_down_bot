@@ -10,6 +10,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY tgmd/ ./tgmd/
+COPY pikpak_wms/ ./pikpak_wms/
+COPY config/ ./config/
 
 # Runtime state lives on one volume so sessions, the database and downloads
 # all survive a container rebuild.

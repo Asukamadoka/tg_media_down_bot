@@ -2,6 +2,11 @@
 .env
 config.yaml
 config.yml
+# WMS: the real config and rules (the *.example.yaml files are committed),
+# and its token file wherever it is put.
+config/wms.yaml
+config/rules.yaml
+wms-token.json
 
 # Telegram / PikPak session state
 sessions/

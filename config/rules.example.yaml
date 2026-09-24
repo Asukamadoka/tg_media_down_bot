@@ -1,0 +1,68 @@
+# 规则集。复制为 config/rules.yaml 后修改。
+# 铁律 3：业务逻辑写在这里，不写在 Python 里。
+#
+# 匹配器：kind / name_regex / path_glob / mime
+#           min_size / max_size / older_than / newer_than
+# 动作原语：rename / move / copy / trash / star / share / create_folder
+# 模板过滤器：title / upper / lower / pad2 / date:%Y-%m
+version: 1
+
+rules:
+  # ---------- 上架 ----------
+  - name: 剧集入库上架
+    enabled: true
+    scope: /Inbox
+    match:
+      kind: file
+      name_regex: '(?P<show>.+?)[. ]S(?P<s>\d{2})E(?P<e>\d{2})'
+      min_size: 100MB
+    actions:
+      - rename:
+          template: '{show|title}.S{s}E{e}.{ext}'
+      - move:
+          to: '/Media/剧集/{show|title}/S{s}'
+          create_missing: true
+
+  - name: 电影入库上架
+    enabled: true
+    scope: /Inbox
+    match:
+      kind: file
+      name_regex: '(?P<title>.+?)[. \(](?P<year>(19|20)\d{2})[. \)]'
+      min_size: 500MB
+    actions:
+      - rename:
+          template: '{title|title} ({year}).{ext}'
+      - move:
+          to: '/Media/电影/{title|title} ({year})'
+          create_missing: true
+
+  # ---------- 整理 ----------
+  - name: 清理广告文件
+    enabled: true
+    scope: /Inbox
+    match:
+      kind: file
+      name_regex: '(?i)(最新地址|广告|种子搜|www\..*\.(com|net|xyz))'
+      max_size: 5MB
+    actions:
+      - trash: {}
+
+  # ---------- 清退 ----------
+  - name: 清退临时区
+    enabled: true
+    scope: /Temp
+    match:
+      older_than: 30d
+    actions:
+      - trash: {}
+
+  - name: 清退空目录
+    enabled: false
+    scope: /Media
+    match:
+      kind: folder
+      empty: true
+      older_than: 7d
+    actions:
+      - trash: {}
