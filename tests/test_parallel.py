@@ -404,7 +404,7 @@ def fake_sources(monkeypatch, *, error: Exception | None = None, count: int = 4)
     import contextlib
 
     @contextlib.asynccontextmanager
-    async def opener(client, dc_id, wanted, *, endpoints):
+    async def opener(client, dc_id, wanted, *, endpoints, on_refused=None):
         if error is not None:
             raise error
         yield [Source(content=b"z" * (20 * 1024 * 1024)) for _ in range(min(wanted, count))], (
@@ -450,3 +450,155 @@ class TestDownloaderUsesIt:
 
     async def test_the_connection_count_is_capped(self):
         assert Downloader(SequentialClient(), connections=50)._connections == 8  # noqa: SLF001
+
+
+# ------------------------------------------------ direct media route (2c)
+
+from telethon.tl.types import DcOption  # noqa: E402 - grouped with its tests
+
+from tgmd.parallel import MediaRoute, media_endpoints  # noqa: E402
+
+# The shape of what Cowork measured from the NAS: only dc4's IPv4 media
+# endpoint answered directly.
+DC_OPTIONS = [
+    DcOption(id=4, ip_address="149.154.167.91", port=443),
+    DcOption(id=4, ip_address="149.154.166.111", port=443, media_only=True),
+    DcOption(id=4, ip_address="2001:67c:4e8:f004::b", port=443, ipv6=True, media_only=True),
+    DcOption(id=4, ip_address="149.154.165.1", port=443, media_only=True, tcpo_only=True),
+    DcOption(id=4, ip_address="149.154.175.1", port=443, media_only=True, cdn=True),
+    DcOption(id=2, ip_address="149.154.167.50", port=443),
+    DcOption(id=1, ip_address="149.154.175.53", port=443),
+]
+
+
+class ConfiguredClient(FakeClient):
+    """A fake client that also carries Telegram's DC list, as Telethon does."""
+
+    _config = SimpleNamespace(dc_options=DC_OPTIONS)
+
+    async def _get_dc(self, dc_id):
+        return next(o for o in DC_OPTIONS if o.id == dc_id and not o.media_only)
+
+
+class TestMediaEndpoints:
+    async def test_only_usable_ipv4_media_endpoints_of_that_dc(self):
+        found = await media_endpoints(ConfiguredClient(), 4)
+        assert [o.ip_address for o in found] == ["149.154.166.111"]
+
+    async def test_a_dc_without_one_has_none(self):
+        assert await media_endpoints(ConfiguredClient(), 1) == []
+
+    def test_telethon_keeps_the_config_where_we_read_it(self):
+        # Private Telethon API, pinned like the others above.
+        assert hasattr(TelegramClient, "_config")
+
+
+class TestMediaRoute:
+    async def test_media_first_then_the_ordinary_endpoint(self):
+        found = await MediaRoute().endpoints(ConfiguredClient(), 4)
+        assert [o.ip_address for o in found] == ["149.154.166.111", "149.154.167.91"]
+
+    async def test_a_failed_route_is_skipped_for_a_while(self, monkeypatch):
+        clock = [1000.0]
+        monkeypatch.setattr("tgmd.parallel.time.monotonic", lambda: clock[0])
+        route = MediaRoute(retry_after=1800)
+        route.failed(4)
+        found = await route.endpoints(ConfiguredClient(), 4)
+        assert [o.ip_address for o in found] == ["149.154.167.91"]
+        clock[0] += 1801
+        assert route.usable(4)
+
+    def test_refusals_only_count_against_media_endpoints(self):
+        route = MediaRoute()
+        route.refused(DC_OPTIONS[0])  # an ordinary endpoint
+        assert route.usable(4)
+        route.refused(DC_OPTIONS[1])  # the media one
+        assert not route.usable(4)
+
+    async def test_a_refused_direct_endpoint_falls_through_to_the_proxy(self, fake_senders):
+        fake_senders.refuse = {"149.154.166.111"}
+        route = MediaRoute()
+        client = ConfiguredClient(home_dc=4)
+        async with telethon_sources(
+            client, 4, 2, endpoints=route.endpoints, on_refused=route.refused
+        ) as (_, endpoint):
+            assert endpoint.ip_address == "149.154.167.91"
+        assert not route.usable(4)
+
+    async def test_a_hanging_endpoint_times_out_quickly(self, fake_senders, monkeypatch):
+        # TCP that never completes: a firewall silently dropping packets.
+        real_connect = FakeSender.connect
+
+        async def maybe_hang(self, connection):
+            if connection[0] == "149.154.166.111":
+                await asyncio.Event().wait()
+            return await real_connect(self, connection)
+
+        monkeypatch.setattr(FakeSender, "connect", maybe_hang)
+        route = MediaRoute()
+        async with telethon_sources(
+            ConfiguredClient(home_dc=4), 4, 1,
+            endpoints=route.endpoints, on_refused=route.refused, connect_timeout=0.05,
+        ) as (_, endpoint):
+            assert endpoint.ip_address == "149.154.167.91"
+
+
+class TestDownloaderWithTheRoute:
+    def opener_recording(self, monkeypatch, *, break_direct: bool = False):
+        """A connection opener that remembers which endpoints it was offered."""
+        import contextlib
+
+        offered: list[list[str]] = []
+
+        @contextlib.asynccontextmanager
+        async def opener(client, dc_id, wanted, *, endpoints, on_refused=None):
+            options = await endpoints(client, dc_id)
+            offered.append([o.ip_address for o in options])
+            chosen = options[0]
+            if break_direct and chosen.media_only:
+                failing = {n: ConnectionError("reset") for n in range(1, 50)}
+                yield [Source(script=failing) for _ in range(wanted)], chosen
+                return
+            yield [Source(content=b"z" * (20 * 1024 * 1024)) for _ in range(wanted)], chosen
+
+        monkeypatch.setattr("tgmd.downloader.telethon_sources", opener)
+        return offered
+
+    async def test_a_small_file_on_a_direct_dc_uses_our_connection(self, tmp_path, monkeypatch):
+        # Telethon would fetch it over its main connection, through the proxy.
+        offered = self.opener_recording(monkeypatch)
+        client = SequentialClient()
+        client.__class__ = type("C", (SequentialClient, ConfiguredClient), {})
+        downloader = Downloader(client, connections=4, route=MediaRoute())
+        await downloader.download(big_message(size=2 * 1024 * 1024), tmp_path / "s.mkv")
+        assert client.sequential == 0
+        assert downloader.last.connections == 1
+        assert offered[0][0] == "149.154.166.111"
+        assert "media" in downloader.last.endpoint
+
+    async def test_a_small_file_elsewhere_is_left_to_telethon(self, tmp_path, monkeypatch):
+        self.opener_recording(monkeypatch)
+        client = SequentialClient()
+        client.__class__ = type("C", (SequentialClient, ConfiguredClient), {})
+        downloader = Downloader(client, connections=4, route=MediaRoute())
+        await downloader.download(big_message(size=2 * 1024 * 1024, dc_id=1), tmp_path / "s")
+        assert client.sequential == 1
+
+    async def test_a_direct_route_that_breaks_is_retried_via_the_proxy(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("tgmd.parallel.asyncio.sleep", _instant)
+        offered = self.opener_recording(monkeypatch, break_direct=True)
+        client = SequentialClient()
+        client.__class__ = type("C", (SequentialClient, ConfiguredClient), {})
+        route = MediaRoute()
+        downloader = Downloader(client, connections=4, route=route)
+        path = await downloader.download(big_message(), tmp_path / "b.mkv")
+        assert path.stat().st_size == 20 * 1024 * 1024
+        assert client.sequential == 0
+        assert offered == [["149.154.166.111", "149.154.167.91"], ["149.154.167.91"]]
+        assert not route.usable(4)
+
+
+async def _instant(*_args):
+    return None

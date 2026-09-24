@@ -262,3 +262,63 @@ docker pull ghcr.io/asukamadoka/tg_media_down_bot:sha-2424ad2
 
 1. **默认 4 条连接是否保守到位。** 简报给的默认值是 4，我照做了。每条连接都是用户主账号的，而 `concurrent`（同时处理的任务数，默认 2）会与之相乘：两个大文件同时下载就是 8 条连接。如果 Cowork 实测中看到 FloodWait 日志（`flood wait of ...s during a parallel download`），建议先把 `DOWNLOAD_CONNECTIONS` 降到 2–3，再看数字。
 2. **照片与小文件不走并行。** 照片通常只有几百 KB，10 MB 以下的文件多开连接得不偿失。这个阈值写在代码里（`MIN_PARALLEL_SIZE`），暂不做成配置项。
+
+---
+
+## 阶段 2c · 直连媒体线路
+
+### 这一阶段做了什么
+
+- **Cowork 实测的发现落地了**：NAS 不经代理能连上的只有三个 `media_only` 端点，其中 IPv4 的是 DC4 的 `149.154.166.111:443`。Telethon 挑端点时根本不看 `media_only`，所以以前即使线路通也用不上。现在下载用的连接是我们自己开的（阶段 2b），端点也由我们选。
+- 新配置 `TG_DIRECT_MEDIA=auto|off`，**默认 `off`**，按简报要求实测通过后再改成 `auto`。
+- `auto` 时的行为：
+  - 先试该 DC 的 `media_only` IPv4 端点（排除 IPv6、CDN、需要混淆的 `tcpo_only`），**与普通端点共用同一个授权密钥**，不产生新登录。
+  - **连不上**：每个端点最多等 10 秒，然后自动改用普通端点（经代理）。
+  - **连上了但传输中被重置**（简报担心的「防火墙在握手后重置」）：本文件自动改走普通端点重下一次。
+  - 以上任一情况都会把「该 DC 的直连」记为失败，**30 分钟内**所有下载直接走代理，不再每个文件都先撞一次墙。
+  - **文件恰好在账号主 DC 时**：Telethon 默认走主连接（经代理）。现在只要该 DC 有可用的媒体端点，即使是 10 MB 以下的小文件，也用我们自己的一条连接直连下载。没有媒体端点的 DC（实测 DC1/3/5）照旧交给 Telethon。
+- 实验开关：`python -m tgmd.bench <链接> --route normal|media|both`。`normal` 强制走 Telethon 会选的普通端点（经代理），`media` 只走媒体端点（直连失败时该行会显示 `Telethon default`，不会悄悄走代理冒充直连），`both` 对同一个文件每种连接数各跑一遍，两种路线相邻对比。
+- 每个文件的下载日志已含 `DC`，走直连时末尾会有 `via 149.154.166.111:443 media`。
+- `deploy/restricted-network/mihomo/config.example.yaml` 新增 `IP-CIDR,149.154.166.111/32,DIRECT,no-resolve`，位于 `MATCH` 之前。
+
+### NAS 上要改什么（按顺序）
+
+1. **同步 mihomo 规则**。在 NAS 真实的 mihomo `config.yaml` 的 `rules:` 里，`MATCH,PROXY` **之前**加一行：
+   ```yaml
+   - IP-CIDR,149.154.166.111/32,DIRECT,no-resolve
+   ```
+2. 拉新镜像，然后**两个一起重启**（`bot` 共享 `proxy` 的网络栈，单独重启 `proxy` 会让 `bot` 断网）：
+   ```bash
+   docker compose pull bot
+   docker compose up -d --force-recreate proxy bot
+   ```
+3. **先不要改 `TG_DIRECT_MEDIA`**，保持默认 `off`，先做下面的实测。
+
+### 给 Cowork 的核验手段（对应 §4 阶段 2 验收第三条）
+
+1. **找一个 DC4 的文件**。看平时的下载日志：
+   ```bash
+   docker compose logs bot | grep -o "from DC [0-9]" | sort | uniq -c
+   ```
+   这同时就是用户常看频道的 DC 分布，请把统计结果贴进验收记录，它决定这条优化能覆盖多少流量。挑一条日志里 `from DC 4` 的消息链接；或者直接对候选链接跑 bench，看 `dc` 列。
+2. **对比两条线路**，同一个文件：
+   ```bash
+   docker compose exec bot python -m tgmd.bench '<DC4 文件的链接>' --route both --connections 1,4
+   ```
+   `route=normal` 的行是经代理，`route=media` 的行是直连。如果 `media` 行的 `endpoint` 列显示 `Telethon default`，说明直连没通（日志里会有 `could not open a connection to 149.154.166.111:443` 或 `direct media download broke`）。
+3. **直连稳定且更快**，再在 compose 里设 `TG_DIRECT_MEDIA: "auto"`，重启 `bot`。之后下载日志里 DC4 的文件应带 `via 149.154.166.111:443 media`。
+4. 回退验证（可选）：临时去掉 mihomo 那条规则、重启两个容器，DC4 文件应在约 10 秒后自动改走代理并正常完成，日志里有 `direct media route to DC 4 failed; using the proxy for a while`。
+
+### 怎么回滚
+
+- 只关直连：`TG_DIRECT_MEDIA=off`（或不设），重启 `bot`。mihomo 那条规则留着无害：bot 不再连那个 IP。
+- 整体回滚：镜像 `sha-c758318`（阶段 2b）。
+
+### 后续项（本阶段不做）
+
+- **IPv6 的两个媒体端点**（DC2 `2001:67c:4e8:f002::b`、DC4 `2001:67c:4e8:f004::b`）。要用上它们，需要 mihomo `ipv6: true`、容器网络开启 IPv6，并在代码里放开对 IPv6 端点的过滤（`media_endpoints()` 里一行）。这会让 DC2 的文件也能直连。等 IPv4 这条实测有结论后再评估。
+
+### 待决问题
+
+1. **`TG_DIRECT_MEDIA` 何时改成默认 `auto`。** 按简报，等 Cowork 的实测数字。如果实测直连明显更快且稳定，下一个阶段我把默认值改成 `auto`，或者只在 `deploy/restricted-network/docker-compose.yml` 里设 `auto`（后者不影响其他部署方式，我倾向这个）。
+2. **30 分钟的「直连失败冷却」是拍的数。** 如果 NAS 的线路时好时坏，可能需要调短；目前没有做成配置项。

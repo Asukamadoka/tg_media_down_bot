@@ -26,10 +26,12 @@ from .parallel import (
     MAX_CONNECTIONS,
     MIN_PARALLEL_SIZE,
     EndpointChooser,
+    MediaRoute,
     ParallelUnavailable,
     default_endpoints,
     document_location,
     download_parts,
+    media_endpoints,
     telethon_sources,
 )
 from .utils import human_rate, human_size, sanitize_component
@@ -188,10 +190,14 @@ class Downloader:
         *,
         connections: int = 1,
         endpoints: EndpointChooser = default_endpoints,
+        route: MediaRoute | None = None,
     ) -> None:
         self._client = client
         self._connections = max(1, min(connections, MAX_CONNECTIONS))
         self._endpoints = endpoints
+        # TG_DIRECT_MEDIA=auto: prefer media endpoints, which on the NAS are
+        # reachable without the proxy. Overrides ``endpoints``.
+        self._route = route
         self.last: Transfer | None = None
 
     async def download(
@@ -243,12 +249,23 @@ class Downloader:
         return path
 
     async def _parallel(self, message, info: MediaInfo, destination: Path, progress, cancel):
-        """Try the multi-connection path. Returns None when it does not apply."""
+        """Try our own connections. Returns None when they do not apply.
+
+        Large documents use several. With a direct media route, smaller
+        documents use one of ours too, because Telethon's own download would
+        go over its main connection, through the proxy.
+        """
         document = getattr(message, "document", None)
         size = info.size or 0
-        if self._connections < 2 or document is None or size < MIN_PARALLEL_SIZE:
+        if document is None or not size:
             return None
         dc_id = document.dc_id
+        if self._connections >= 2 and size >= MIN_PARALLEL_SIZE:
+            count = self._connections
+        elif await self._direct_route_to(dc_id):
+            count = 1
+        else:
+            return None
 
         async def refresh():
             # A file reference expires; the message, fetched again, carries a
@@ -260,34 +277,63 @@ class Downloader:
                 raise ParallelUnavailable("the message is gone")
             return document_location(fresh.document)
 
+        route = self._route
+        chooser = route.endpoints if route is not None else self._endpoints
+        attempts = [chooser] if route is None else [chooser, default_endpoints]
+        for index, endpoints in enumerate(attempts):
+            used = None
+            try:
+                async with telethon_sources(
+                    self._client,
+                    dc_id,
+                    count,
+                    endpoints=endpoints,
+                    on_refused=route.refused if route is not None else None,
+                ) as (sources, endpoint):
+                    used = endpoint
+                    await download_parts(
+                        sources,
+                        location=document_location(document),
+                        size=size,
+                        path=destination,
+                        progress=progress,
+                        cancel=cancel,
+                        refresh=refresh,
+                        flood_ceiling=_FLOOD_WAIT_CEILING,
+                    )
+                    return Transfer(
+                        size=size,
+                        seconds=0.0,
+                        connections=len(sources),
+                        dc_id=dc_id,
+                        endpoint=_endpoint_label(endpoint),
+                    )
+            except ParallelUnavailable as exc:
+                self._cleanup(destination)
+                direct = getattr(used, "media_only", False)
+                if direct and route is not None and index + 1 < len(attempts):
+                    # Connected directly, then broke: a firewall that lets the
+                    # handshake through and resets the transfer. Try the
+                    # proxied endpoint before giving up on parallel.
+                    route.failed(dc_id)
+                    log.info("direct media download broke (%s); retrying via the proxy", exc)
+                    continue
+                log.info("parallel download not possible (%s); using one connection", exc)
+                return None
+            except BaseException:
+                self._cleanup(destination)
+                raise
+        return None
+
+    async def _direct_route_to(self, dc_id: int) -> bool:
+        """True when a direct media route to this DC is on and exists."""
+        if self._route is None or not self._route.usable(dc_id):
+            return False
         try:
-            async with telethon_sources(
-                self._client, dc_id, self._connections, endpoints=self._endpoints
-            ) as (sources, endpoint):
-                await download_parts(
-                    sources,
-                    location=document_location(document),
-                    size=size,
-                    path=destination,
-                    progress=progress,
-                    cancel=cancel,
-                    refresh=refresh,
-                    flood_ceiling=_FLOOD_WAIT_CEILING,
-                )
-                return Transfer(
-                    size=size,
-                    seconds=0.0,
-                    connections=len(sources),
-                    dc_id=dc_id,
-                    endpoint=_endpoint_label(endpoint),
-                )
-        except ParallelUnavailable as exc:
-            self._cleanup(destination)
-            log.info("parallel download not possible (%s); using one connection", exc)
-            return None
-        except BaseException:
-            self._cleanup(destination)
-            raise
+            return bool(await media_endpoints(self._client, dc_id))
+        except Exception:  # an optimisation must never fail a download
+            log.debug("could not list media endpoints for DC %s", dc_id, exc_info=True)
+            return False
 
     async def _sequential(self, message, destination: Path, progress, cancel) -> Path:
         """Telethon's own download, over one connection, with retries."""

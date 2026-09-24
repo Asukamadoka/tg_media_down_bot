@@ -14,6 +14,8 @@ from .utils import ALLOWED_TEMPLATE_FIELDS, parse_bool, parse_id_list, template_
 
 MODES = ("telegram", "local", "pikpak")
 
+DIRECT_MEDIA_CHOICES = ("auto", "off")
+
 # Mirrors tgmd.parallel.MAX_CONNECTIONS, which imports Telethon; config does not.
 MAX_DOWNLOAD_CONNECTIONS = 8
 
@@ -31,6 +33,8 @@ class TelegramConfig:
     bot_token: str = ""
     user_session: str = ""
     session_dir: Path = Path("sessions")
+    direct_media: str = "off"
+    """``auto`` downloads from Telegram's media-only endpoints when it can."""
 
     @property
     def user_session_file(self) -> Path:
@@ -161,6 +165,12 @@ class Config:
         if missing:
             raise ConfigError(
                 "missing required settings: " + ", ".join(missing)
+            )
+
+        if self.telegram.direct_media not in DIRECT_MEDIA_CHOICES:
+            raise ConfigError(
+                "TG_DIRECT_MEDIA must be one of "
+                f"{', '.join(DIRECT_MEDIA_CHOICES)}, got {self.telegram.direct_media!r}"
             )
 
         if self.delivery.default_mode not in MODES:
@@ -334,6 +344,9 @@ def load_config(path: Path | None = None) -> Config:
         session_dir=Path(
             _env_str("SESSION_DIR", str(_get(data, "telegram", "session_dir", default="sessions")))
         ),
+        direct_media=_env_str(
+            "TG_DIRECT_MEDIA", str(_get(data, "telegram", "direct_media", default="off"))
+        ).lower(),
     )
 
     access = AccessConfig(

@@ -12,6 +12,7 @@ ENV_VARS = (
     "TG_API_HASH",
     "TG_BOT_TOKEN",
     "TG_USER_SESSION",
+    "TG_DIRECT_MEDIA",
     "SESSION_DIR",
     "ADMIN_USER_IDS",
     "ALLOWED_USER_IDS",

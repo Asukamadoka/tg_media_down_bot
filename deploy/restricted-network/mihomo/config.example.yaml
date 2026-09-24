@@ -75,4 +75,10 @@ rules:
   - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
   - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
   - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  # Telegram 的 DC4 媒体专用端点。2026-09-23 实测从 NAS 宿主机不经代理可直连，
+  # 且只有它（和两个 IPv6 媒体端点）能直连。配合 TG_DIRECT_MEDIA=auto，存放在
+  # DC4 的文件下载字节流绕开代理节点；API 调用仍走下面的 MATCH,PROXY。
+  # 直连失败时 bot 会自动改走普通端点（经代理），所以这条规则不会让下载失败。
+  # IPv6 的两个端点需要 ipv6: true 和容器网络开启 IPv6，暂未启用。
+  - IP-CIDR,149.154.166.111/32,DIRECT,no-resolve
   - MATCH,PROXY

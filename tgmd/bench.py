@@ -6,6 +6,13 @@ real network rather than guessed::
 
     python -m tgmd.bench https://t.me/c/1234567890/42
     python -m tgmd.bench https://t.me/somechannel/42 --connections 1,4,8
+    python -m tgmd.bench https://t.me/c/1234567890/42 --route both
+
+``--route`` is the experiment switch for direct media endpoints
+(``TG_DIRECT_MEDIA``): ``normal`` uses the endpoint Telethon would, which on
+the NAS goes through the proxy; ``media`` uses only the DC's media-only
+endpoint, which the mihomo rule sends direct; ``both`` runs each connection
+count once each way, on the same file, one after the other.
 
 It reads through the same account the bot does (``TG_USER_SESSION``, the
 session saved by ``/setup telegram``, or the session file), and runs happily
@@ -31,6 +38,7 @@ from .config import ConfigError, load_config
 from .db import Database
 from .downloader import Downloader, has_downloadable_media
 from .links import LinkError, parse_message_link
+from .parallel import MediaRoute, default_endpoints, media_endpoints
 from .resolver import ResolveError, Resolver
 from .setup import stored_user_session
 from .utils import human_rate, human_size
@@ -59,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=parse_counts,
         default=[1, 4],
         help="comma-separated connection counts to compare (default: 1,4)",
+    )
+    parser.add_argument(
+        "--route",
+        choices=("config", "normal", "media", "both"),
+        default="config",
+        help="which endpoints to download from (default: whatever TG_DIRECT_MEDIA says)",
     )
     parser.add_argument("--keep", action="store_true", help="keep the downloaded copies")
     return parser
@@ -125,25 +139,43 @@ async def run(args: argparse.Namespace) -> int:
             print("that message has no file", file=sys.stderr)
             return 1
 
-        print(f"{'connections':>11}  {'size':>10}  {'seconds':>8}  {'rate':>12}  dc  endpoint")
+        routes = ["normal", "media"] if args.route == "both" else [args.route]
+        print(
+            f"{'route':>6}  {'connections':>11}  {'size':>10}  {'seconds':>8}  "
+            f"{'rate':>12}  dc  endpoint"
+        )
         for count in args.connections:
-            target = work / f"run-{count}.bin"
-            downloader = Downloader(client, connections=count)
-            await downloader.download(message, target)
-            transfer = downloader.last
-            print(
-                f"{transfer.connections:>11}  {human_size(transfer.size):>10}  "
-                f"{transfer.seconds:>8.1f}  {human_rate(transfer.rate):>12}  "
-                f"{transfer.dc_id if transfer.dc_id is not None else '?':>2}  "
-                f"{transfer.endpoint or 'Telethon default'}"
-            )
-            if not args.keep:
-                target.unlink(missing_ok=True)
+            for route in routes:
+                target = work / f"run-{count}-{route}.bin"
+                downloader = _downloader(client, count, route, config)
+                await downloader.download(message, target)
+                transfer = downloader.last
+                print(
+                    f"{route:>6}  {transfer.connections:>11}  {human_size(transfer.size):>10}  "
+                    f"{transfer.seconds:>8.1f}  {human_rate(transfer.rate):>12}  "
+                    f"{transfer.dc_id if transfer.dc_id is not None else '?':>2}  "
+                    f"{transfer.endpoint or 'Telethon default'}"
+                )
+                if not args.keep:
+                    target.unlink(missing_ok=True)
         return 0
     finally:
         await client.disconnect()
         if not args.keep:
             shutil.rmtree(work, ignore_errors=True)
+
+
+def _downloader(client, count: int, route: str, config) -> Downloader:
+    """A downloader forced onto one route, so the rows compare like with like."""
+    if route == "normal":
+        return Downloader(client, connections=count, endpoints=default_endpoints)
+    if route == "media":
+        # Media endpoints only: if the direct route fails, the row says so
+        # (it falls back to "Telethon default") instead of quietly proxying.
+        return Downloader(client, connections=count, endpoints=media_endpoints)
+    if config.telegram.direct_media == "auto":
+        return Downloader(client, connections=count, route=MediaRoute())
+    return Downloader(client, connections=count)
 
 
 def main(argv: list[str] | None = None) -> int:
