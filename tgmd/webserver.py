@@ -16,7 +16,7 @@ import logging
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -105,11 +105,17 @@ class FileServer:
     """Serves registered local files at unguessable, expiring URLs."""
 
     def __init__(
-        self, config: HttpConfig, secret: str, *, portal: RouteProvider | None = None
+        self,
+        config: HttpConfig,
+        secret: str,
+        *,
+        portal: RouteProvider | None = None,
+        routes: Sequence[RouteProvider] = (),
     ) -> None:
         self._config = config
         self._secret = secret
         self._portal = portal
+        self._routes = tuple(routes)
         self._files: dict[str, ServedFile] = {}
         self._streams: dict[str, ServedStream] = {}
         self._runner: web.AppRunner | None = None
@@ -130,6 +136,8 @@ class FileServer:
         app.router.add_get("/s/{token}/{name}", self._handle_stream)
         if self._portal is not None:
             self._portal.register(app.router)
+        for provider in self._routes:
+            provider.register(app.router)
 
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()

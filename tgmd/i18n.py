@@ -142,6 +142,7 @@ CATALOG: dict[str, dict[str, str]] = {
                          '/stats — your recent jobs\n'
                          '/pikpak — PikPak account, quota and target folder\n'
                          '/pikpak login — connect your own PikPak account\n'
+                         '/wms — PikPak warehouse: plans, audit, undo (admins)\n'
                          '/id — your Telegram user id\n'
                          '/help — this message'
                      ),
@@ -378,6 +379,7 @@ CATALOG: dict[str, dict[str, str]] = {
         'menu.cancel': 'Stop one job, or all of them',
         'menu.stats': 'Your recent jobs',
         'menu.pikpak': 'PikPak account, quota and folder',
+        'menu.wms': 'PikPak warehouse: plans, audit, undo',
         'menu.verify': 'Check my identity and configuration',
         'menu.id': 'Your Telegram user id',
         'profile.about': (
@@ -460,6 +462,44 @@ CATALOG: dict[str, dict[str, str]] = {
                          ),
         'job.summary': '{icon} {succeeded}/{total} delivered',
         'job.nothing_delivered': '❌ Nothing was delivered.',
+        # ---- PikPak warehouse (WMS)
+        'wms.off': 'The PikPak warehouse is off. Set WMS_ENABLED=true and restart the bot.',
+        'wms.admins_only': 'Only admins can manage the PikPak warehouse.',
+        'wms.status': (
+            '<b>PikPak warehouse</b>\n'
+            '{files} entries indexed, last stocktake {when}.\n'
+            '{open} plan(s) waiting. Scheduled: {jobs}.'
+        ),
+        'wms.panel.open': 'Open the warehouse panel',
+        'wms.panel.unavailable': 'The panel is not available: {reason}.',
+        'wms.panel.title': 'PikPak warehouse',
+        'wms.panel.subtitle': 'Plans wait here until you apply them. Every change can be undone.',
+        'wms.panel.tab_plans': 'Plans',
+        'wms.panel.tab_audit': 'Audit',
+        'wms.panel.loading': 'Loading…',
+        'wms.panel.no_plans': 'No plans waiting.',
+        'wms.panel.no_audit': 'No changes yet.',
+        'wms.panel.view': 'View',
+        'wms.panel.apply': 'Apply',
+        'wms.panel.discard': 'Discard',
+        'wms.panel.undo': 'Undo',
+        'wms.panel.back': 'Back',
+        'wms.panel.confirm_apply': 'Apply this plan to your PikPak drive?',
+        'wms.panel.confirm_discard': 'Discard this plan without applying it?',
+        'wms.panel.confirm_undo': 'Undo this change?',
+        'wms.panel.done': 'Done.',
+        'wms.panel.unreachable': 'Could not reach the bot.',
+        'wms.panel.status': (
+            '{files} entries indexed, last stocktake {when}, {open} plan(s) waiting'
+        ),
+        'wms.panel.bad_request': 'Malformed request.',
+        'wms.panel.who': 'Telegram could not confirm who you are. Reopen this page from the bot.',
+        'wms.panel.admins_only': 'Only admins can use the warehouse panel.',
+        'wms.panel.no_http': (
+            'the bot has no public HTTPS address to serve the panel from '
+            '(HTTP_ENABLED and PUBLIC_BASE_URL)'
+        ),
+        'wms.panel.no_https': 'PUBLIC_BASE_URL is {url}; Telegram opens Mini Apps only over HTTPS',
     },
     "zh": {
         'help.body': (
@@ -487,6 +527,7 @@ CATALOG: dict[str, dict[str, str]] = {
                          '/stats — 你最近的任务\n'
                          '/pikpak — PikPak 账号、容量和目标文件夹\n'
                          '/pikpak login — 连接你自己的 PikPak 账号\n'
+                         '/wms — PikPak 仓储：计划、审计、撤销（管理员）\n'
                          '/id — 你的 Telegram 用户 id\n'
                          '/help — 这条消息'
                      ),
@@ -710,6 +751,7 @@ CATALOG: dict[str, dict[str, str]] = {
         'menu.cancel': '取消一个任务，或全部取消',
         'menu.stats': '你最近的任务',
         'menu.pikpak': 'PikPak 账号、容量和文件夹',
+        'menu.wms': 'PikPak 仓储：计划、审计、撤销',
         'menu.verify': '检查我的身份和配置',
         'menu.id': '你的 Telegram 用户 id',
         'profile.about': (
@@ -782,5 +824,39 @@ CATALOG: dict[str, dict[str, str]] = {
                          ),
         'job.summary': '{icon} 已投递 {succeeded}/{total}',
         'job.nothing_delivered': '❌ 没有任何内容被投递。',
+        'wms.off': 'PikPak 仓储未开启。请设置 WMS_ENABLED=true 并重启 bot。',
+        'wms.admins_only': '只有管理员能管理 PikPak 仓储。',
+        'wms.status': (
+            '<b>PikPak 仓储</b>\n'
+            '索引 {files} 条，上次盘点 {when}。\n'
+            '{open} 个计划待确认。定时任务：{jobs}。'
+        ),
+        'wms.panel.open': '打开仓储面板',
+        'wms.panel.unavailable': '面板不可用：{reason}。',
+        'wms.panel.title': 'PikPak 仓储',
+        'wms.panel.subtitle': '计划在这里等你确认后才执行。每一处改动都可以撤销。',
+        'wms.panel.tab_plans': '计划',
+        'wms.panel.tab_audit': '审计',
+        'wms.panel.loading': '加载中……',
+        'wms.panel.no_plans': '没有等待确认的计划。',
+        'wms.panel.no_audit': '还没有任何改动。',
+        'wms.panel.view': '查看',
+        'wms.panel.apply': '确认执行',
+        'wms.panel.discard': '丢弃',
+        'wms.panel.undo': '撤销',
+        'wms.panel.back': '返回',
+        'wms.panel.confirm_apply': '确定把这个计划应用到你的 PikPak 网盘吗？',
+        'wms.panel.confirm_discard': '确定丢弃这个计划（不执行）吗？',
+        'wms.panel.confirm_undo': '确定撤销这处改动吗？',
+        'wms.panel.done': '完成。',
+        'wms.panel.unreachable': '连不上 bot。',
+        'wms.panel.status': '索引 {files} 条，上次盘点 {when}，{open} 个计划待确认',
+        'wms.panel.bad_request': '请求格式不对。',
+        'wms.panel.who': 'Telegram 无法确认你的身份。请从 bot 里重新打开此页面。',
+        'wms.panel.admins_only': '只有管理员能使用仓储面板。',
+        'wms.panel.no_http': (
+            'bot 没有可以提供面板的公网 HTTPS 地址（HTTP_ENABLED 与 PUBLIC_BASE_URL）'
+        ),
+        'wms.panel.no_https': 'PUBLIC_BASE_URL 是 {url}；Telegram 只通过 HTTPS 打开 Mini App',
     },
 }

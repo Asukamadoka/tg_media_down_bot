@@ -46,10 +46,17 @@ class BotHandlers:
         self._portal = portal
         self._user_client = user_client
         self._wizard = None
+        self._wms = None
+        self._wms_panel = None
 
     @property
     def _has_user_client(self) -> bool:
         return self._user_client is not None
+
+    def attach_wms(self, wms, panel) -> None:
+        """Give the handlers the warehouse and its panel (tgmd.wms, tgmd.wms_panel)."""
+        self._wms = wms
+        self._wms_panel = panel
 
     def attach_wizard(self, wizard) -> None:
         """Give the handlers the setup wizard, before registering."""
@@ -73,6 +80,7 @@ class BotHandlers:
         add(self.on_stats, events.NewMessage(pattern=r"^/stats\b"))
         add(self.on_pikpak, events.NewMessage(pattern=r"^/pikpak\b"))
         add(self.on_verify, events.NewMessage(pattern=r"^/verify\b"))
+        add(self.on_wms, events.NewMessage(pattern=r"^/wms\b"))
         add(self.on_message, events.NewMessage(incoming=True))
 
     # --------------------------------------------------------- access control
@@ -542,6 +550,36 @@ class BotHandlers:
         await notice.edit(report.render_html(), parse_mode="html", link_preview=False)
 
     # ------------------------------------------------------------- dispatching
+
+    async def on_wms(self, event) -> None:
+        """The PikPak warehouse: status and the panel button (admins only)."""
+        if not await self._authorized(event):
+            return
+        if not self._config.access.is_admin(event.sender_id):
+            await event.reply(t("wms.admins_only"))
+            return
+        embedded = self._wms.embedded if self._wms is not None else None
+        if embedded is None:
+            await event.reply(t("wms.off"))
+            return
+        status = await embedded.status()
+        text = t(
+            "wms.status",
+            files=status["files"],
+            when=(status["last_stocktake"] or "-")[:16].replace("T", " "),
+            open=status["open_plans"],
+            jobs=", ".join(status["jobs"]) or "-",
+        )
+        url = self._wms_panel.url if self._wms_panel is not None else None
+        # Telegram refuses web_app buttons outside a private chat.
+        if url is not None and event.is_private:
+            await event.reply(text, parse_mode="html",
+                              buttons=webview_button(t("wms.panel.open"), url))
+            return
+        reason = self._wms_panel.unavailable_reason() if self._wms_panel else None
+        if reason:
+            text += "\n" + t("wms.panel.unavailable", reason=escape_html(reason))
+        await event.reply(text, parse_mode="html")
 
     async def on_message(self, event) -> None:
         """Handle anything that is not a command: links, or attached media."""

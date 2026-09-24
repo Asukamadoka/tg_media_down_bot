@@ -38,7 +38,8 @@ class WmsScheduler:
         self.ctx = ctx
         self.on_result = on_result
         self.deliver = deliver
-        self._lock = asyncio.Lock()
+        self.lock = asyncio.Lock()
+        """Held by every job, and by anything else that writes (the panel, /wms)."""
         self._scheduler: AsyncIOScheduler | None = None
 
     def jobs(self) -> list[ScheduledJob]:
@@ -65,7 +66,7 @@ class WmsScheduler:
         return [(job.id, str(job.trigger.timezone)) for job in self._scheduler.get_jobs()]
 
     async def run(self, job: ScheduledJob) -> JobResult | None:
-        async with self._lock:
+        async with self.lock:
             try:
                 result = await run_job(self.ctx, job, deliver=self.deliver)
             except Exception:
