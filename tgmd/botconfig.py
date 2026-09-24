@@ -38,6 +38,7 @@ COMMAND_NAMES: tuple[str, ...] = (
     "stats",
     "pikpak",
     "wms",
+    "do",
     "verify",
     "id",
 )

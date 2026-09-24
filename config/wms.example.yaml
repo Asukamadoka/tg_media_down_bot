@@ -82,3 +82,16 @@ schedule:
       apply: false
 
 # 日志跟随 bot 的 LOG_LEVEL，输出到标准输出（docker logs 可见）。
+
+# ---- 自然语言指令（docs/wms/M6-natural-language.md）----
+# 「按类型分类」「归档」「下载」分别指什么
+nl:
+  classify:
+    video: /Media/视频
+    image: /Media/图片
+    audio: /Media/音频
+    document: /Media/文档
+    archive: /Media/压缩包
+    subtitle: /Media/字幕
+  archive_root: /Archive     # 归档到 /Archive/<进网盘的年-月>
+  download_to: PikPak        # 下载到 NAS 媒体目录下的这个子目录

@@ -566,6 +566,49 @@ def run() -> None:
         asyncio.run(serve(state.config, _provider(state.config)))
 
 
+@app.command(name="do")
+def do_command(
+    sentence: list[str] = typer.Argument(..., help="one instruction, e.g. 下载今天转存的视频"),
+    apply_flag: bool | None = ApplyFlag,
+    limit: int | None = LimitFlag,
+) -> None:
+    """A sentence → a plan (natural-language commands, docs/wms/M6)."""
+    from ..nl.query import Clarification
+    from ..ops import nl as nl_ops
+
+    text = " ".join(sentence)
+    apply_now = _wants_apply(apply_flag)
+
+    async def work(ctx: Context):
+        result = await nl_ops.understand(ctx, text)
+        if not isinstance(result, nl_ops.Query):
+            return result, None, None
+        proposal = await nl_ops.make_proposal(ctx, result)
+        outcome = None
+        if apply_now and proposal.kind == "plan" and proposal.plan_id is not None:
+            outcome = await plans.apply(ctx, proposal.plan_id, limit=limit,
+                                        deliver=_deliver_for(ctx, proposal.plan))
+        elif apply_now and proposal.kind == "rule":
+            outcome = nl_ops.add_rules(ctx, proposal.rules, sentence=text)
+        return result, proposal, outcome
+
+    result, proposal, outcome = _run(work)
+    if result is None:
+        console.print(t("nl.not_understood"))
+        raise typer.Exit(code=1)
+    if isinstance(result, Clarification):
+        console.print(nl_ops.clarification_text(result), style="yellow")
+        raise typer.Exit(code=1)
+    for line in nl_ops.proposal_lines(proposal):
+        console.print(line, markup=False)
+    if isinstance(outcome, plans.ApplyReport):
+        _show_report(outcome)
+    elif outcome is not None:
+        console.print(t("nl.rule.added", path=outcome))
+    elif proposal.kind == "plan" and proposal.plan_id is not None:
+        console.print(t("cli.plan.dry_run_hint", id=proposal.plan_id), style="cyan")
+
+
 @app.command()
 def events(
     raw: bool = typer.Option(False, "--raw", help="print PikPak's answer untouched"),

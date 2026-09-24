@@ -22,14 +22,16 @@ from ..core.client import Provider
 from ..core.errors import AuthError, WmsError
 from ..core.models import ActionType
 from ..i18n import set_language, t
+from ..nl.query import Clarification, Query
 from ..rules.units import human_size
-from . import organize, outbound, plans
+from . import nl, organize, outbound, plans
 from .context import Context, open_context
 
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "AccountUnavailable", "EmbeddedWms", "WmsError", "run_command", "set_language",
+    "AccountUnavailable", "Clarification", "EmbeddedWms", "Query", "WmsError", "run_command",
+    "set_language",
 ]
 
 ProviderFactory = Callable[[], Provider]
@@ -58,6 +60,7 @@ class EmbeddedWms:
         self.on_result = on_result
         self.ctx: Context | None = None
         self._scheduler = None
+        self._translator = None
 
     async def start(self) -> list[str]:
         """Open the index and start the scheduler; returns the job names scheduled."""
@@ -88,7 +91,7 @@ class EmbeddedWms:
         job = job or ScheduledJob(name=name, cron="0 0 * * *")
         if apply is not None:
             job = job.model_copy(update={"apply": apply})
-        return await self._scheduler.run(job)
+        return await self._scheduler.run(job, notify=False)
 
     # ---------------------------------------------------- for the bot's views
     # The Mini App panel (M4) and /wms (M5) call these; every write takes the
@@ -145,6 +148,39 @@ class EmbeddedWms:
     async def undo(self, audit_id: int, *, apply_now: bool) -> plans.UndoOutcome:
         async with self._scheduler.lock:
             return await plans.undo(self._live, audit_id, apply_now=apply_now)
+
+    # ------------------------------------------- natural language (M6)
+
+    def _nl(self):
+        if self._translator is None:
+            self._translator = nl.from_environment()
+        return self._translator
+
+    async def understand(self, text: str) -> Any:
+        """A sentence → Query, Clarification, or None (not understood)."""
+        return await nl.understand(self._live, text, translator=self._nl())
+
+    @property
+    def last_translator(self) -> str:
+        return getattr(self._nl(), "last_used", None) or ""
+
+    async def propose(self, query: Any) -> Any:
+        async with self._scheduler.lock:
+            proposal = await nl.make_proposal(self._live, query)
+        proposal.translator = self.last_translator
+        return proposal
+
+    def proposal_lines(self, proposal: Any, *, limit: int = 8) -> list[str]:
+        return nl.proposal_lines(proposal, limit=limit)
+
+    def clarification_text(self, result: Any) -> str:
+        return nl.clarification_text(result)
+
+    async def add_rules(self, rules: list[Any], *, sentence: str) -> str:
+        async with self._scheduler.lock:
+            path = nl.add_rules(self._live, rules, sentence=sentence)
+        self._scheduler.reload_rules()
+        return str(path)
 
     @property
     def rules_file(self) -> str:

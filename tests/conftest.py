@@ -60,6 +60,13 @@ ENV_VARS = (
     "WMS_LANG",
     "PIKPAK_ENCODED_TOKEN",
     "ARIA2_SECRET",
+    "NL_BACKEND",
+    "NL_FALLBACK",
+    "NL_CLAUDE_MODEL",
+    "NL_CLAUDE_EFFORT",
+    "NL_OLLAMA_MODEL",
+    "OLLAMA_URL",
+    "ANTHROPIC_API_KEY",
     # Hosting platforms export these; they must not leak into tests.
     "PORT",
     "RENDER_EXTERNAL_URL",

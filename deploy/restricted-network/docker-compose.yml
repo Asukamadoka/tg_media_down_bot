@@ -59,6 +59,9 @@ services:
       # WMS_AUTO_SHELVE: "plan"
       # 让转存落在规则的 scope 里（示例规则的 scope 是 /Inbox）：
       # PIKPAK_FOLDER: "/Inbox"
+      # 自然语言指令：内置解析器总是先跑；解析不了的交给模型（见 .env.example 的 NL_*）
+      # NL_BACKEND: "ollama"
+      # OLLAMA_URL: "http://<NAS 地址>:11434"
     volumes:
       - ./data:/data
       # - <NAS 上的媒体共享目录>:/media
@@ -66,3 +69,15 @@ services:
 # 注意：bot 挂在 proxy 的网络栈上，重启 proxy 会掐断 bot 的连接。
 #       改完 mihomo 配置后要两个一起重启：
 #         docker compose restart proxy && docker compose restart bot
+
+# 可选：本地 Ollama（NL_BACKEND=ollama 时用）。NAS 是纯 CPU 推理，给它设内存上限，
+# 免得挤掉 bot 和 mihomo。用法：取消注释后 docker compose up -d ollama，
+# 再 docker compose exec ollama ollama pull qwen2.5:3b
+#  ollama:
+#    image: ollama/ollama:latest
+#    restart: unless-stopped
+#    mem_limit: 4g
+#    cpus: 2
+#    ports: ["11434:11434"]
+#    volumes:
+#      - ./data/ollama:/root/.ollama

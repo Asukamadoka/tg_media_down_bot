@@ -827,3 +827,107 @@ M4 提交信息里写的「10 个文件」不对，实际是 12 个（计数之�
 1. **离线下载的完成时机**：bot 报告磁力任务「完成」时，PikPak 那边有时还没下完。这时的计划里不会有这个文件，它会在下一次定时 organize（示例配置是每小时）或下一次入库时被补上。如果 Cowork 实测发现磁力的自动上架经常什么都找不到，可以考虑让 bot 等 PikPak 任务真正完成后再触发。
 2. 分享链接转存后文件落在哪（M2 待决问题 1）仍然未知，所以分享链接那一路不参与「目录没有被规则覆盖」的检查。
 3. M4 的公网 HTTPS 地址仍是面板的前提；`/wms` 命令和计划按钮**不需要**它，现在就能用。
+
+## 阶段 3 · WMS M6：自然语言指令
+
+规格：`docs/wms/M6-natural-language.md`（Cowork 起草，原样在仓库里）。
+
+### 这一阶段做了什么
+
+- **核心原则照办：模型只翻译，不执行。**
+  - 翻译器唯一的输出是经过 pydantic 校验的 `Query`（`pikpak_wms/nl/query.py`），字段按 M6 §3。
+  - Query 编译成 M2 的规则（映射按 §3），走同一条流水线：计划 → 确认 → 执行 → 审计。
+  - 有歧义就反问，不猜。永久删除不可达。
+- **三个后端，一个接口** `Translator.translate(text, now, tz) -> Query | Clarification | None`（`pikpak_wms/nl/translator.py`）：
+  - `rules`（`nl/rules_parser.py`，永远第一个跑）：确定性的中文解析器，覆盖 §4 列的全部说法。时间：今天 / 昨天 / 前天 / 本周 / 上周 / 本月 / 上个月 / 今年 / 去年 / 最近 N 天·周·个月 / N 天前 / 具体日期 / 日期区间；此外还有大小（含区间）、类型、扩展名、名称（包含 / 开头 / 结尾）、目录、意图关键词、每天·每周·每月·每小时（含几点）。
+    - **零误判的做法**：只有句子里**每一个**词都被认出来才接；有任何没认出的词（包括「不要」「除了」这类否定）就不接，交给模型；自相矛盾的（「今天和昨天」「两个目录」）也不接；路径里夹着指令词的（「/Media并删除图片」）也不接。
+  - `claude`：官方 `anthropic` SDK，结构化输出（`output_config.format` 绑定 Query 的 JSON Schema），`effort: low`。默认模型 `claude-opus-5`，可用 `NL_CLAUDE_MODEL` 改。用默认模型时带上服务端的拒答回退（`fallbacks: "default"`），被安全策略拒答时由服务端换模型重试；换成其他模型时不带这个参数。
+  - `ollama`：`/api/chat`，`format` 传同一份 JSON Schema（约束解码），`temperature 0`。默认 `qwen2.5:3b`，地址 `OLLAMA_URL`。
+  - 配置：`NL_BACKEND=rules|claude|ollama`（默认 rules），`NL_FALLBACK=none|claude|ollama`。顺序永远是 rules → NL_BACKEND → NL_FALLBACK；某个模型挂了就记日志、跳过，不影响 rules 能接的句子。
+- **Bot 入口**：
+  - `/do <一句话>`；admin 在私聊里发的纯文本（不是链接、不是命令）也进翻译器。发链接下载的老行为不变：链接优先匹配。普通用户和群聊不受影响。
+  - 计划消息附 [确认执行] [修改] [取消]。
+  - 反问之后直接回复就行，回复会接在原句后面重新理解；点 [修改] 同理。
+  - 按钮只对发起人有效，用过就作废；[取消] 会把存下的计划一起丢弃。
+- **计划里写明怎么理解的**：
+  - 意图；
+  - 范围；
+  - 时间的起止和时区；
+  - 一句「「转存 / 入库」按文件进网盘的时间（created_time）判断」；
+  - 大小、类型、扩展名、名称条件；
+  - 目的地（下载会写出 NAS 上的完整路径）；
+  - 命中多少个文件、共多大、前几个文件名（新的在前）。
+  - 这些说明以 key 加参数的形式落库，展示时才翻译（红线 4）。
+- **定时**：「每天……」「每周……」这类句子不生成一次性计划，而是生成规则。
+  - 确认后以追加文本的方式写进规则文件，原文件的注释和格式都保留；原句会作为注释写在规则上方。写完立即校验，失败就还原原文件。
+  - 写入后立即排进调度，不用重启；每条规则可以有自己的 `schedule: {cron, apply}`。
+  - 为了铁律 1，`apply` 默认是 false：每次到点只生成计划，然后**主动发给所有 admin**，附确认按钮。同一份计划只发一次；手动触发的运行不会重复通知。
+- **预置规则模板**：M2 已经放进 `config/rules.example.yaml`。M6 的「分类 / 归档 / 下载」分别对应哪个目录，写在 `wms.yaml` 的 `nl:` 段（`classify`、`archive_root`、`download_to`），有默认值。
+  - 「按类型分类」会跳过已经在分类目录里的文件，不会把 `/Media/视频` 里的东西再搬一遍。
+- **定向下载 = 出库 local**：规则的 `outbound` 动作新增 `via`，NL 的「下载」固定走 `local`，也就是下载到 NAS 媒体目录下的 `PikPak/` 子目录，不受 `outbound.downloader` 默认值影响。
+- **命令行**：`wms do "<一句话>" [--apply]`。有了它，Cowork 不用手机也能测完整流程。
+- **README 写明了隐私边界**：模型只收到那句话、schema 和当前日期时间时区。文件名、目录列表等网盘内容一概不发。默认的 `NL_BACKEND=rules` 什么都不外发。
+- **依赖**：`anthropic>=1.8,<2`。
+
+### 验收证据
+
+- **评测集** `tests/nl/cases.yaml`：70 条中文，其中 48 条给出期望的 Query（包括用户原话）、14 条应当反问、8 条应当拒绝。三类里一共混有 5 条专门挑出来的易错句（否定句、一句两个动作、两个时间、路径吞掉后半句），用作回归。
+- **rules 后端**：覆盖率 **80.0%**（56/70），**零错误**，平均 0.4 ms。这项有测试（`test_rules_covers_seventy_percent_with_zero_wrong`），将来谁改坏了 CI 会拦住。
+  - 过程中抓到并修掉了 4 类误判：路径被转成小写；「昨天下载的图片」被当成下载指令；路径吞掉后半句；后面的条件悄悄覆盖前面的条件。前 3 类都已写进评测集回归；第 4 类由 `删除今天和昨天的视频` 等条目覆盖。
+- **端到端**（`test_wms_m6.py::TestTheUsersSentence`）：「下载今天转存到网盘的所有大于1GB的视频」→ rules 解析 → 计划里写着「进网盘时间晚于 2026-09-24 00:00（Asia/Shanghai）」「按文件进网盘的时间（created_time）判断」「命中 2 个文件，共 5.0 GiB」和两个文件名；昨天的、不到 1GB 的、今天的大图片都没算进去 → 执行 → 两个文件落到 NAS 媒体目录的 `PikPak/` 下 → 审计里有两条 `outbound`，`downloader: local`。
+- **Bot 流程**（`test_wms_m6_bot.py`，12 个）：`/do`、admin 私聊纯文本、普通用户和群聊不受影响、WMS 关闭时的行为、反问后合并、修改、取消、别人的按钮无效、定时规则写入并排程、定时计划发给 admin 且只发一次、PikPak 出错时给出说明而不是崩溃。
+- **模型后端**都用假的测（不联网）：
+  - 请求里只有「Now: … (time zone …)」和那句话；
+  - schema 只用结构化输出支持的写法；
+  - 有拒答、乱码、没有凭据、模型反问这几种情况的测试。
+- **真实镜像**（本地 Docker）：`python -m pikpak_wms.nl.eval --backend rules` 在镜像里跑，结果同上；`anthropic 1.8.0` 可导入；没有 key 时 `--backend claude` 70 条都报「没有凭据」的错，程序不崩。
+  - **镜像体积**：M3 时 267 MB → 294 MB（解压后），61.5 → 64.6 MB（压缩后），主要是 anthropic SDK。
+  - 本次构建时 Docker Hub 限流（429），基础镜像改从 `mirror.gcr.io/library/python:3.12-slim`（Docker 官方镜像在 Google 上的镜像）拉取；仓库里的 Dockerfile 没改。
+- 测试 923 → 961（+38：`test_wms_m6.py` 24、`test_wms_m6_bot.py` 12；另外 2 个是菜单测试随 `/do` 自动多出的参数化用例），3.11 与 3.12 全绿；ruff 零告警。
+
+### NAS 上要改什么
+
+前提是 M3 那一节的 `WMS_ENABLED=true`。
+
+- **只用 rules 后端**：什么都不用加。admin 私聊发一句话，或者 `/do 一句话`，就能用。
+- **加 Claude**：在 `.env` 里加 `ANTHROPIC_API_KEY=…`（**只放 .env，绝不入库**）和 `NL_BACKEND=claude`，然后重启 bot。流量走现有的 mihomo 代理。
+- **加 Ollama**：compose 文件末尾有一段注释掉的 `ollama` 服务，带 `mem_limit: 4g`、`cpus: 2`。取消注释后：
+  1. `docker compose up -d ollama`；
+  2. `docker compose exec ollama ollama pull qwen2.5:3b`；
+  3. bot 的环境变量里设 `NL_BACKEND=ollama`（或者把它作为 `NL_FALLBACK`）和 `OLLAMA_URL`（见待决问题 1）。
+- 「下载」会落到 bot 的 `MEDIA_DIR`（没设就是 `DOWNLOAD_DIR`）下的 `PikPak/`。**媒体目录的宿主机路径仍是阶段 2d 的待决问题**，在它确定之前，文件落在容器的 `/data/downloads/PikPak/`，也就是宿主机的 `./data/downloads/PikPak/`。
+
+### 用户需要在 Telegram 里做什么（端到端验收，M6 §7）
+
+1. 以 admin 身份私聊 bot，发：`下载今天转存到网盘的所有大于1GB的视频`。
+2. 收到计划：核对时区（Asia/Shanghai）、「按文件进网盘的时间判断」这一句、命中数、总大小、文件名，看是否和 PikPak 里今天的文件一致。
+3. 点 [确认执行]。文件会出现在 NAS 媒体目录的 `PikPak/` 下。
+4. `/wms`，或者面板的「审计」页，能看到 `outbound` 记录。
+
+### 给 Cowork 的核验手段
+
+```bash
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend rules          # 期望：覆盖率 0.8，wrong 0
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend claude --json  # 需要 .env 里的 ANTHROPIC_API_KEY
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend ollama         # 需要 OLLAMA_URL，CPU 上会慢
+docker compose run --rm bot wms do 下载今天转存到网盘的所有大于1GB的视频          # 只出计划，不执行
+```
+
+eval 报告里有模型后端的准确率和平均延迟，请把两个模型的这两个数字贴回这里。rules 后端「不接」的句子，正是模型后端要处理的部分。
+
+### 怎么回滚
+
+- 只关自然语言：没有单独的开关；不设 `NL_BACKEND` 就只剩本地解析器，什么都不外发。要完全不接收纯文本，关掉 `WMS_ENABLED`。
+- 删掉 `/do` 生成的定时规则：在 `./data/db/rules.yaml` 里删掉那几条（每条上方都有原句注释），重启 bot。
+- 镜像回滚到 M5 的 `sha-d3cabb3`。本阶段没有数据库改动。
+
+### 以后再说（M6 §8）
+
+把 WMS 的 ops 包装成 MCP server，让用户在 Claude 应用里说一句话就能管网盘。这一阶段按要求**不做**。要做的话，公网暴露之前必须先设计鉴权：至少要有单用户令牌和来源限制，并且与 Telegram 的 admin 身份打通。
+
+### 待决问题
+
+1. **bot 容器能不能访问 Ollama**：bot 用的是 `network_mode: service:proxy`（和 mihomo 共用网络栈），compose 服务名 `ollama` 能不能解析、mihomo 的 TUN 会不会拦截 `11434` 端口，我没法在这里验证。建议先试 `OLLAMA_URL=http://<NAS 局域网地址>:11434`；如果 mihomo 拦截了，就在 mihomo 规则里给这个地址加一条 `DIRECT`。
+2. **Claude 模型的选择**：默认 `claude-opus-5`（效果最好）。句子很短，按一句几百 token 算单次花费很低，但用户如果想更省，可以设 `NL_CLAUDE_MODEL=claude-haiku-4-5`。这要用户来决定，我没有替用户降级。
+3. **「最近 N 个月」按 N×30 天、「去年」按日历年**，是 rules 后端的约定，计划里会写明。用户若希望「上个月」「最近一个月」表示别的意思，告诉我改。
+4. **媒体目录的宿主机路径**（阶段 2d 的待决问题）决定了「下载到 NAS」最终落在哪里。

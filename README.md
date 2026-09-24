@@ -298,6 +298,32 @@ turns on two things in Telegram, both for admins only:
   straight away (`apply`). Rules only see folders in their `scope`, so point
   `PIKPAK_FOLDER` inside one, such as `/Inbox`; the bot says so if it is not.
 
+### Natural-language commands
+
+Admins can also just say what they want, in a private chat or with `/do`:
+
+> 下载今天转存到网盘的所有大于1GB的视频
+
+The bot replies with a plan before anything happens: how it read the
+sentence (the time zone, that 转存 means *when the file arrived in the
+drive*, the size and type filters), how many files match and their total
+size, the first few names, and where they would go, with *Apply*, *Edit*
+and *Cancel* buttons. Sentences starting with 每天 / 每周 become a rule in the
+rules file instead, which then makes a plan on schedule for you to confirm.
+Permanent deletion is never reachable this way.
+
+A built-in parser handles the common phrasings on its own (`NL_BACKEND=rules`,
+the default). Set `NL_BACKEND=claude` (with `ANTHROPIC_API_KEY`) or
+`NL_BACKEND=ollama` (with `OLLAMA_URL`) to hand the sentences it does not
+understand to a model; `NL_FALLBACK` names a second one.
+
+**Privacy.** The parser runs on your machine. When a model is used, it is sent
+exactly three things: the sentence you typed, the schema of the answer, and the
+current date, time and time zone. No file names, folder listings or anything
+else from your drive leave the machine; the model only translates, and the bot
+does the rest locally. With the default `NL_BACKEND=rules`, nothing is sent
+anywhere.
+
 ## Commands
 
 | Command | Purpose |
@@ -350,6 +376,7 @@ The settings worth knowing about:
 | `wms.enabled` | false | run the PikPak warehouse's scheduled jobs in the bot (`WMS_ENABLED`) |
 | `wms.account` | first admin with an account | whose PikPak drive the warehouse manages (`WMS_ACCOUNT`) |
 | `wms.auto_shelve` | `plan` | after a transfer into PikPak: `plan`, `apply` or `off` (`WMS_AUTO_SHELVE`) |
+| `NL_BACKEND` / `NL_FALLBACK` | `rules` / `none` | who reads sentences the parser does not: `claude` or `ollama` |
 
 Template fields: `chat`, `chat_id`, `message_id`, `topic_id`, `name`, `stem`,
 `ext`, `date`. An unknown field is rejected at startup rather than at the

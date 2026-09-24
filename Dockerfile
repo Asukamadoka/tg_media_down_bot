@@ -12,6 +12,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY tgmd/ ./tgmd/
 COPY pikpak_wms/ ./pikpak_wms/
 COPY config/ ./config/
+# The natural-language eval set, so `python -m pikpak_wms.nl.eval` runs in the image.
+COPY tests/nl/ ./tests/nl/
 
 # Runtime state lives on one volume so sessions, the database and downloads
 # all survive a container rebuild.
