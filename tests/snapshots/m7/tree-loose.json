@@ -1,0 +1,42 @@
+{
+ "actions": 339,
+ "by_rule": {
+  "tidy:group:create_folder": 33,
+  "tidy:group:move": 88,
+  "tidy:image:create_folder": 1,
+  "tidy:image:move": 1,
+  "tidy:misc:create_folder": 18,
+  "tidy:misc:move": 192,
+  "tidy:other:create_folder": 3,
+  "tidy:other:move": 3
+ },
+ "first_plan": {
+  "actions": 29,
+  "by_rule": {
+   "tidy:group:create_folder": 4,
+   "tidy:group:move": 10,
+   "tidy:misc:create_folder": 1,
+   "tidy:misc:move": 12,
+   "tidy:other:create_folder": 1,
+   "tidy:other:move": 1
+  },
+  "first": [
+   "  mkdir   /Cosplay/JK日常",
+   "  move    /Cosplay/(nicovideo) JK日常 (1).7z  →  /Cosplay/JK日常/(nicovideo) JK日常 (1).7z",
+   "  move    /Cosplay/JK日常 -part5.mp4  →  /Cosplay/JK日常/JK日常 -part5.mp4",
+   "  move    /Cosplay/JK日常 _31 4K.mp4  →  /Cosplay/JK日常/JK日常 _31 4K.mp4",
+   "  mkdir   /Cosplay/Nako",
+   "  move    /Cosplay/Nako 第39集.mp4  →  /Cosplay/Nako/Nako 第39集.mp4",
+   "  move    /Cosplay/[TG@channel] Nako _31.mp4  →  /Cosplay/Nako/[TG@channel] Nako _31.mp4",
+   "  mkdir   /Cosplay/Tokyo Walk",
+   "  move    /Cosplay/Tokyo Walk -part3.mp4  →  /Cosplay/Tokyo Walk/Tokyo Walk -part3.mp4",
+   "  move    /Cosplay/[TG@channel] Tokyo Walk -part2.zip  →  /Cosplay/Tokyo Walk/[TG@channel] Tokyo Walk -part2.zip",
+   "  mkdir   /Cosplay/小千",
+   "  move    /Cosplay/小千 EP16 x265.mp4  →  /Cosplay/小千/小千 EP16 x265.mp4"
+  ],
+  "sha256": "c9ceabd98a201fca59fca3e79dd650c0510b0c3e7cbb887a0cf73ecb719f2da3",
+  "source": "organize-tree:/Cosplay"
+ },
+ "plans": 18,
+ "sha256": "2c8ae77a48a20117a3a5ee2b349b99ed875936d76ca088bacf39cf0a98f29fa2"
+}

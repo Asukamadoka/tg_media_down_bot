@@ -27,6 +27,7 @@ from ..core.models import Action, ActionType, Plan
 from ..i18n import t
 from ..rules.actions import BATCH_LIMIT, DUE, PRIMITIVES, Deliver, Refused, Runtime
 from ..rules.units import human_size
+from . import protect
 from .context import Context
 
 log = logging.getLogger(__name__)
@@ -41,7 +42,13 @@ def fingerprint(plan: Plan) -> str:
 
 
 async def save(ctx: Context, plan: Plan) -> int | None:
-    """Store a non-empty plan as pending; an identical pending plan is reused."""
+    """Store a non-empty plan as pending; an identical pending plan is reused.
+
+    The whitelist is applied here, to every plan whatever made it (M7 §1):
+    ``plan`` loses its protected actions in place, so what is shown is what
+    is stored.
+    """
+    protect.apply_to(plan, await protect.load(ctx))
     if plan.is_empty:
         return None
     mark = fingerprint(plan)
@@ -69,6 +76,20 @@ async def discard(ctx: Context, plan_id: int) -> None:
                        id=plan_id, status=row["status"])
     await ctx.store.update_plan(plan_id, status=DISCARDED, progress=row["progress"],
                                 result=row["result"])
+
+
+async def supersede(ctx: Context, *, prefix: str, keep: set[int]) -> list[int]:
+    """Discard the open plans of a job (``source`` starting with ``prefix``)
+    that its newest run did not produce again: the index moved on, and an
+    old plan left open would only invite applying a stale view."""
+    dropped = []
+    for row in await ctx.store.plan_rows(status=OPEN, limit=1000):
+        if row["id"] in keep or not str(row["source"]).startswith(prefix):
+            continue
+        await ctx.store.update_plan(row["id"], status=DISCARDED, progress=row["progress"],
+                                    result=row["result"])
+        dropped.append(row["id"])
+    return dropped
 
 
 # ------------------------------------------------------------------ display
@@ -160,10 +181,13 @@ async def execute(
     plan_id: int | None = None,
     deliver: Deliver | None = None,
     undo_of: int | None = None,
+    protection: protect.Protection | None = None,
 ) -> tuple[int, ApplyReport]:
     """Carry out ``actions`` in order, at most ``budget`` of them.
 
     Returns how many were handled (applied, skipped or failed) and the report.
+    With ``protection``, an action touching protected content is skipped
+    (something may have been shared since the plan was made).
     """
     rt = Runtime(client=ctx.client, store=ctx.store, deliver=deliver)
     report = ApplyReport(plan_id=plan_id)
@@ -178,6 +202,8 @@ async def execute(
             handled += 1
             continue
         state = await primitive.check(action, ctx.store)
+        if state == DUE and protection is not None and protection.touches(action):
+            state = "protected"
         if state != DUE:
             report.skipped[state] = report.skipped.get(state, 0) + 1
             index += 1
@@ -193,6 +219,8 @@ async def execute(
             candidate = actions[end]
             other = PRIMITIVES[candidate.type]
             if other.batch_key(candidate) != key or candidate.file_id in failed_files:
+                break
+            if protection is not None and protection.touches(candidate):
                 break
             if await other.check(candidate, ctx.store) != DUE:
                 break
@@ -257,7 +285,8 @@ async def apply(
     budget = ctx.config.runtime.max_actions_per_run
     if limit is not None:
         budget = min(budget, max(limit, 0))
-    handled, report = await execute(ctx, todo, budget=budget, plan_id=plan_id, deliver=deliver)
+    handled, report = await execute(ctx, todo, budget=budget, plan_id=plan_id, deliver=deliver,
+                                    protection=await protect.load(ctx))
 
     progress = start + handled
     report.remaining = len(plan.actions) - progress

@@ -56,12 +56,30 @@ outbound:
   # local 模式的目标目录；不填则用 bot 的 MEDIA_DIR（再不行用 DOWNLOAD_DIR）
   # local_dir: /data/media
 
+# ---- 白名单（docs/wms/M7 §1）：任何操作都不碰 ----
+# 路径等于、或在这些目录之下的，一律豁免；移动一个包含受保护内容的目录也会被拦下。
+# shared: true 时，每次生成计划前实时读取 PikPak 的分享列表（过期的也算），
+# 分享过的文件或目录整棵子树受保护。bot 里也可以 /wms protect add|rm|ls。
+protect:
+  paths: ["/收藏", "/Cosplaytales Nako EP#1-24", "/小千"]
+  shared: true
+
+# ---- 去重（docs/wms/M7 §4）：受保护的副本一律保留 ----
+dedupe:
+  scope: /
+  keep_under: []            # 同组里优先保留这些目录下的那一份
+
 # ---- 定时任务（cron 表达式，按 timezone）----
 # 可用任务：stocktake / stocktake-full / inbound-poll / layout / organize / cleanup
+#           organize-tree / organize-inbox / dedupe / big-report（M7）
+# builtin: true（默认）时，下面没列出的 M7 任务按默认时间自动加上：
+#   organize-inbox 每小时、organize-tree 每天 04:30、dedupe 每周一 05:00（apply: true）、
+#   big-report 每周一 10:00。要关掉某个，就在 jobs 里列出它并写 enabled: false。
 # apply: false 只把计划存为「待确认」（wms plans 查看，wms apply <id> 执行）。
 # 任何定时任务都不会永久删除（铁律 2）。
 schedule:
   timezone: Asia/Shanghai
+  builtin: true
   jobs:
     - name: stocktake
       cron: "*/30 * * * *"

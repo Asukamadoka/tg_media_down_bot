@@ -279,7 +279,8 @@ cases:
   - text: 把高清的视频下载下来
     clarify: true     # 「高清」没有对应的字段
   - text: 帮我把重复的文件去掉
-    reject: true      # 去重走 wms organize --dedupe，不在 Query 里
+    expect:           # M7 起去重是一个意图（M6 时这里是 reject）
+      intent: dedupe
 
   # ---------------- 容易解析错的句子（回归用） ----------------
   - text: 不要删除/Inbox里的视频
@@ -300,3 +301,81 @@ cases:
     expect:
       intent: download
       filters: {min_size: 2147483648, kinds: [video]}
+
+  # ---------------- M7：整理、上架、去重、大文件（docs/wms/M7 §6） ----------------
+  - text: 整理一下 Pack From Shared
+    expect:
+      intent: organize_inbox
+      scope: {path: /Pack From Shared}
+  - text: 整理一下Telegram
+    expect:
+      intent: organize_inbox
+      scope: {path: /Telegram}
+  - text: Pack From Shared整理一下
+    expect:
+      intent: organize_inbox
+      scope: {path: /Pack From Shared}
+  - text: 整理入口目录
+    expect:
+      intent: organize_inbox
+  - text: 把入口目录上架
+    expect:
+      intent: organize_inbox
+  - text: 把大文件单独放一起
+    expect:
+      intent: organize_tree
+      action_args: {part: big}
+  - text: 大文件和大目录集中起来
+    expect:
+      intent: organize_tree
+      action_args: {part: big}
+  - text: 整理整个网盘
+    expect:
+      intent: organize_tree
+  - text: 帮我整理一下所有一级目录
+    expect:
+      intent: organize_tree
+  - text: 把散落的文件归集一下
+    expect:
+      intent: organize_tree
+  - text: 整理一下 /Cosplay
+    expect:
+      intent: organize_tree
+      scope: {path: /Cosplay}
+  - text: 去重
+    expect:
+      intent: dedupe
+  - text: 删除重复文件
+    expect:
+      intent: dedupe
+  - text: 查重
+    expect:
+      intent: dedupe
+  - text: 把/Media去重
+    expect:
+      intent: dedupe
+      scope: {path: /Media}
+  - text: 看看最大的文件
+    expect:
+      intent: big_report
+  - text: 列出最大的文件和目录
+    expect:
+      intent: big_report
+  - text: 看看/Media里最大的文件
+    expect:
+      intent: big_report
+      scope: {path: /Media}
+  - text: 哪些文件最占空间
+    expect:
+      intent: big_report
+  - text: 每周去重
+    clarify: true     # 去重已经每周自动跑；定时和筛选条件都不接
+  - text: 去重今天的视频
+    clarify: true
+  - text: 整理一下 /Cosplay/合集
+    clarify: true     # 整理以一级目录为单位
+  - text: 把重复的视频删掉
+    reject: true      # 只删视频的重复？rules 不接，交给模型或反问
+  - text: 删除大文件
+    clarify: true     # 多大算大？不是「大文件单独放」
+

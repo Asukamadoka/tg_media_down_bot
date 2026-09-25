@@ -551,6 +551,18 @@ class TestScheduler:
         scheduler = WmsScheduler(w.ctx)
         scheduler.start()
         try:
+            # M7 adds its four jobs unless schedule.builtin is false.
+            assert sorted(scheduler.scheduled()) == [
+                ("big-report", "Asia/Shanghai"), ("dedupe", "Asia/Shanghai"),
+                ("organize-inbox", "Asia/Shanghai"), ("organize-tree", "Asia/Shanghai"),
+                ("stocktake", "Asia/Shanghai"),
+            ]
+        finally:
+            scheduler.shutdown()
+        w.ctx.config.schedule.builtin = False
+        scheduler = WmsScheduler(w.ctx)
+        scheduler.start()
+        try:
             assert scheduler.scheduled() == [("stocktake", "Asia/Shanghai")]
         finally:
             scheduler.shutdown()

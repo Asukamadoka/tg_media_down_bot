@@ -16,6 +16,7 @@ from ..core.models import Action, ActionType, FileNode, Plan, normalize_path
 from ..rules.engine import evaluate
 from ..rules.schema import Rule, RuleSet, load_rules, rules_path
 from ..rules.units import human_size
+from . import protect
 from .context import Context
 
 
@@ -106,9 +107,12 @@ async def dedupe(
     """Files with the same content hash: keep one, send the rest to the trash.
 
     Which one stays: one under ``keep_under`` if any, else the oldest, else
-    the shortest path (docs/wms/EXTRAS.md §1).
+    the shortest path (docs/wms/EXTRAS.md §1). Protected copies (M7 §1) all
+    stay, and one of them is the keeper, so a group with a protected copy
+    loses only its unprotected ones.
     """
     keep_under = keep_under or []
+    protection = await protect.load(ctx)
     plan = Plan(source="dedupe", generated_at=now().isoformat(timespec="seconds"))
     groups: dict[str, list[FileNode]] = defaultdict(list)
     for node in await ctx.store.nodes_under(scope):
@@ -123,8 +127,12 @@ async def dedupe(
             plan.note("dedupe.size_mismatch", hash=digest[:12],
                       paths=", ".join(n.path for n in group))
             continue
-        keep = _keeper(group, keep_under)
-        drop = [node for node in group if node.file_id != keep.file_id]
+        guarded = [node for node in group if protection.covers(node.path)]
+        keep = _keeper(guarded or group, keep_under)
+        drop = [node for node in group
+                if node.file_id != keep.file_id and not protection.covers(node.path)]
+        if not drop:
+            continue
         for node in drop:
             plan.actions.append(
                 Action(ActionType.TRASH, node.file_id, before=node.snapshot(),

@@ -3,6 +3,7 @@
     python -m pikpak_wms.nl.eval --backend rules
     python -m pikpak_wms.nl.eval --backend claude     # needs ANTHROPIC_API_KEY
     python -m pikpak_wms.nl.eval --backend ollama     # needs OLLAMA_URL
+    python -m pikpak_wms.nl.eval --backend openai     # needs NL_OPENAI_BASE_URL, NL_OPENAI_MODEL
 
 For each case the translator either *handles* it (a Query or a question
 back) or declines (``None``: not understood, for another backend). Reported:
@@ -124,7 +125,8 @@ async def evaluate(translator: Translator, cases_file: Path = DEFAULT_CASES) -> 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m pikpak_wms.nl.eval")
-    parser.add_argument("--backend", choices=["rules", "claude", "ollama"], default="rules")
+    parser.add_argument("--backend", choices=["rules", "claude", "ollama", "openai"],
+                        default="rules")
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES)
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(argv)

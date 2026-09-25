@@ -24,7 +24,7 @@ from ..core.models import ActionType
 from ..i18n import set_language, t
 from ..nl.query import Clarification, Query
 from ..rules.units import human_size
-from . import nl, organize, outbound, plans
+from . import nl, organize, outbound, plans, protect, tidy
 from .context import Context, open_context
 
 log = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ class EmbeddedWms:
 
         if self._scheduler is None:
             raise RuntimeError("EmbeddedWms.start() has not been awaited")
-        job = next((j for j in self.config.schedule.jobs if j.name == name), None)
+        job = next((j for j in self.config.schedule.effective_jobs() if j.name == name), None)
         job = job or ScheduledJob(name=name, cron="0 0 * * *")
         if apply is not None:
             job = job.model_copy(update={"apply": apply})
@@ -149,6 +149,55 @@ class EmbeddedWms:
     async def undo(self, audit_id: int, *, apply_now: bool) -> plans.UndoOutcome:
         async with self._scheduler.lock:
             return await plans.undo(self._live, audit_id, apply_now=apply_now)
+
+    # ------------------------------------------------- M7: tidying the drive
+
+    async def plan_overview(self, plan_ids: list[int]) -> list[dict[str, Any]]:
+        """One summary per plan, for a message that lists a batch of them."""
+        out = []
+        for plan_id in plan_ids:
+            row = await plans.get(self._live, plan_id)
+            out.append(_plan_summary(row))
+        return out
+
+    async def organize_scope(self, scope: str) -> Any:
+        """organize-tree for one top-level folder, planned only (/wms organize tree /A)."""
+        from .jobs import JobResult
+        from .stocktake import stocktake
+
+        ctx = self._live
+        async with self._scheduler.lock:
+            await stocktake(ctx.client, ctx.store, roots=ctx.config.stocktake.roots,
+                            full=False, page_size=ctx.config.stocktake.page_size)
+            planned = await tidy.organize_tree(ctx, scope=scope)
+            ids = [pid for pid in [await plans.save(ctx, p) for p in planned] if pid]
+        result = JobResult(tidy.TREE, t("job.nothing", name=tidy.TREE),
+                           plan_id=ids[0] if ids else None, plan_ids=ids)
+        return result
+
+    async def protect(self, verb: str, path: str = "") -> dict[str, Any]:
+        """``ls`` / ``add`` / ``rm`` on the whitelist; returns the listing after."""
+        ctx = self._live
+        async with self._scheduler.lock:
+            if verb == "add":
+                await protect.add(ctx, path)
+            elif verb == "rm":
+                await protect.remove(ctx, path)
+            return await protect.listing(ctx)
+
+    async def trash_item(self, file_id: str) -> tuple[str, plans.ApplyReport] | None:
+        """The big-files report's [trash] button: one audited, undoable trash,
+        through the same pipeline (so the whitelist applies). Returns the path
+        and the report; None when the item is gone or protected."""
+        ctx = self._live
+        async with self._scheduler.lock:
+            node = await ctx.store.node(file_id)
+            if node is None:
+                return None
+            plan_id = await plans.save(ctx, tidy.trash_plan(node))
+            if plan_id is None:
+                return None
+            return node.path, await plans.apply(ctx, plan_id)
 
     # ------------------------------------------- natural language (M6)
 

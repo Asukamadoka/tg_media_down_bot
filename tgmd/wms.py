@@ -91,17 +91,61 @@ Notify = Callable[[int, str, Any], Awaitable[None]]
 """Send ``text`` (HTML) with optional ``buttons`` to a chat."""
 
 
-def plan_message(lines: list[str], plan_id: int, *, intro: str = "") -> tuple[str, Any]:
-    """A plan as a chat message, with [apply] [discard] buttons."""
+def plan_message(
+    lines: list[str], plan_id: int, *, intro: str = "", details: bool = False
+) -> tuple[str, Any]:
+    """A plan as a chat message, with [apply] [discard] buttons, and with
+    ``details`` a [details] button between them (M7 §4)."""
     body = "\n".join(lines)
     if len(body) > MESSAGE_LIMIT:
         body = body[:MESSAGE_LIMIT].rsplit("\n", 1)[0] + "\n…"
     text = (intro + "\n" if intro else "") + f"<pre>{escape_html(body)}</pre>"
-    buttons = callback_buttons([[
-        (t("wms.button.apply"), f"wms:apply:{plan_id}"),
-        (t("wms.button.discard"), f"wms:discard:{plan_id}"),
-    ]])
-    return text, buttons
+    row = [(t("wms.button.apply"), f"wms:apply:{plan_id}")]
+    if details:
+        row.append((t("wms.button.details"), f"wms:detail:{plan_id}"))
+    row.append((t("wms.button.discard"), f"wms:discard:{plan_id}"))
+    return text, callback_buttons([row])
+
+
+BATCH_SHOWN = 40
+"""Plans listed in one batch message (two buttons each; Telegram allows 100)."""
+
+
+def batch_message(name: str, summaries: list[dict[str, Any]]) -> tuple[str, Any]:
+    """Many plans from one job (organize-tree: one per top-level folder), so
+    each can be confirmed on its own (M7 §3.2)."""
+    shown = summaries[:BATCH_SHOWN]
+    lines = [t("wms.batch.intro", name=escape_html(name), count=len(summaries))]
+    for item in shown:
+        lines.append(t("wms.batch.line", id=item["id"], scope=escape_html(item["scope"]),
+                       actions=item["actions"], size=item["size"]))
+    if len(summaries) > len(shown):
+        lines.append(t("wms.batch.more", count=len(summaries) - len(shown)))
+    rows, row = [], []
+    for item in shown:
+        row += [(t("wms.button.apply_n", id=item["id"]), f"wms:apply:{item['id']}"),
+                (t("wms.button.details_n", id=item["id"]), f"wms:detail:{item['id']}")]
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return "\n".join(lines), callback_buttons(rows)
+
+
+def report_message(big: Any) -> tuple[str, Any]:
+    """The big-files report, one [🗑 n] button per listed item (M7 §5)."""
+    body = "\n".join(big.lines())
+    if len(body) > MESSAGE_LIMIT:
+        body = body[:MESSAGE_LIMIT].rsplit("\n", 1)[0] + "\n…"
+    text = t("wms.big.intro") + f"\n<pre>{escape_html(body)}</pre>"
+    buttons = [
+        (t("wms.button.trash_n", n=number), f"wms:bt:{item.file_id}")
+        for number, item in enumerate(big.items(), start=1)
+        if len(f"wms:bt:{item.file_id}".encode()) <= 64
+    ]
+    rows = [buttons[i : i + 5] for i in range(0, len(buttons), 5)]
+    return text, callback_buttons(rows) if rows else None
 
 
 def covers(scope: str, folder: str) -> bool:
@@ -224,16 +268,41 @@ class WmsInBot:
             await self._notify(chat, text, None)
 
     async def job_finished(self, result: Any) -> None:
-        """A scheduled job left a plan waiting: tell the admins, once per plan."""
-        if (self._notify is None or self.embedded is None or result.plan_id is None
-                or result.report is not None or result.plan_id in self._announced):
+        """A scheduled job left a plan waiting: tell the admins, once per plan.
+
+        M7 jobs also report what they carried out on their own (dedupe), and
+        the weekly big-files report goes out with its buttons.
+        """
+        if self._notify is None or self.embedded is None:
             return
-        self._announced.add(result.plan_id)
-        lines = await self.embedded.plan_lines(result.plan_id, limit=12)
-        text, buttons = plan_message(lines, result.plan_id,
-                                     intro=t("wms.job.waiting", name=escape_html(result.name)))
+        message = await self._job_message(result)
+        if message is None:
+            return
+        text, buttons = message
         for admin in self.config.access.admin_user_ids:
             await self._notify(admin, text, buttons)
+
+    async def _job_message(self, result: Any) -> tuple[str, Any] | None:
+        name = escape_html(result.name)
+        if getattr(result, "big", None) is not None:
+            return report_message(result.big)
+        many = list(getattr(result, "plan_ids", []) or [])
+        if many and getattr(result, "reports", None):
+            return t("wms.job.applied", name=name, summary=escape_html(result.summary)), None
+        if len(many) > 1:
+            fresh = [pid for pid in many if pid not in self._announced]
+            if not fresh:
+                return None
+            self._announced.update(many)
+            summaries = await self.embedded.plan_overview(many)
+            return batch_message(result.name, [_scoped(item) for item in summaries])
+        if result.plan_id is None or result.report is not None \
+                or result.plan_id in self._announced:
+            return None
+        self._announced.add(result.plan_id)
+        lines = await self.embedded.plan_lines(result.plan_id, limit=12)
+        return plan_message(lines, result.plan_id, details=bool(many),
+                            intro=t("wms.job.waiting", name=name))
 
     # ---------------------------------------- natural language (/do, M6)
 
@@ -263,6 +332,12 @@ class WmsInBot:
         except WmsError as exc:
             return t("wms.error", error=escape_html(exc.display())), None
         self._proposals[pid]["proposal"] = proposal
+        # M7: the report comes with its own buttons, a batch lists its plans.
+        if proposal.kind == "report" and proposal.big is not None:
+            return report_message(proposal.big)
+        if proposal.kind == "batch":
+            summaries = await self.embedded.plan_overview(proposal.plan_ids)
+            return batch_message("organize-tree", [_scoped(item) for item in summaries])
         body = "\n".join(self.embedded.proposal_lines(proposal))
         if len(body) > MESSAGE_LIMIT:
             body = body[:MESSAGE_LIMIT].rsplit("\n", 1)[0] + "\n…"
@@ -332,6 +407,12 @@ class WmsInBot:
         if self.embedded is not None:
             await self.embedded.stop()
             self.embedded = None
+
+
+def _scoped(summary: dict[str, Any]) -> dict[str, Any]:
+    """A batch plan's folder, from its source ("organize-tree:/A")."""
+    source = str(summary.get("source") or "")
+    return {**summary, "scope": source.partition(":")[2] or source}
 
 
 # ------------------------------------------------------------ command line

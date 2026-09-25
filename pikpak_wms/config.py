@@ -73,7 +73,11 @@ class StocktakeConfig(BaseModel):
     page_size: int = 100
 
 
-JOB_NAMES = ("stocktake", "stocktake-full", "inbound-poll", "layout", "organize", "cleanup")
+JOB_NAMES = (
+    "stocktake", "stocktake-full", "inbound-poll", "layout", "organize", "cleanup",
+    # M7:
+    "organize-tree", "organize-inbox", "dedupe", "big-report",
+)
 
 
 class ScheduledJob(BaseModel):
@@ -92,10 +96,29 @@ class ScheduledJob(BaseModel):
         return value
 
 
+BUILTIN_JOBS = (
+    # docs/wms/M7 §4: the entry folders hourly, the whole tree daily, dedupe
+    # weekly and carried out (the owner asked for it to run on its own; the
+    # whitelist keeps protected and shared copies), the big-files report weekly.
+    ScheduledJob(name="organize-inbox", cron="0 * * * *"),
+    ScheduledJob(name="organize-tree", cron="30 4 * * *"),
+    ScheduledJob(name="dedupe", cron="0 5 * * 1", apply=True),
+    ScheduledJob(name="big-report", cron="0 10 * * 1"),
+)
+
+
 class ScheduleConfig(BaseModel):
     timezone: str = "Asia/Shanghai"
     """Cron times, ``{created|date:...}`` and dates in rules are read in this zone."""
     jobs: list[ScheduledJob] = Field(default_factory=list)
+    builtin: bool = True
+    """Add the M7 jobs (:data:`BUILTIN_JOBS`) that ``jobs`` does not list itself.
+    List one with ``enabled: false`` to turn it off, or set this to false."""
+
+    def effective_jobs(self) -> list[ScheduledJob]:
+        listed = {job.name for job in self.jobs}
+        extra = [job for job in BUILTIN_JOBS if job.name not in listed] if self.builtin else []
+        return [*self.jobs, *extra]
 
     @property
     def tz(self) -> tzinfo:
@@ -148,6 +171,33 @@ class NlConfig(BaseModel):
     """下载 fetches into this sub-folder of the NAS media folder."""
 
 
+class DedupeConfig(BaseModel):
+    scope: str = "/"
+    keep_under: list[str] = Field(default_factory=list)
+    """Prefer the copy under one of these folders (protected copies come first anyway)."""
+
+
+class ProtectConfig(BaseModel):
+    """The whitelist (docs/wms/M7 §1): nothing under these is ever touched.
+
+    It wins over every rule and every job: a plan loses any action whose
+    source or destination is protected before it is even saved.
+    """
+
+    paths: list[str] = Field(
+        default_factory=lambda: ["/收藏", "/Cosplaytales Nako EP#1-24", "/小千"]
+    )
+    shared: bool = True
+    """Also protect everything ever shared (expired shares included), read
+    live from PikPak before each plan."""
+
+    @field_validator("paths", mode="before")
+    @classmethod
+    def _paths(cls, value: object) -> list[str]:
+        items = [value] if isinstance(value, str) else list(value or [])
+        return ["/" + "/".join(p for p in str(item).split("/") if p) for item in items]
+
+
 class Config(BaseModel):
     version: int = 1
     rules_file: Path | None = None
@@ -160,6 +210,8 @@ class Config(BaseModel):
     outbound: OutboundConfig = Field(default_factory=OutboundConfig)
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     nl: NlConfig = Field(default_factory=NlConfig)
+    protect: ProtectConfig = Field(default_factory=ProtectConfig)
+    dedupe: DedupeConfig = Field(default_factory=DedupeConfig)
 
 
 def _first_existing(env: str, name: str, default: Path) -> Path:

@@ -1,0 +1,32 @@
+{
+ "actions": 345,
+ "by_rule": {
+  "tidy:empty:trash": 92,
+  "tidy:flatten:move": 56,
+  "tidy:flatten:trash": 23,
+  "tidy:junk:trash": 174
+ },
+ "first_plan": {
+  "actions": 8,
+  "by_rule": {
+   "tidy:empty:trash": 4,
+   "tidy:junk:trash": 4
+  },
+  "first": [
+   "  trash   /Cosplay/Nako Vol.232/sub11126/sub79293",
+   "  trash   /Cosplay/舞蹈练习 合集/sub12720/sub17270/sub54481/sub74213",
+   "  trash   /Cosplay/舞蹈练习 合集/sub8542/sub13106/sub80358",
+   "  trash   /Cosplay/舞蹈练习 合集/sub8542/sub23610/sub80502",
+   "  trash   /Cosplay/舞蹈练习/广告195.html",
+   "  trash   /Cosplay/舞蹈练习 Vol.181/广告49.html",
+   "  trash   /Cosplay/舞蹈练习 Vol.181/广告97.txt",
+   "  trash   /Cosplay/舞蹈练习 Vol.181/更多资源78.mp4",
+   "  · tidy: 4 empty folder(s) and 4 junk file(s) trashed, 0 nested chain(s) lifted; 0 big folder(s) and 0 big file(s) set apart; 0 group(s) of 0 file(s), 0 to misc, 0 to other, 0 image(s); 0 shelved from the inbox",
+   "  · top-level folder /Cosplay (325.4 GiB)"
+  ],
+  "sha256": "9a05c02aa89044c806b59738d22dbc783f94dd8b72727c979a3cf796fc822f1e",
+  "source": "organize-tree:/Cosplay"
+ },
+ "plans": 40,
+ "sha256": "62a978316cd72c5eeaf460e7c3dac5f1b7d89561360914f69e05041ca8895177"
+}

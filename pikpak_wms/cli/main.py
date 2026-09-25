@@ -26,7 +26,7 @@ from ..core.errors import WmsError
 from ..core.models import ActionType, Plan
 from ..i18n import t
 from ..ops import inbound as inbound_ops
-from ..ops import listing, organize, plans
+from ..ops import listing, organize, plans, protect, tidy
 from ..ops import outbound as outbound_ops
 from ..ops import stocktake as stocktake_ops
 from ..ops.context import Context, open_context
@@ -449,6 +449,130 @@ def inbound(
         console.print(t("cli.inbound.hint"), style="cyan")
 
 
+# ------------------------------------------------------------------ M7
+
+
+def _tidy_command(build, *, apply_now: bool, limit: int | None, as_json: bool,
+                  sample: int, prefix: str) -> None:
+    async def work(ctx: Context):
+        await stocktake_ops.stocktake(ctx.client, ctx.store, roots=ctx.config.stocktake.roots,
+                                      full=False, page_size=ctx.config.stocktake.page_size)
+        planned = await build(ctx)
+        ids = [await plans.save(ctx, plan) for plan in planned]
+        if not sample:
+            await plans.supersede(ctx, prefix=prefix, keep={i for i in ids if i})
+        reports = []
+        if apply_now:
+            budget = limit if limit is not None else ctx.config.runtime.max_actions_per_run
+            for plan_id in (i for i in ids if i):
+                if budget <= 0:
+                    break
+                report = await plans.apply(ctx, plan_id, limit=budget)
+                reports.append(report)
+                budget -= report.applied + sum(report.skipped.values()) + len(report.failed)
+        return planned, ids, reports
+
+    planned, ids, reports = _run(work)
+    if as_json:
+        console.print_json(json.dumps(
+            [{"id": i, "plan": p.to_dict()} for p, i in zip(planned, ids, strict=True)],
+            ensure_ascii=False))
+        return
+    if sample:
+        # Spot checks (M7 §8): N moves from each top-level folder, the same each time.
+        for source, target in tidy.sample_moves(planned, sample):
+            console.print(f"{source}  →  {target}", markup=False)
+        return
+    for plan, plan_id in zip(planned, ids, strict=True):
+        for line in plans.plan_lines(plan, plan_id=plan_id, limit=40):
+            console.print(line, markup=False)
+        console.print("")
+    if not planned:
+        console.print(t("plan.empty"))
+    elif not apply_now and any(ids):
+        console.print(t("cli.plan.dry_run_hint", id=next(i for i in ids if i)), style="cyan")
+    for report in reports:
+        _show_report(report)
+
+
+@app.command(name="organize-tree")
+def organize_tree_command(
+    scope: str = typer.Option(None, "--scope", help="one top-level folder only"),
+    part: list[str] = typer.Option(None, "--part", help="slim, big or loose (repeatable)"),
+    sample: int = typer.Option(0, "--sample", help="print N sample moves per top-level folder"),
+    apply_flag: bool | None = ApplyFlag,
+    limit: int | None = LimitFlag,
+    as_json: bool = JsonFlag,
+) -> None:
+    """Tidy every top-level folder: one plan per folder (docs/wms/M7 §2, §3)."""
+    unknown = [p for p in part or [] if p not in tidy.PARTS]
+    if unknown:
+        console.print(t("cli.error", error=", ".join(unknown)), style="red")
+        raise typer.Exit(code=2)
+
+    def build(ctx):
+        return tidy.organize_tree(ctx, scope=scope, parts=set(part) if part else None)
+
+    _tidy_command(build, apply_now=_wants_apply(apply_flag) and not sample, limit=limit,
+                  as_json=as_json, sample=sample, prefix=f"{tidy.TREE}:")
+
+
+@app.command(name="organize-inbox")
+def organize_inbox_command(
+    folder: list[str] = typer.Option(None, "--folder", help="one entry folder (repeatable)"),
+    apply_flag: bool | None = ApplyFlag,
+    limit: int | None = LimitFlag,
+    as_json: bool = JsonFlag,
+) -> None:
+    """Shelve what landed in the entry folders (docs/wms/M7 §4)."""
+    async def build(ctx):
+        return [await tidy.organize_inbox(ctx, folders=folder or None)]
+
+    _tidy_command(build, apply_now=_wants_apply(apply_flag), limit=limit, as_json=as_json,
+                  sample=0, prefix=tidy.INBOX)
+
+
+@app.command(name="big")
+def big_command(scope: str = typer.Option("/", "--scope", help="where to look")) -> None:
+    """The biggest files and folders, and big files unchanged for long (never deletes)."""
+    async def work(ctx):
+        await stocktake_ops.stocktake(ctx.client, ctx.store, roots=ctx.config.stocktake.roots,
+                                      full=False, page_size=ctx.config.stocktake.page_size)
+        return await tidy.big_report(ctx, scope=scope)
+
+    for line in _run(work).lines():
+        console.print(line, markup=False)
+
+
+@app.command(name="protect")
+def protect_command(
+    verb: str = typer.Argument("ls", help="ls, add or rm"),
+    path: str = typer.Argument("", help="a drive path, for add and rm"),
+) -> None:
+    """The whitelist: folders (and shared files) no plan ever touches (docs/wms/M7 §1)."""
+    if verb not in ("ls", "add", "rm") or (verb != "ls" and not path.startswith("/")):
+        console.print(t("cli.protect.usage"), style="red")
+        raise typer.Exit(code=2)
+
+    async def work(ctx):
+        if verb == "add":
+            await protect.add(ctx, path)
+        elif verb == "rm":
+            await protect.remove(ctx, path)
+        return await protect.listing(ctx)
+
+    listing_ = _run(work)
+    console.print(t("cli.protect.paths"))
+    for item in listing_["paths"]:
+        console.print(f"  {item}", markup=False)
+    if listing_["shared_enabled"]:
+        console.print(t("cli.protect.shared", count=len(listing_["shared"])))
+        for item in listing_["shared"]:
+            console.print(f"  {item}", markup=False)
+    for note in listing_["notes"]:
+        console.print(t(note["key"], **note["args"]), style="yellow")
+
+
 @app.command(name="plans")
 def list_plans(all_plans: bool = typer.Option(False, "--all", help="closed ones too")) -> None:
     """Plans waiting for confirmation (or every plan)."""
@@ -557,7 +681,7 @@ def run() -> None:
     """Run the scheduled jobs of schedule.jobs until stopped."""
     from ..scheduler.runner import serve
 
-    jobs = [job for job in state.config.schedule.jobs if job.enabled]
+    jobs = [job for job in state.config.schedule.effective_jobs() if job.enabled]
     if not jobs:
         console.print(t("cli.run.no_jobs"))
         raise typer.Exit(code=1)

@@ -511,7 +511,13 @@ CATALOG: dict[str, dict[str, str]] = {
             '/wms plan &lt;id&gt; — show a plan\n'
             '/wms apply &lt;id&gt; — carry a plan out\n'
             '/wms undo &lt;audit id&gt; — reverse one change\n'
-            '/wms rules — the rules in force'
+            '/wms rules — the rules in force\n'
+            '/wms organize tree [&lt;folder&gt;] — tidy the top-level folders\n'
+            '/wms organize inbox — shelve what landed in the entry folders\n'
+            '/wms dedupe — plan removing duplicate copies\n'
+            '/wms big — the biggest files and folders\n'
+            '/wms protect ls|add|rm &lt;path&gt; — the whitelist\n'
+            '/wms plans — plans waiting for you'
         ),
         'wms.working': 'Working on it…',
         'wms.failed_see_log': 'That failed; the deployment log has the details.',
@@ -984,6 +990,50 @@ CATALOG: dict[str, dict[str, str]] = {
         ),
         'err.session.not_a_session': 'that is not a Telegram session string: {error}',
         'err.session.not_authorized': 'the new session is not authorized',
+        # ---- WMS M7 in the bot
+        "wms.button.details": "Details",
+        "wms.button.apply_n": "✅ #{id}",
+        "wms.button.details_n": "📄 #{id}",
+        "wms.button.trash_n": "🗑 {n}",
+        "wms.batch.intro": (
+            "{name}: {count} plan(s), one per folder. ✅ applies one, 📄 shows it in full."
+        ),
+        "wms.batch.line": "#{id} {scope}: {actions} action(s), {size}",
+        "wms.batch.more": "… and {count} more: /wms plans",
+        "wms.job.applied": "⏰ The scheduled job “{name}” ran: {summary}",
+        "wms.big.intro": "📊 Big files and folders. Nothing is deleted unless you press its 🗑.",
+        "wms.trashed": (
+            "Moved to the trash: <code>{path}</code>. {summary} Undo with /wms undo {audit}."
+        ),
+        "wms.trash.gone": "Nothing to trash: it is gone already, or it is protected.",
+        "wms.protect.list": (
+            "<b>Whitelist</b> (never touched)\n"
+            "{paths}"
+        ),
+        "wms.protect.shared": (
+            "Shared content ({count}), read from PikPak before every plan:\n"
+            "{paths}"
+        ),
+        "wms.protect.shared_off": "Shared content is not protected (protect.shared: false).",
+        "wms.protect.usage": (
+            "Use <code>/wms protect ls</code>, <code>/wms protect add /path</code> or <code>/wms pr"
+            "otect rm /path</code>."
+        ),
+        "wms.organize.usage": (
+            "Use <code>/wms organize tree [/folder]</code> or <code>/wms organize inbox</code>."
+        ),
+        "wms.plans.none": "No plans are waiting.",
+        "wms.plans.header": "Plans waiting for you:",
+        # ---- a revoked reading session (M7 §7.2)
+        "session.rejected": (
+            "⚠️ Telegram refused the reading account’s session at startup ({reason}), so the bot is"
+            " running without it: only chats the bot itself is in can be read. Sign in again with /"
+            "setup telegram."
+        ),
+        "session.rejected_env": (
+            "The session came from TG_USER_SESSION: remove it from .env as well, or the dead one ke"
+            "eps winning."
+        ),
     },
     "zh": {
         'help.body': (
@@ -1323,7 +1373,13 @@ CATALOG: dict[str, dict[str, str]] = {
             '/wms plan &lt;编号&gt; — 查看计划\n'
             '/wms apply &lt;编号&gt; — 执行计划\n'
             '/wms undo &lt;审计编号&gt; — 撤销一处改动\n'
-            '/wms rules — 当前生效的规则'
+            '/wms rules — 当前生效的规则\n'
+            '/wms organize tree [&lt;目录&gt;] — 整理各个一级目录\n'
+            '/wms organize inbox — 把入口目录里的新东西上架\n'
+            '/wms dedupe — 出一份去重计划\n'
+            '/wms big — 最大的文件和目录\n'
+            '/wms protect ls|add|rm &lt;路径&gt; — 白名单\n'
+            '/wms plans — 等你确认的计划'
         ),
         'wms.working': '处理中……',
         'wms.failed_see_log': '失败了，详情见部署日志。',
@@ -1737,5 +1793,43 @@ CATALOG: dict[str, dict[str, str]] = {
         ),
         'err.session.not_a_session': '这不是 Telegram 会话字符串：{error}',
         'err.session.not_authorized': '新会话未授权',
+        # ---- WMS M7 in the bot
+        "wms.button.details": "查看明细",
+        "wms.button.apply_n": "✅ #{id}",
+        "wms.button.details_n": "📄 #{id}",
+        "wms.button.trash_n": "🗑 {n}",
+        "wms.batch.intro": "{name}：{count} 份计划，一个目录一份。✅ 执行这一份，📄 查看完整明细。",
+        "wms.batch.line": "#{id} {scope}：{actions} 个动作，{size}",
+        "wms.batch.more": "……还有 {count} 份，见 /wms plans",
+        "wms.job.applied": "⏰ 定时任务「{name}」已执行：{summary}",
+        "wms.big.intro": "📊 大文件与大目录。不点 🗑 就不会删除任何东西。",
+        "wms.trashed": "已移入回收站：<code>{path}</code>。{summary}可用 /wms undo {audit} 撤销。",
+        "wms.trash.gone": "没有可删除的：它已经不在了，或者受白名单保护。",
+        "wms.protect.list": (
+            "<b>白名单</b>（一律不动）\n"
+            "{paths}"
+        ),
+        "wms.protect.shared": (
+            "分享过的内容（{count} 项），每次生成计划前从 PikPak 实时读取：\n"
+            "{paths}"
+        ),
+        "wms.protect.shared_off": "分享过的内容不受保护（protect.shared: false）。",
+        "wms.protect.usage": (
+            "用法：<code>/wms protect ls</code>、<code>/wms protect add /路径</code>、<code>/wms pr"
+            "otect rm /路径</code>。"
+        ),
+        "wms.organize.usage": (
+            "用法：<code>/wms organize tree [/目录]</code> 或 <code>/wms organize inbox</code>。"
+        ),
+        "wms.plans.none": "没有等待确认的计划。",
+        "wms.plans.header": "等待确认的计划：",
+        # ---- a revoked reading session (M7 §7.2)
+        "session.rejected": (
+            "⚠️ 启动时 Telegram 拒绝了读取账号的会话（{reason}），bot 暂时在没有读取账号的情况下运"
+            "行：只能读取 bot 自己所在的聊天。请用 /setup telegram 重新登录。"
+        ),
+        "session.rejected_env": (
+            "这个会话来自 TG_USER_SESSION：请同时把它从 .env 里删掉，否则失效的那个会一直优先生效。"
+        ),
     },
 }

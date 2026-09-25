@@ -38,10 +38,14 @@ select = [
 "pikpak_wms/i18n.py" = ["RUF001"]
 # Matches Chinese punctuation and numerals on purpose.
 "pikpak_wms/nl/rules_parser.py" = ["RUF001", "RUF002"]
+"pikpak_wms/rules/names.py" = ["RUF001"]
 # Asserts on Chinese output, full-width punctuation included.
 "tests/test_wms_m6.py" = ["RUF001"]
 "tests/test_wms_m6_bot.py" = ["RUF001"]
 "tests/test_i18n_batch2.py" = ["RUF001"]
+"tests/test_wms_m7.py" = ["RUF001"]
+"tests/test_wms_m7_bot.py" = ["RUF001"]
+"tests/test_wms_m7_fixture.py" = ["RUF001"]
 # typer declares options as argument defaults; that is its API, not a bug.
 "pikpak_wms/cli/*" = ["B008"]
 # A diagnostic tool's job is to turn any failure into a "failed" line rather

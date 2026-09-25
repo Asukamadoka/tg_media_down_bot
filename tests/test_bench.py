@@ -12,9 +12,11 @@ from tgmd import bench
 from tgmd.downloader import Transfer
 
 
-def args(link="https://t.me/somechannel/42", connections=(1, 4), keep=False, route="config"):
+def args(link="https://t.me/somechannel/42", connections=(1, 4), keep=False, route="config",
+         same_egress_ip=False):
     return argparse.Namespace(
-        link=link, connections=list(connections), keep=keep, route=route
+        link=link, connections=list(connections), keep=keep, route=route,
+        same_egress_ip=same_egress_ip,
     )
 
 
@@ -131,11 +133,18 @@ class TestRoutes:
         downloader = bench._downloader(object(), 4, "media", None)  # noqa: SLF001
         assert downloader._endpoints is media_endpoints  # noqa: SLF001
 
-    def test_config_follows_tg_direct_media(self):
+    def test_config_never_takes_the_media_route(self):
+        # M7 §7.1: TG_DIRECT_MEDIA=auto got the reading session revoked
+        # (AuthKeyDuplicatedError), so "config" no longer follows it.
         auto = SimpleNamespace(telegram=SimpleNamespace(direct_media="auto"))
         off = SimpleNamespace(telegram=SimpleNamespace(direct_media="off"))
-        assert bench._downloader(object(), 4, "config", auto)._route is not None  # noqa: SLF001
+        assert bench._downloader(object(), 4, "config", auto)._route is None  # noqa: SLF001
         assert bench._downloader(object(), 4, "config", off)._route is None  # noqa: SLF001
+
+    @pytest.mark.parametrize("route", ["media", "both"])
+    async def test_the_media_route_needs_same_egress_ip(self, route, capsys):
+        assert await bench.run(args(route=route)) == 2
+        assert "AuthKeyDuplicatedError" in capsys.readouterr().err
 
     async def test_both_measures_each_count_both_ways(self, env, monkeypatch, capsys):
         FakeDownloader.runs = []
@@ -145,7 +154,7 @@ class TestRoutes:
         monkeypatch.setattr(bench, "TelegramClient", FakeClient)
         monkeypatch.setattr(bench, "Resolver", FakeResolver)
         monkeypatch.setattr(bench, "Downloader", FakeDownloader)
-        assert await bench.run(args(connections=(4,), route="both")) == 0
+        assert await bench.run(args(connections=(4,), route="both", same_egress_ip=True)) == 0
         out = capsys.readouterr().out
         assert FakeDownloader.runs == [4, 4]
         assert "normal" in out and "media" in out

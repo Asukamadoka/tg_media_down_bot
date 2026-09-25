@@ -26,7 +26,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from ..rules.schema import CATEGORIES
-from .query import Clarification, Query
+from .query import Clarification, Query, as_result
 
 _DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
            "六": 6, "七": 7, "八": 8, "九": 9}
@@ -157,8 +157,8 @@ class RulesTranslator:
         if re.search(r"永久删除|彻底删除|清空回收站|直接删除", s.text):
             return Clarification(question="nl.ask.forever")
 
-        for step in (_names, _paths, _schedule, _sizes, _dates, _relative_days, _windows,
-                     _kinds, _extensions, _arrival, _intents, _scope_words):
+        for step in (_tidy, _names, _paths, _schedule, _sizes, _dates, _relative_days,
+                     _windows, _kinds, _extensions, _arrival, _intents, _scope_words):
             step(s)
 
         leftover = _PUNCT.sub("", _FILLER.sub("", s.text))
@@ -170,7 +170,16 @@ class RulesTranslator:
             return None
         intent = intents[0]
         if intent == "organize":
-            return Clarification(question="nl.ask.organize_how")
+            # 「整理一下 /Cos」: a top-level folder is organize-tree's unit.
+            path = s.data["scope"].get("path")
+            if path is None or path == "/":
+                return Clarification(question="nl.ask.organize_how")
+            if path.strip("/").casefold() in INBOXES:
+                intent = "organize_inbox"
+            elif path.count("/") == 1:
+                intent = "organize_tree"
+            else:
+                return Clarification(question="nl.ask.organize_top", args={"path": path})
 
         if s.new:
             if s.period is None:
@@ -198,12 +207,52 @@ class RulesTranslator:
         if s.ask is not None:
             return Clarification(question=s.ask, args=s.ask_args)
         try:
-            return Query.model_validate(data)
+            return as_result(Query.model_validate(data))
         except (ValidationError, ValueError):
             return None
 
 
 # ------------------------------------------------------------------ steps
+
+
+INBOXES = ("telegram", "pack from shared")
+"""The entry folders by name (docs/wms/M7 §4), for 「整理一下 Pack From Shared」."""
+
+_INBOX_NAME = r"/?(?P<box>pack\s*from\s*shared|telegram)(?:\s*(?:目录|文件夹))?"
+
+
+def _tidy(s: _State) -> None:
+    """The M7 jobs by their everyday names. Runs first, so that 「大文件」 here
+    is not taken as a size to ask about, nor 「删除重复」 as a plain delete."""
+
+    def intent(name: str, **args: Any):
+        def handler(match: re.Match) -> None:
+            s.intents.append(name)
+            for key, value in args.items():
+                s.put("action_args", key, value)
+            box = match.groupdict().get("box")
+            if box:
+                s.put("scope", "path", "/Pack From Shared" if "pack" in box.lower()
+                      else "/Telegram")
+        return handler
+
+    s.take(r"(?:把\s*)?(?:网盘里的?|所有的?)?(?:重复(?:的)?(?:文件|副本)?"
+           r"\s*(?:去掉|删掉|删除|清理掉?|清掉|去重)|(?:去除|删除|删掉|清理|清掉)\s*重复(?:的)?"
+           r"(?:文件|副本)?|去重|查重)", intent("dedupe"))
+    s.take(r"(?:看看|看一下|看下|列出|列一下|找出|查一下|显示)?\s*(?:网盘里)?"
+           r"(?:(?:最大|最占空间|占空间最多)的?\s*(?:\d+\s*个)?\s*(?:文件|目录|文件夹)"
+           r"(?:\s*(?:和|与)\s*(?:最大的?)?\s*(?:目录|文件夹))?|哪些(?:文件|东西)(?:最大|最占空间)"
+           r"|大文件报告|空间占用报告|空间报告)", intent("big_report"))
+    s.take(r"(?:把\s*)?大(?:文件|目录)(?:\s*(?:和|与)\s*大(?:文件|目录))?\s*(?:都)?\s*"
+           r"(?:单独(?:放|存放|放到)?\s*(?:在)?\s*一起|单独(?:放|存放)|(?:放|挪|移|归)(?:到|在)?\s*一起"
+           r"|集中(?:起来|放|存放)?|归集)", intent("organize_tree", part="big"))
+    s.take(r"(?:整理|收拾|理)\s*(?:一下)?\s*(?:整个网盘|全网盘|全盘|所有目录|所有一级目录|一级目录|"
+           r"各个目录|每个目录|散落的?文件)|全盘整理|归集散落的?文件|把散落的?文件归集(?:一下)?",
+           intent("organize_tree"))
+    s.take(r"(?:整理|收拾|上架)\s*(?:一下)?\s*(?:入口目录|入口|收件箱|inbox)|入口目录\s*(?:整理|上架)",
+           intent("organize_inbox"))
+    s.take(r"(?:整理|收拾|上架)\s*(?:一下)?\s*" + _INBOX_NAME, intent("organize_inbox"))
+    s.take(_INBOX_NAME + r"\s*(?:整理|上架)\s*(?:一下)?", intent("organize_inbox"))
 
 
 def _names(s: _State) -> None:

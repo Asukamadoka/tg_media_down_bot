@@ -32,6 +32,9 @@ class FakeDrive:
         self._clock = datetime(2026, 9, 1, tzinfo=UTC)
         self.quota = {"limit": "10995116277760", "usage": "1000", "usage_in_trash": "10"}
         self.tasks: list[dict[str, Any]] = []
+        self.shares: list[dict[str, Any]] = []
+        """What ``GET /drive/v1/share/list`` returns, one dict per share."""
+        self.share_page = 100
 
     # ------------------------------------------------------------ building
 
@@ -263,6 +266,19 @@ class FakeDrive:
     async def restore(self, share_id, pass_code_token, file_ids):
         self._record("restore")
         return {}
+
+    async def _request_get(self, url, params=None):
+        """pikpakapi's authenticated GET; only the share list is spoken here."""
+        self._record("share_list")
+        if not url.endswith("/drive/v1/share/list"):
+            raise PikpakException(f"FakeDrive does not answer {url}")
+        params = params or {}
+        start = int(params.get("page_token") or 0)
+        size = min(int(params.get("limit") or 100), self.share_page)
+        page = self.shares[start : start + size]
+        after = start + len(page)
+        return {"data": [dict(s) for s in page],
+                "next_page_token": str(after) if after < len(self.shares) else ""}
 
     async def events(self, size=100, next_page_token=None):
         self._record("events")

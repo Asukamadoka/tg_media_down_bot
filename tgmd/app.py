@@ -26,8 +26,9 @@ from .parallel import MediaRoute
 from .pikpak import PikPakService
 from .portal import PikPakLoginPortal
 from .resolver import Resolver
-from .setup import SetupWizard, stored_user_session
+from .setup import USER_SESSION_KEY, SetupWizard, stored_user_session
 from .tasks import JobQueue
+from .utils import escape_html
 from .webserver import FileServer
 from .wms import WmsInBot
 from .wms_panel import WmsPanel
@@ -70,6 +71,8 @@ class Application:
         self.route: MediaRoute | None = None
         self.wms: WmsInBot | None = None
         self.wms_panel: WmsPanel | None = None
+        self.session_rejected: tuple[str, str] | None = None
+        """(where the session came from, why Telegram refused it), at startup."""
         self._stopping = asyncio.Event()
 
     async def start(self) -> None:
@@ -106,16 +109,25 @@ class Application:
         # A session added by a previous in-chat login is picked up here, so
         # the wizard's work survives a restart.
         self.bot, self.user = await start_clients(
-            config, await stored_user_session(self.db)
+            config, await stored_user_session(self.db), on_rejected=self._session_rejected
         )
         # The user client reads history; without one the bot can only read
         # chats it belongs to itself, which still covers some setups.
         reading_client = self.user or self.bot
 
         delivery = Delivery(self.bot, config, self.db, self.pikpak, self.file_server)
-        # One route for every downloader, so a direct path that failed for one
-        # is skipped by all of them.
-        self.route = MediaRoute() if config.telegram.direct_media == "auto" else None
+        # TG_DIRECT_MEDIA=auto is refused (docs/wms/M7 §7.1): the direct media
+        # connections reuse the main session's auth key, and seen from two IP
+        # addresses at once (direct vs. proxy) Telegram answered with
+        # AuthKeyDuplicatedError and revoked the reading account's session.
+        if config.telegram.direct_media == "auto":
+            log.error(
+                "TG_DIRECT_MEDIA=auto is refused and treated as off: the direct media "
+                "route reuses the session's auth key from a second IP address, which got "
+                "the reading session revoked (AuthKeyDuplicatedError). See docs/HANDOFF.md."
+            )
+            config.telegram.direct_media = "off"
+        self.route = None
 
         self.queue = JobQueue(
             config=config,
@@ -186,6 +198,32 @@ class Application:
             "on" if config.pikpak.configured else "off",
             "on" if self.portal.unavailable_reason() is None else "off",
         )
+        await self._tell_admins_session_rejected()
+
+    async def _session_rejected(self, source: str, reason: str) -> None:
+        """Telegram refused the reading account's session at startup (M7 §7.2).
+
+        A dead session from an in-chat login is dropped from the database, so
+        the next start does not try it again and /setup telegram starts clean.
+        The admins are told once the bot can send messages.
+        """
+        if source == "an in-chat login":
+            await self.db.kv_delete(USER_SESSION_KEY)
+            log.warning("dropped the rejected in-chat user session from the database")
+        self.session_rejected = (source, reason)
+
+    async def _tell_admins_session_rejected(self) -> None:
+        if self.session_rejected is None:
+            return
+        source, reason = self.session_rejected
+        text = i18n.t("session.rejected", reason=escape_html(reason))
+        if source == "TG_USER_SESSION":
+            text += "\n" + i18n.t("session.rejected_env")
+        for admin in self.config.access.admin_user_ids:
+            try:
+                await self._send_html(admin, text)
+            except Exception:  # noqa: BLE001 - an admin who never opened the chat cannot be messaged
+                log.warning("could not tell admin %s about the rejected session", admin)
 
     async def _send_html(self, chat_id: int, text: str, buttons=None) -> None:
         assert self.bot is not None

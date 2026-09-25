@@ -1010,3 +1010,166 @@ docker compose logs bot | grep -P '[\x{4e00}-\x{9fff}]'              # 红线 4�
 1. **Mini App 用哪种语言**：现在跟随 bot 的全局语言，和仓储面板一致。Telegram 的 initData 里带有用户自己的 `language_code`，但页面在拿到它之前就已经渲染好了。要不要做成按用户语言显示，需要用户决定；目前全局只有一个语言，我没有扩大范围。
 2. **外部原文不翻**：PikPak 库和 Telethon 返回的错误原文（如 `invalid_grant`、RPC 错误名）会原样出现在中文句子里。这些文本来自外部，没法可靠地翻译。
 3. **`python -m tgmd.verify` 的「配置提示」行仍是英文**：内容来自 `Config.validate()`，写给运维看，里面全是环境变量名，和 `ConfigError` 一样按原计划只用英文。如果希望这些提示也出中文，需要再开一批。
+
+## 阶段 3 · WMS M7：按用户规则整理网盘
+
+规格：`docs/wms/M7-organize-rules.md`（Cowork 起草）。所有功能都以 bot 为入口；命令行等价命令给 Cowork 核验用。
+
+### 这一阶段做了什么
+
+- **§1 白名单**（`pikpak_wms/ops/protect.py`），优先级最高：
+  - 受保护的有两类：`protect.paths`（默认 `/收藏`、`/Cosplaytales Nako EP#1-24`、`/小千`，外加 `/wms protect add` 加进来的、减去 `rm` 掉的，存在索引库的 meta 表里，不改 `wms.yaml`）；以及 `protect.shared: true` 时，每次生成计划前实时读取 `GET /drive/v1/share/list` 得到的分享内容。分享列表分页读完，过期的也算，每个 `file_id` 用本地索引解析成路径，整棵子树受保护。
+  - pikpakapi 没有读分享列表的接口，`WmsClient.shares()` 借 SDK 自带的鉴权 GET 调用。
+  - **统一在计划层过滤**：`plans.save()` 保存任何计划之前都会过一遍白名单，不管这份计划是规则引擎、整理任务、去重还是一句话生成的。被丢弃的动作包括：
+    - 来源或目标在受保护范围内的；
+    - 会移动、改名或删除一个「里面有受保护内容」的目录的（移动父目录等于移动子目录，只按字面判断路径不够）。
+    - 只为被丢弃的移动建的空目录也一起去掉。计划里会记一行「白名单豁免 N 项」。
+  - **执行时再查一次**：计划生成之后才分享出去的文件，执行时跳过，计入 `skipped.protected`。
+  - **读不到分享列表时**：沿用上一次成功读到的列表，并在计划里注明；连一次都没读到过，就不生成计划。宁可不动，也不能把分享过的文件当成没分享。
+  - **去重**：受保护的副本一律保留，并作为保留份，同组里只删不受保护的那些。
+- **§2 一级目录里的散落文件**（`pikpak_wms/rules/names.py` 和 `ops/tidy.py`）：
+  - 文件名先归一化：去掉扩展名、编号（`(1)`、`_01`、`-part2`、`EP03`、`第3集`、`S01E02`）、分辨率和编码标签、日期、方括号和圆括号里的站点标签（带域名的一律去掉；去掉括号后什么都不剩时，保留括号里的内容作标题）、首尾标点。
+  - 相机和手机的默认前缀（`IMG`、`VID`、`DSC`、`微信`……）、纯数字、像哈希的串，都算「杂乱名称」，不参与分组。
+  - 分组方法：键排序后，相邻的键相同、或共同前缀不少于 `min_prefix`（4）个字符的，归为一串；一串有 `min_group`（2）个或以上就成组，移到 `/<A>/<组名>/`。组名是共同前缀，不会停在英文单词中间（`Cosplay_Nak` 会截成 `Cosplay`）。同样的输入永远得到同样的计划，有测试守着。
+  - 一个文件的键和已有子目录同名时，单个文件也会放进那个子目录。
+  - 没进组的视频放 `/<A>/杂/`，图片放 `/写真/杂/`（重名时文件名后加 `_<短哈希>`），其他文件放 `/<A>/其他/`。
+- **§3 二级目录里的内容**：
+  - **精简**（都是进回收站）：
+    - 深度 ≥ 2 的空目录；
+    - 垃圾文件：扩展名 `url/html/txt/lnk/apk` 的不论大小，名字带「最新地址 / 防屏蔽 / 更多资源」的小于 1 MiB；
+    - 单链嵌套压平：内容上提到链的最上层，再删掉空壳。
+  - 本次计划清空的目录（大文件移走、垃圾删光之后）也一起删掉，所以执行完再生成一次计划是空的，有测试验证。
+  - **大目录**：一级目录下 ≥ 50 GiB 的二级目录，整体移到 `/大文件/<A>/<目录名>/`。
+  - **大文件**：深度 ≥ 3、≥ 4 GiB、所在二级目录没有被整体移走的，移到 `/大文件/<A>/`。先压平再移动时，计划用的是压平之后的路径。
+  - **分批确认**：organize-tree 一个一级目录出一份计划，bot 里每份计划各有 ✅（执行）和 📄（明细）两个按钮。
+  - 阈值、词表、别名都写在规则文件的 `tidy:` 段（`config/rules.example.yaml` 有全部默认值），没有规则文件时用默认值。
+- **§4 入口目录定期上架**：
+  - `/Telegram` 和 `/Pack From Shared` 里的每个条目，名字里含某个一级目录名或它的别名（`tidy.inbox.aliases`），就移进那个一级目录。匹配规则：最长的名字优先；英文名按单词边界匹配，`_` 也算边界；短于 2 个字符的名字不单独匹配。
+  - 移进去的文件接着参与那个目录的散落文件归集。没匹配上的，在入口目录内部按 §2 整理。
+  - **内置定时**：organize-inbox 每小时，organize-tree 每天 04:30，dedupe 每周一 05:00（`apply: true`），big-report 每周一 10:00。`wms.yaml` 里 `schedule.jobs` 列出同名任务就以列出的为准，`schedule.builtin: false` 就一个都不加。
+  - 默认只出计划，推送给 admin，附 [确认执行] [查看明细] [丢弃]。去重按你的要求自动执行，每轮受 `max_actions_per_run` 限制，剩下的下一轮继续，执行结果也会推送。
+  - 同一任务新一轮的计划出来后，上一轮还没确认、这次也没再出现的计划会被标为「已丢弃」，免得有人点到按旧索引生成的计划。
+- **§5 大文件报告**（`/wms big`，以及每周推送）：
+  - 内容：最大的 20 个文件、最大的 10 个目录（不会同时列父目录和子目录）、90 天没变化的大文件，以及可腾出空间的估算。估算 = 久未变化的大文件 + 重复副本占用。
+  - 每项一个 🗑 按钮，点一下走一份「单个动作」的计划，经过白名单、写进审计，可以撤销。不会自动删除任何东西。
+- **§6 bot 入口**：
+  - 命令：`/wms organize tree [/目录]`、`/wms organize inbox`、`/wms dedupe`、`/wms big`、`/wms protect ls|add|rm <路径>`、`/wms plans`，`/wms apply <号>` 原来就有。
+  - 自然语言：新增意图 `organize_tree`、`organize_inbox`、`dedupe`、`big_report`。rules 解析器能听懂「整理一下 Pack From Shared」「把大文件单独放一起」（只做大文件部分）「去重」「看看最大的文件」这类说法；加了定时或筛选条件的，会反问而不是猜。
+  - 评测集从 70 条扩到 94 条（新增 24 条 M7 句子）。M6 里「帮我把重复的文件去掉」原本标的是 reject，现在是 dedupe。
+- **§7 顺带的三处**：
+  1. **直连媒体线路关掉**：`TG_DIRECT_MEDIA=auto` 启动时打一条错误日志，按 `off` 处理。`tgmd.bench --route media|both` 默认拒绝运行，必须加 `--same-egress-ip`，帮助里写明风险。原因见下面「这次的事故」。
+  2. **读取账号被吊销**：启动时 Telegram 拒绝了会话（`AuthKeyDuplicatedError` 一类，或未授权）：
+     - 会话来自聊天内登录的：清掉数据库里失效的 `user_session_string`；
+     - 私聊每个 admin，提示用 `/setup telegram` 重新登录；会话来自 `TG_USER_SESSION` 的，还会提醒把它从 `.env` 删掉；
+     - 没打开过私聊的 admin 收不到，只记日志。
+  3. **自然语言新增 `openai` 后端**（OpenAI 兼容接口）：
+     - 环境变量：`NL_BACKEND=openai`，`NL_OPENAI_BASE_URL`、`NL_OPENAI_MODEL`、`NL_OPENAI_API_KEY`（可以为空）。
+     - 先用 `response_format: json_schema`。服务端返回 400/404/415/422（比如 DeepSeek 不支持 schema）时，改用 `json_object`，并把 schema 写进提示词；之后的请求也直接用这个模式。两种情况都会在本地按 schema 校验。
+     - 原来的 `ollama` 后端保留；`eval` 增加了 `--backend openai`。
+
+### 这次的事故（§7.1，要记下来）
+
+2026-09-25 在 NAS 上实测直连媒体线路时，读取账号的会话被 Telegram 吊销（`AuthKeyDuplicatedError`）。
+
+- 原因：`tgmd/parallel.py` 的直连连接复用了主会话的 auth key（本 DC 用 `session.auth_key`，其他 DC 用借来的 exported key）。直连从电信 IP 出去，主连接走代理 IP，Telegram 看到同一把 key 同时出现在两个 IP 上，就吊销了它。
+- `d338f20` 已经让 bot 在这种情况下不再崩溃循环，这一阶段补上了关闭开关和通知 admin。
+- **以后如果要重做**：只能用新协商的独立 auth key（ExportAuthorization/ImportAuthorization，加上新的 DH 握手），而且只用于非本 DC。在此之前不要打开这条线路。
+
+### 验收证据
+
+- **§0 夹具**（`tests/m7_fixture.py`）按真实网盘的数字构造，数字由 `test_the_fixture_has_the_numbers_of_section_0` 逐项断言：
+  - 80,964 个条目，9.7 TiB，45 个一级目录；
+  - 751 个散落文件，分布在 19 个目录，最多的一个 467 个；类型是 698 mp4、28 mov、16 zip/7z/rar、2 jpg；
+  - 435 个二级目录，其中 40 个超过 50 GiB，合计 6.4 TiB；155 个超过 4 GiB 的文件，合计 1,070 GiB；
+  - 20 个被分享的文件，对应 40 条分享（一半已过期）。
+- **每条规则都有计划快照**（`tests/snapshots/m7/`）：
+  - 内容：tree 的 slim、big、loose 三部分，加上 inbox、dedupe、big-report；
+  - 每份快照记录：每种动作的数量、前 12 行计划文本、整份计划的 sha256；
+  - 规则一改，快照就会对不上；确认新结果正确后，用 `WMS_UPDATE_SNAPSHOTS=1` 重写。
+  - 在夹具上的结果：
+    - big：38 份计划，27 个大目录、64 个大文件（受保护目录和入口目录里的不动）；
+    - inbox：上架 100 项，归集 268 个；
+    - 所有计划里碰到白名单的动作都是 0。
+- **白名单性质测试**：60 个随机种子，每个都随机构造目录树、分享、白名单增删和规则，跑 organize-tree、organize-inbox、dedupe 和规则引擎，断言存下来的计划里没有一个动作碰到受保护内容。
+- **在 80,964 个条目上生成计划的耗时**（沙箱，秒）：
+
+  | 任务 | 耗时 |
+  | --- | --- |
+  | 完整的 organize-tree | 2.4 |
+  | 其中 slim | 2.0 |
+  | 其中 big | 1.3 |
+  | 其中 loose | 1.1 |
+  | organize-inbox | 1.4 |
+  | dedupe | 0.8 |
+  | 大文件报告 | 1.4 |
+
+  白名单判断原来是逐个比对受保护路径，改成集合查找加一次 `startswith` 之后，报告从 4.1 秒降到 1.4 秒。
+- **bot 端到端**（`test_wms_m7_bot.py::TestTheAcceptanceFlow`）按 §8 的流程走一遍：`/wms organize inbox` → 收到带三个按钮的计划 → 点 [查看明细] → 点 [确认执行] → 审计里出现这些移动 → `/wms undo <号>` 预览 → [确认撤销] → 文件回到原处。
+- **测试**：999 → 1130（+131）。3.11 与 3.12 全绿，ruff 零告警。
+  - 新增：`test_wms_m7.py` 107 个（含 60 个性质测试用例）、`test_wms_m7_bot.py` 18 个、`test_wms_m7_fixture.py` 4 个、`test_bench.py` +2。
+  - 改动的旧测试，改的是预期值，没有删除任何测试：
+    - `test_wms_m2`、`test_wms_m3` 各 1 个：定时任务列表现在多了 4 个内置任务；
+    - `test_bench` 1 个：`config` 路线不再跟随 `TG_DIRECT_MEDIA=auto`，因为这个功能按 §7.1 关掉了；
+    - `test_app` 的假 `start_clients` 补上了新参数 `on_rejected`；
+    - 评测集那一条从 reject 改为 dedupe。
+
+### NAS 上要改什么
+
+- **不改也能跑**：新配置全部有默认值，没有新增必填的环境变量，数据库没有结构变化（白名单增删记在 meta 表里）。
+- **升级之后，只要 `WMS_ENABLED=true`，4 个内置任务就会自动开始跑**：
+  - organize-inbox 每小时出一次计划并推送给 admin；
+  - organize-tree 每天 04:30；
+  - big-report 每周一上午；
+  - **dedupe 每周一 05:00 会自动执行**（这是简报 §4 的要求，前提是白名单已经生效）。
+
+  想先观察一段时间，就在 `wms.yaml` 里加：
+  ```yaml
+  schedule:
+    jobs:
+      - {name: dedupe, cron: "0 5 * * 1", apply: false}
+  ```
+- **一定要确认的**：`.env` 里如果还有 `TG_DIRECT_MEDIA=auto`，删掉或改成 `off`。不改也不会再出事（启动时会拒绝并打错误日志），但留着容易误会。mihomo 里给 DC4 媒体线路开的 DIRECT 规则已经撤掉了，保持撤掉。
+- **可选**：
+  - 在 `wms.yaml` 里写 `protect:` 段（例子见 `config/wms.example.yaml`）；
+  - 在 `rules.yaml` 里写 `tidy:` 段，比如给 `/写真` 加别名、调整阈值；
+  - 要用 LM Studio、DeepSeek 或通义千问，就设 `NL_BACKEND=openai` 和 `NL_OPENAI_*` 三个变量。**API key 只放 `.env`。**
+
+### 用户需要在 Telegram 里做什么
+
+1. `/wms protect ls`：核对 3 个固定目录，以及分享过的内容（按实测应当解析出 20 个路径）。
+2. `/wms organize inbox`：看计划，点 [查看明细]，确认无误后点 [确认执行]；再用 `/wms undo <审计号>` 撤回其中一条，验证可以撤销（§8 的端到端验收）。
+3. `/wms organize tree`：会收到一条消息，列出每个一级目录的计划。可以逐个点 📄 查看，再逐个点 ✅ 执行。第一次运行会包含那 40 个大目录中不在白名单和入口目录里的部分。
+4. `/wms big`：看报告，需要删的点对应的 🗑。
+5. 用自然语言说「整理一下 Pack From Shared」「把大文件单独放一起」「去重」「看看最大的文件」，确认 bot 能听懂。
+
+### 给 Cowork 的核验手段
+
+```bash
+docker compose run --rm bot wms stocktake                      # 先把索引更新到最新
+docker compose run --rm bot wms protect ls                     # 3 个固定目录 + 分享解析出的路径
+docker compose run --rm bot wms organize-tree --sample 20      # §8：每个一级目录抽 20 条移动，人工判断
+docker compose run --rm bot wms organize-tree --part big       # 只看大目录和大文件那部分
+docker compose run --rm bot wms organize-inbox                 # 入口目录的上架计划
+docker compose run --rm bot wms big                            # 大文件报告
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai   # 需要 NL_OPENAI_*
+```
+
+以上命令都只生成计划，不执行（`--sample` 连计划都不存）。按 §8 的要求，分组误判率不能超过 5%；抽查结果请贴回这里。
+
+### 怎么回滚
+
+- 镜像回滚到 M7 之前最后一次构建的 `sha-d338f20`（包含 `a46f095`、`d338f20` 两个修复；简报那次提交只改了文档，没有构建镜像）。数据库没有结构变化。M7 生成的计划留在 plans 表里，旧版本会忽略它们。
+- 只想停掉 M7 的定时任务：在 `wms.yaml` 里写 `schedule: {builtin: false}`，重启即可。
+
+### 待决问题
+
+1. **默认白名单写在了代码里**：`/收藏`、`/Cosplaytales Nako EP#1-24`、`/小千` 是 `protect.paths` 的代码默认值。这样即使 NAS 上没有 `wms.yaml`，首次自动去重也不会碰到它们。代价是这三个目录名会出现在公开镜像里（它们已经写在仓库的简报里了）。如果不希望这样，请在 `wms.yaml` 里显式写上这三个路径，我再把代码默认值改成空列表。
+2. **§2.4「其他文件夹 存入其他文件夹」**：按简报的临时解释处理，只移动其他**文件**，一级目录本身一律不动。
+3. **垃圾扩展名不看大小**：`txt/html/apk` 不论多大都会进回收站，这是按简报字面的理解；「最新地址」这类词只对 < 1 MiB 的文件生效。担心误删大的 txt 小说或 apk 的话，告诉我把大小上限也用到扩展名上。进回收站可以撤销。
+4. **入口目录里不做 §3**：organize-tree 跳过 `/Telegram`、`/Pack From Shared` 和 `/大文件`。所以 `/Pack From Shared` 里的大目录不会移到 `/大文件`，§4 也只要求对入口目录按 §2 整理。要不要也对入口目录做精简和大文件处理，请用户定。
+5. **空目录**：从深度 2 起算，二级目录本身是空的也会进回收站。
+6. **压平单链**：一次运行压一层，更深的在下一次运行时处理，结果会收敛。
+7. **§2.1 的「可选：用模型给组起名」没有做**：简报说默认关闭。现在的组名来自文件名的共同前缀，要做的话需要单独给模型加一个起名用的调用。
+8. **分享列表接口的返回格式**：按 PikPak 网页端的格式解析（`data` 列表、`file_id` 字段，也兼容 `file_ids`）。我没法连真实账号验证，请先跑 `wms protect ls`：如果解析出的路径数不是 20，把 `docker compose logs` 里的相关内容贴回来。
+9. **M5 的「入库后自动上架」仍然跑原来的 organize 规则**，不是 organize-inbox；organize-inbox 靠每小时的定时任务。要不要让 bot 转存完成后也立刻触发一次 organize-inbox，请用户定。
+10. **big-report 的「可腾出空间」是粗略估算**（久未变化的大文件 + 重复副本），不代表建议全部删除。
