@@ -16,7 +16,9 @@ MODES = ("telegram", "local", "pikpak", "auto")
 """Stored values: never translated (see tgmd.i18n). ``auto`` sends what can be
 forwarded back through Telegram and keeps what cannot on the NAS."""
 
-DIRECT_MEDIA_CHOICES = ("auto", "off")
+DIRECT_MEDIA_CHOICES = ("off", "v2", "auto")
+"""``auto`` (v1) is accepted here but refused at startup (docs/wms/M7 §7.1).
+``v2`` downloads from media-only endpoints on keys of its own (M7.1 §B)."""
 
 # Mirrors tgmd.parallel.MAX_CONNECTIONS, which imports Telethon; config does not.
 MAX_DOWNLOAD_CONNECTIONS = 8
@@ -36,7 +38,8 @@ class TelegramConfig:
     user_session: str = ""
     session_dir: Path = Path("sessions")
     direct_media: str = "off"
-    """``auto`` downloads from Telegram's media-only endpoints when it can."""
+    """``v2`` downloads from Telegram's media-only endpoints of other DCs,
+    on keys only those direct connections use (tgmd.direct). ``off`` never."""
 
     @property
     def user_session_file(self) -> Path:

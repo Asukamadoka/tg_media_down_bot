@@ -484,9 +484,10 @@ class ConfiguredClient(FakeClient):
 
 
 class TestMediaEndpoints:
-    async def test_only_usable_ipv4_media_endpoints_of_that_dc(self):
+    async def test_only_usable_media_endpoints_of_that_dc_ipv4_first(self):
+        # M7.1 §B2.5: IPv6 media endpoints are offered too, after IPv4.
         found = await media_endpoints(ConfiguredClient(), 4)
-        assert [o.ip_address for o in found] == ["149.154.166.111"]
+        assert [o.ip_address for o in found] == ["149.154.166.111", "2001:67c:4e8:f004::b"]
 
     async def test_a_dc_without_one_has_none(self):
         assert await media_endpoints(ConfiguredClient(), 1) == []
@@ -499,7 +500,9 @@ class TestMediaEndpoints:
 class TestMediaRoute:
     async def test_media_first_then_the_ordinary_endpoint(self):
         found = await MediaRoute().endpoints(ConfiguredClient(), 4)
-        assert [o.ip_address for o in found] == ["149.154.166.111", "149.154.167.91"]
+        assert [o.ip_address for o in found] == [
+            "149.154.166.111", "2001:67c:4e8:f004::b", "149.154.167.91",
+        ]
 
     async def test_a_failed_route_is_skipped_for_a_while(self, monkeypatch):
         clock = [1000.0]
@@ -519,7 +522,7 @@ class TestMediaRoute:
         assert not route.usable(4)
 
     async def test_a_refused_direct_endpoint_falls_through_to_the_proxy(self, fake_senders):
-        fake_senders.refuse = {"149.154.166.111"}
+        fake_senders.refuse = {"149.154.166.111", "2001:67c:4e8:f004::b"}
         route = MediaRoute()
         client = ConfiguredClient(home_dc=4)
         async with telethon_sources(
@@ -533,7 +536,7 @@ class TestMediaRoute:
         real_connect = FakeSender.connect
 
         async def maybe_hang(self, connection):
-            if connection[0] == "149.154.166.111":
+            if connection[0] in ("149.154.166.111", "2001:67c:4e8:f004::b"):
                 await asyncio.Event().wait()
             return await real_connect(self, connection)
 
@@ -599,7 +602,9 @@ class TestDownloaderWithTheRoute:
         path = await downloader.download(big_message(), tmp_path / "b.mkv")
         assert path.stat().st_size == 20 * 1024 * 1024
         assert client.sequential == 0
-        assert offered == [["149.154.166.111", "149.154.167.91"], ["149.154.167.91"]]
+        assert offered == [
+            ["149.154.166.111", "2001:67c:4e8:f004::b", "149.154.167.91"], ["149.154.167.91"],
+        ]
         assert not route.usable(4)
 
 

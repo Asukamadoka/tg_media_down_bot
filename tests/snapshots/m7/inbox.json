@@ -1,30 +1,46 @@
 {
- "actions": 637,
- "by_rule": {
-  "inbox:shelve:move": 100,
-  "tidy:group:create_folder": 22,
-  "tidy:group:move": 268,
-  "tidy:image:create_folder": 1,
-  "tidy:image:move": 1,
-  "tidy:misc:create_folder": 5,
-  "tidy:misc:move": 230,
-  "tidy:other:create_folder": 4,
-  "tidy:other:move": 6
- },
- "first": [
-  "  move    /Pack From Shared/(nicovideo) Cosplay_Rin -part4.mp4  →  /Cosplay/(nicovideo) Cosplay_Rin -part4.mp4",
-  "  move    /Pack From Shared/(nicovideo) Cosplay_Rin EP22 HEVC.mp4  →  /Cosplay/(nicovideo) Cosplay_Rin EP22 HEVC.mp4",
-  "  move    /Pack From Shared/(nicovideo) Cosplay_Rin 第18集.mp4  →  /Cosplay/(nicovideo) Cosplay_Rin 第18集.mp4",
-  "  move    /Pack From Shared/(nicovideo) Cosplay_Rin 第6集 x265.mp4  →  /Cosplay/(nicovideo) Cosplay_Rin 第6集 x265.mp4",
-  "  move    /Pack From Shared/(nicovideo) 旅行vlog (9).mp4  →  /Vlog/(nicovideo) 旅行vlog (9).mp4",
-  "  move    /Pack From Shared/(nicovideo) 旅行vlog EP05 x265.mp4  →  /Vlog/(nicovideo) 旅行vlog EP05 x265.mp4",
-  "  move    /Pack From Shared/(nicovideo) 旅行vlog _11 720p.mp4  →  /Vlog/(nicovideo) 旅行vlog _11 720p.mp4",
-  "  move    /Pack From Shared/(nicovideo) 舞蹈练习 -part1 x265.mp4  →  /舞蹈/(nicovideo) 舞蹈练习 -part1 x265.mp4",
-  "  move    /Pack From Shared/Cosplay_Rin (1).mp4  →  /Cosplay/Cosplay_Rin (1).mp4",
-  "  move    /Pack From Shared/Cosplay_Rin (5) HEVC.mp4  →  /Cosplay/Cosplay_Rin (5) HEVC.mp4",
-  "  move    /Pack From Shared/Cosplay_Rin (9) (2).mp4  →  /Cosplay/Cosplay_Rin (9) (2).mp4",
-  "  move    /Pack From Shared/Cosplay_Rin (9) (3).mp4  →  /Cosplay/Cosplay_Rin (9) (3).mp4"
- ],
- "sha256": "66eebccad8abf1fe37d0bb4045f2ec4f9b79aaaa74405880752cc7d76e5cbca1",
- "source": "organize-inbox"
+ "plans": [
+  {
+   "actions": 556,
+   "by_rule": {
+    "inbox:shelve:move": 99,
+    "tidy:group:create_folder": 17,
+    "tidy:group:move": 196,
+    "tidy:image:create_folder": 1,
+    "tidy:image:move": 1,
+    "tidy:misc:create_folder": 5,
+    "tidy:misc:move": 230,
+    "tidy:other:create_folder": 1,
+    "tidy:other:move": 6
+   },
+   "first": [
+    "  move    /Pack From Shared/(nicovideo) Cosplay_Rin -part4.mp4  →  /Cosplay/(nicovideo) Cosplay_Rin -part4.mp4",
+    "  move    /Pack From Shared/(nicovideo) Cosplay_Rin EP22 HEVC.mp4  →  /Cosplay/(nicovideo) Cosplay_Rin EP22 HEVC.mp4",
+    "  move    /Pack From Shared/(nicovideo) Cosplay_Rin 第18集.mp4  →  /Cosplay/(nicovideo) Cosplay_Rin 第18集.mp4",
+    "  move    /Pack From Shared/(nicovideo) Cosplay_Rin 第6集 x265.mp4  →  /Cosplay/(nicovideo) Cosplay_Rin 第6集 x265.mp4",
+    "  move    /Pack From Shared/(nicovideo) 旅行vlog (9).mp4  →  /Vlog/(nicovideo) 旅行vlog (9).mp4",
+    "  move    /Pack From Shared/(nicovideo) 旅行vlog EP05 x265.mp4  →  /Vlog/(nicovideo) 旅行vlog EP05 x265.mp4",
+    "  move    /Pack From Shared/(nicovideo) 旅行vlog _11 720p.mp4  →  /Vlog/(nicovideo) 旅行vlog _11 720p.mp4",
+    "  move    /Pack From Shared/(nicovideo) 舞蹈练习 -part1 x265.mp4  →  /舞蹈/(nicovideo) 舞蹈练习 -part1 x265.mp4",
+    "  move    /Pack From Shared/Cosplay_Rin (1).mp4  →  /Cosplay/Cosplay_Rin (1).mp4",
+    "  move    /Pack From Shared/Cosplay_Rin (5) HEVC.mp4  →  /Cosplay/Cosplay_Rin (5) HEVC.mp4",
+    "  move    /Pack From Shared/Cosplay_Rin (9) (2).mp4  →  /Cosplay/Cosplay_Rin (9) (2).mp4",
+    "  move    /Pack From Shared/Cosplay_Rin (9) (3).mp4  →  /Cosplay/Cosplay_Rin (9) (3).mp4"
+   ],
+   "sha256": "f903f54d71a30c8c071a064a6852571ac673d2be211d17ec5e8529da5ae15589",
+   "source": "organize-inbox"
+  },
+  {
+   "actions": 1,
+   "by_rule": {
+    "tidy:ad:trash": 1
+   },
+   "first": [
+    "  trash   /Pack From Shared/[www.xxdm.com] Nako _34 1080p.zip",
+    "  · suspected ads in /Telegram, /Pack From Shared: 1 file(s) to the trash. Check each before confirming; this plan is never applied on its own."
+   ],
+   "sha256": "04983e165799593cd1fca28cf4a2f280dcb27771ee5f2c67124096f1c130c90d",
+   "source": "organize-inbox-ads"
+  }
+ ]
 }

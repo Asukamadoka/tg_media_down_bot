@@ -361,6 +361,12 @@ class TestDownloadTuning:
         config = load_config(write_config(tmp_path, MINIMAL_YAML))
         assert config.telegram.direct_media == "off"
 
+    def test_direct_media_v2(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TG_DIRECT_MEDIA", "v2")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        config.validate()
+        assert config.telegram.direct_media == "v2"
+
     def test_direct_media_rejects_a_typo(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TG_DIRECT_MEDIA", "yes")
         with pytest.raises(ConfigError, match="TG_DIRECT_MEDIA"):

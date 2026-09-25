@@ -143,7 +143,8 @@ class TestTheAcceptanceFlow:
 
         pressed = await press(handlers, apply_data)
         assert "执行" in pressed.edits[0][0] and pressed.edits[0][1]["buttons"] is None
-        assert exists(drive, "/Cos/Cos 花絮/Cos 花絮 EP1.mp4")
+        # Shelved into /Cos; "Cos 花絮" is named like /Cos, so no /Cos/Cos 花絮/ (M7.1 A4.1).
+        assert exists(drive, "/Cos/Cos 花絮 EP1.mp4")
         audit = await inbot.embedded.audit(limit=20)
         moved = [e for e in audit if e["action"] == "move"]
         assert moved, "the confirmed moves are in the audit"
@@ -289,6 +290,24 @@ class TestDirectMediaIsRefused:
             assert app.route is None
             assert config.telegram.direct_media == "off"
             assert "TG_DIRECT_MEDIA=auto is refused" in caplog.text
+        finally:
+            await app.stop()
+
+    async def test_v2_builds_its_own_route(self, tmp_path, monkeypatch):
+        # M7.1 §B: v2 is the one direct route the bot runs, on its own keys.
+        bot, user = FakeClient(), FakeClient(user_id=9, username="reader", is_bot=False)
+
+        async def fake_start_clients(config, stored_session=None, *, on_rejected=None):
+            return bot, user
+
+        monkeypatch.setattr("tgmd.app.start_clients", fake_start_clients)
+        config = make_config(tmp_path)
+        config.telegram.direct_media = "v2"
+        app = Application(config)
+        await app.start()
+        try:
+            assert app.route is None and app.direct is not None
+            assert app.queue._downloader._direct is app.direct  # noqa: SLF001
         finally:
             await app.stop()
 

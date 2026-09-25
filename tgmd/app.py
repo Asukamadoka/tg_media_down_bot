@@ -18,6 +18,7 @@ from .clients import start_clients
 from .config import Config, ConfigError, load_config
 from .db import Database
 from .delivery import Delivery
+from .direct import DirectRouteV2
 from .downloader import Downloader
 from .forwarder import Forwarder
 from .handlers import BotHandlers
@@ -69,6 +70,7 @@ class Application:
         self.bot = None
         self.user = None
         self.route: MediaRoute | None = None
+        self.direct: DirectRouteV2 | None = None
         self.wms: WmsInBot | None = None
         self.wms_panel: WmsPanel | None = None
         self.session_rejected: tuple[str, str] | None = None
@@ -128,6 +130,9 @@ class Application:
             )
             config.telegram.direct_media = "off"
         self.route = None
+        # TG_DIRECT_MEDIA=v2 (docs/wms/M7.1 §B): keys of its own, stored in
+        # the database, for DCs other than the reading account's home DC.
+        self.direct = DirectRouteV2(self.db) if config.telegram.direct_media == "v2" else None
 
         self.queue = JobQueue(
             config=config,
@@ -137,10 +142,16 @@ class Application:
                 reading_client, auto_join=config.download.auto_join_invites
             ),
             downloader=Downloader(
-                reading_client, connections=config.download.connections, route=self.route
+                reading_client,
+                connections=config.download.connections,
+                route=self.route,
+                direct=self.direct,
             ),
             bot_downloader=Downloader(
-                self.bot, connections=config.download.connections, route=self.route
+                self.bot,
+                connections=config.download.connections,
+                route=self.route,
+                direct=self.direct,
             ),
             delivery=delivery,
             pikpak=self.pikpak,
@@ -282,6 +293,7 @@ class Application:
                     client,
                     connections=self.config.download.connections,
                     route=self.route,
+                    direct=self.direct,
                 ),
             )
         if self.handlers is not None:

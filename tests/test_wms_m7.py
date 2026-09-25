@@ -72,7 +72,7 @@ class World:
     async def tree(self, **kw) -> list[Plan]:
         return await tidy.organize_tree(self.ctx, at=NOW, spec=kw.pop("spec", TidySpec()), **kw)
 
-    async def inbox(self, **kw) -> Plan:
+    async def inbox(self, **kw) -> list[Plan]:
         return await tidy.organize_inbox(self.ctx, at=NOW, spec=kw.pop("spec", TidySpec()), **kw)
 
 
@@ -246,7 +246,7 @@ class TestWhitelistProperty:
                  for i in range(rng.randint(1, 3))]
         planned = [
             *await world.tree(),
-            await world.inbox(),
+            *await world.inbox(),
             await organize.dedupe(world.ctx),
             await organize.organize(world.ctx, parse_rules({"rules": rules}), at=NOW),
         ]
@@ -326,8 +326,9 @@ class TestTree:
             ("/Cos/Nako EP02.mp4", "/Cos/Nako/Nako EP02.mp4"),
             ("/Cos/001.mp4", "/Cos/杂/001.mp4"),
             ("/Cos/clip.mov", "/Cos/杂/clip.mov"),
-            ("/Cos/pack.zip", "/Cos/其他/pack.zip"),
-            ("/Cos/notes.pdf", "/Cos/其他/notes.pdf"),
+            # One 其他 for the whole drive (M7.1 A2).
+            ("/Cos/pack.zip", "/其他/pack.zip"),
+            ("/Cos/notes.pdf", "/其他/notes.pdf"),
             ("/Cos/pic.jpg", "/写真/杂/pic.jpg"),
             # A single file joins the folder that already has its name.
             ("/Cos/Yuki 03.mp4", "/Cos/Yuki/Yuki 03.mp4"),
@@ -352,7 +353,8 @@ class TestTree:
         world.drive.add("/A/Stuff/最新地址合集.mp4", size=5 * 1024**2)  # a word, but big
         await world.sync()
         (plan,) = await world.tree()
-        assert sorted(trashed(plan)) == ["/A/Empty", "/A/Show/inner", "/A/Stuff/big.txt",
+        # Inside the second-level folders only: /A/Empty itself stays (M7.1 A1).
+        assert sorted(trashed(plan)) == ["/A/Empty/sub", "/A/Show/inner", "/A/Stuff/big.txt",
                                           "/A/Stuff/最新地址.mp4"]
         assert sorted(moves(plan)) == [
             ("/A/Show/inner/deeper/e1.mp4", "/A/Show/e1.mp4"),
@@ -377,22 +379,43 @@ class TestTree:
                                        ("/A/S/inner/Z/y.mp4", "/A/S/inner/y.mp4")]
         assert trashed(plan) == ["/A/S/inner/Z"]
 
-    async def test_big_folders_and_files(self, world):
-        world.drive.add("/A/Huge/part1.mkv", size=30 * GB)
+    async def test_big_folders_move_whole(self, world):
+        """M7.1 A1: the second-level folder is the unit and is never split up."""
+        world.drive.add("/A/Huge/part1.mkv", size=30 * GB)     # 60 GiB in all
         world.drive.add("/A/Huge/part2.mkv", size=30 * GB)
-        world.drive.add("/A/Mid/big.mkv", size=5 * GB)
+        world.drive.add("/A/Mid/big.mkv", size=5 * GB)         # one file ≥ 4 GiB
         world.drive.add("/A/Mid/small.mkv", size=1)
         world.drive.add("/A/Mid/deep/deeper/also-big.mkv", size=4 * GB)
+        world.drive.add("/A/Small/a.mkv", size=GB)
+        world.drive.add("/A/Small/ad.url", size=1)
+        world.drive.add("/A/loose-big.mkv", size=6 * GB)       # directly in /A
         await world.sync()
-        (plan,) = await world.tree()
-        assert moves(plan) == [
-            # Lifted first (deep holds only deeper) ...
-            ("/A/Mid/deep/deeper/also-big.mkv", "/A/Mid/deep/also-big.mkv"),
+        (plan,) = await world.tree(parts={"big"})
+        assert sorted(moves(plan)) == [
             ("/A/Huge", "/大文件/A/Huge"),
-            ("/A/Mid/big.mkv", "/大文件/A/big.mkv"),
-            # ... then set apart from the path it will have by then.
-            ("/A/Mid/deep/also-big.mkv", "/大文件/A/also-big.mkv"),
+            ("/A/Mid", "/大文件/A/Mid"),
+            ("/A/loose-big.mkv", "/大文件/A/loose-big.mkv"),
         ]
+        # Nothing ever leaves a second-level folder for /大文件 on its own.
+        assert not [a for a in plan.actions if a.type is ActionType.MOVE
+                    and a.before["path"].count("/") >= 3
+                    and a.after["path"].startswith("/大文件")]
+        plan_id = await plans.save(world.ctx, plan)
+        await plans.apply(world.ctx, plan_id)
+        for relative in ["big.mkv", "small.mkv", "deep/deeper/also-big.mkv"]:
+            assert world.exists(f"/大文件/A/Mid/{relative}")  # the same relative path
+        assert world.exists("/A/Small/a.mkv")
+
+    async def test_slimming_comes_first_and_stays_inside(self, world):
+        # 49 GiB of video plus a 2 GiB junk file: over 50 GiB only with the junk.
+        world.drive.add("/A/Near/v.mkv", size=int(3.9 * GB))
+        for n in range(12):
+            world.drive.add(f"/A/Near/part{n}.mkv", size=int(3.8 * GB))
+        world.drive.add("/A/Near/readme.txt", size=2 * GB)
+        await world.sync()
+        (plan,) = await world.tree(parts={"slim", "big"})
+        assert trashed(plan) == ["/A/Near/readme.txt"]
+        assert moves(plan) == []  # without the junk it is under 50 GiB
 
     async def test_special_and_protected_folders_are_left_alone(self, world):
         for top in ["/Telegram", "/Pack From Shared", "/大文件/A", "/小千"]:
@@ -408,7 +431,7 @@ class TestTree:
         await world.sync()
         assert [p.source for p in await world.tree(scope="/B/whatever")] == ["organize-tree:/B"]
         (plan,) = await world.tree(scope="/B", parts={"big"})
-        assert moves(plan) == [("/B/X/big.mkv", "/大文件/B/big.mkv")]
+        assert moves(plan) == [("/B/X", "/大文件/B/X")]
 
     async def test_applying_then_planning_again_finds_nothing(self, world):
         for name in ["Nako EP01.mp4", "Nako EP02.mp4", "x.mov", "y.jpg", "z.zip"]:
@@ -423,7 +446,7 @@ class TestTree:
         assert world.exists("/Cos/Nako/Nako EP01.mp4")
         assert world.exists("/写真/杂/y.jpg")
         assert world.exists("/Cos/S/a.mp4") and not world.exists("/Cos/S/in")
-        assert world.exists("/大文件/Cos/b.mkv")
+        assert world.exists("/大文件/Cos/Big/b.mkv")
         await world.sync()
         again = await world.tree()
         assert all(p.is_empty for p in again)
@@ -442,14 +465,16 @@ class TestInbox:
         world.drive.add("/Telegram/cabbage.mp4", size=1)             # "AB" is not a word here
         world.drive.add("/Telegram/杂七杂八.mp4", size=1)             # "杂" is too short
         world.drive.add("/Pack From Shared/nako cos 03.mp4", size=1)  # an alias
+        world.drive.add("/Pack From Shared/nako cos 04.mp4", size=1)
         await world.sync()
         spec = TidySpec.model_validate({"inbox": {"aliases": {"写真": ["nako"]}}})
-        plan = await world.inbox(spec=spec)
+        (plan,) = await world.inbox(spec=spec)
         found = dict(moves(plan))
         assert found["/Telegram/Cosplay 合集 EP1.mp4"] == "/Cosplay/Cosplay 合集 EP1.mp4"
-        # Arrived in /Cosplay, they are then grouped there with its loose files.
-        assert (found["/Cosplay/Cosplay 合集 EP1.mp4"]
-                == "/Cosplay/Cosplay 合集/Cosplay 合集 EP1.mp4")
+        # A group named like the folder it arrived in stays put (M7.1 A4.1) ...
+        assert "/Cosplay/Cosplay 合集 EP1.mp4" not in found
+        # ... any other joins the grouping there.
+        assert found["/写真/nako cos 03.mp4"] == "/写真/nako cos/nako cos 03.mp4"
         assert found["/Telegram/写真 folder"] == "/写真/写真 folder"
         assert found["/Pack From Shared/nako cos 03.mp4"] == "/写真/nako cos 03.mp4"
         assert found["/Telegram/cabbage.mp4"] == "/Telegram/杂/cabbage.mp4"
@@ -459,7 +484,7 @@ class TestInbox:
         world.drive.add("/Telegram/a.mp4", size=1)
         world.drive.add("/Pack From Shared/b.mp4", size=1)
         await world.sync()
-        plan = await world.inbox(folders=["/Pack From Shared"])
+        (plan,) = await world.inbox(folders=["/Pack From Shared"])
         assert [src for src, _ in moves(plan)] == ["/Pack From Shared/b.mp4"]
 
 
@@ -584,7 +609,7 @@ class TestCommandLine:
         lines = [line for line in result.output.splitlines() if "→" in line]
         assert len(lines) == 2  # two sample moves from the one tidied folder
         result = self.invoke("organize-tree", "--part", "big")
-        assert "/大文件/Cos/big.mkv" in result.output and "Nako" not in result.output
+        assert "/大文件/Cos/F" in result.output and "Nako" not in result.output
         assert self.invoke("organize-tree", "--part", "nonsense").exit_code == 2
         result = self.invoke("organize-inbox")
         assert "/Telegram/Cos extra.mp4" in result.output
