@@ -322,7 +322,15 @@ class Delivery:
                 remote_path=remote,
             )
         if status is DownloadStatus.error:
+            if task.message:
+                raise DeliveryError(
+                    key="err.delivery.pikpak_failed", reason=escape_html(task.message)
+                )
             raise DeliveryError(key="err.delivery.pikpak_error")
+        if status is DownloadStatus.not_found:
+            # PikPak accepted the request but gave back no task to follow, so
+            # nothing is fetching. Saying "still fetching" here was a lie.
+            raise DeliveryError(key="err.delivery.pikpak_no_task")
         return DeliveryResult(
             mode="pikpak",
             summary=t("delivery.pikpak_fetching", name=escape_html(info.file_name)),

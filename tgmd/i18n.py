@@ -778,6 +778,10 @@ CATALOG: dict[str, dict[str, str]] = {
             ' and PUBLIC_BASE_URL, or use /mode local. Magnet and URL transfers work without it.'
         ),
         'err.delivery.pikpak_error': 'PikPak reported an error fetching the file',
+        'err.delivery.pikpak_failed': 'PikPak could not fetch the file: {reason}',
+        'err.delivery.pikpak_no_task': (
+            'PikPak accepted the request but created no download task; nothing was saved'
+        ),
         'err.delivery.too_large': '{size} is over the {limit} a bot can upload',
         'delivery.sent': 'sent {size}',
         'delivery.saved_local': 'saved to <code>{path}</code> ({size})',
@@ -1559,6 +1563,8 @@ CATALOG: dict[str, dict[str, str]] = {
             'C_BASE_URL，或改用 /mode local。磁力链接和 URL 转存不受影响。'
         ),
         'err.delivery.pikpak_error': 'PikPak 报告拉取文件时出错',
+        'err.delivery.pikpak_failed': 'PikPak 拉取文件失败：{reason}',
+        'err.delivery.pikpak_no_task': 'PikPak 接受了请求但没有建立下载任务，文件没有存进网盘',
         'err.delivery.too_large': '{size} 超过了机器人可上传的 {limit}',
         'delivery.sent': '已发送 {size}',
         'delivery.saved_local': '已保存到 <code>{path}</code>（{size}）',
