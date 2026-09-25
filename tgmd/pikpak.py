@@ -61,10 +61,34 @@ class OfflineTask:
     task_id: str
     file_id: str
     name: str
+    message: str = ""
+    """PikPak's own explanation when the task failed."""
 
     @property
     def known(self) -> bool:
-        return bool(self.task_id and self.file_id)
+        # PikPak often answers a new URL task with an empty file_id: the
+        # file only exists once the task starts. The task id alone is enough
+        # to follow it. A file id without a task means PikPak finished on the
+        # spot (the result carried the file itself).
+        return bool(self.task_id or self.file_id)
+
+
+# PikPak's task phases, as the task list reports them.
+_ALL_PHASES = [
+    "PHASE_TYPE_PENDING",
+    "PHASE_TYPE_RUNNING",
+    "PHASE_TYPE_COMPLETE",
+    "PHASE_TYPE_ERROR",
+]
+_PHASE_STATUS = {
+    "PHASE_TYPE_PENDING": DownloadStatus.downloading,
+    "PHASE_TYPE_RUNNING": DownloadStatus.downloading,
+    "PHASE_TYPE_COMPLETE": DownloadStatus.done,
+    "PHASE_TYPE_ERROR": DownloadStatus.error,
+}
+# How many of the newest tasks to look through for ours. A task we just
+# created is always near the top.
+_TASK_PAGE = 50
 
 
 @dataclass
@@ -323,29 +347,56 @@ class PikPakService:
         timeout: int | None = None,
         user_id: int | None = None,
     ) -> DownloadStatus:
-        """Poll until the task finishes, or until ``timeout`` seconds elapse."""
-        if not task.known:
-            return DownloadStatus.not_found
+        """Poll until the task finishes, or until ``timeout`` seconds elapse.
+
+        Returns ``done``, ``error`` (with ``task.message`` set), ``not_found``
+        when PikPak gave us nothing to follow, or ``downloading`` when time ran
+        out first.
+
+        The phase is read from PikPak's task list. pikpakapi's own
+        get_task_status() cannot be trusted for this: it only looks at running
+        and failed tasks, calls a failed one "downloading", and calls a
+        pending one "done" because PikPak creates the target file entry the
+        moment the task is queued. That is how a transfer that never happened
+        was reported as saved.
+        """
+        if not task.task_id:
+            return DownloadStatus.done if task.file_id else DownloadStatus.not_found
 
         client = await self.client(user_id)
         deadline = time.monotonic() + (timeout or self._config.task_timeout)
-        # pikpakapi's get_task_status() only answers downloading, done or
-        # not_found. It returns `error` when its own request failed, which
-        # means "could not tell this time", not "PikPak gave up". Treating
-        # that as final unpublished the file PikPak was still fetching.
-        known = DownloadStatus.downloading
-        while time.monotonic() < deadline:
-            try:
-                status = await client.get_task_status(task.task_id, task.file_id)
-            except PikpakException as exc:
-                status = DownloadStatus.error
-                log.info("task status check failed: %s", exc)
-            if status in (DownloadStatus.done, DownloadStatus.not_found):
-                return status
-            if status is not DownloadStatus.error:
-                known = status
+        status = DownloadStatus.downloading
+        while True:
+            found = await self._find_task(client, task.task_id)
+            if found is not None:
+                status = _PHASE_STATUS.get(str(found.get("phase")), DownloadStatus.downloading)
+                if status is DownloadStatus.done:
+                    task.file_id = str(found.get("file_id") or task.file_id)
+                    return status
+                if status is DownloadStatus.error:
+                    task.message = str(found.get("message") or "").strip()
+                    log.info("PikPak task %s failed: %s", task.task_id, task.message)
+                    return status
+            if time.monotonic() >= deadline:
+                return DownloadStatus.downloading
             await asyncio.sleep(_POLL_INTERVAL)
-        return known
+
+    @staticmethod
+    async def _find_task(client: PikPakApi, task_id: str) -> dict | None:
+        """Our task as PikPak's task list shows it, or None if it cannot tell.
+
+        A failed request is "could not tell this time", never a verdict: the
+        task may well still be running.
+        """
+        try:
+            page = await client.offline_list(size=_TASK_PAGE, phase=_ALL_PHASES)
+        except PikpakException as exc:
+            log.info("task list check failed: %s", exc)
+            return None
+        for item in (page or {}).get("tasks") or []:
+            if str(item.get("id")) == task_id:
+                return item
+        return None
 
     # ------------------------------------------------------------ share links
 

@@ -12,6 +12,7 @@ import inspect
 
 import pytest
 from pikpakapi import DownloadStatus, PikPakApi
+from pikpakapi.PikpakException import PikpakException
 
 from tgmd.config import PikPakConfig
 from tgmd.db import Database
@@ -33,7 +34,7 @@ class TestLibraryContract:
             ("login", set()),
             ("offline_download", {"file_url", "parent_id", "name"}),
             ("path_to_id", {"path", "create"}),
-            ("get_task_status", {"task_id", "file_id"}),
+            ("offline_list", {"size", "phase"}),
             ("get_share_info", {"share_link", "pass_code"}),
             ("restore", {"share_id", "pass_code_token", "file_ids"}),
             ("get_quota_info", set()),
@@ -50,7 +51,7 @@ class TestLibraryContract:
             "login",
             "offline_download",
             "path_to_id",
-            "get_task_status",
+            "offline_list",
             "get_share_info",
             "restore",
             "get_quota_info",
@@ -67,6 +68,16 @@ class TestLibraryContract:
 
     def test_download_status_values(self):
         assert {DownloadStatus.done, DownloadStatus.error, DownloadStatus.not_found}
+
+
+def phase_page(phase, *, task_id="t1", file_id="f1", message=""):
+    """PikPak's task list with our task in ``phase``, behind someone else's."""
+    return {
+        "tasks": [
+            {"id": "other", "phase": "PHASE_TYPE_ERROR", "message": "not ours"},
+            {"id": task_id, "phase": phase, "file_id": file_id, "message": message},
+        ]
+    }
 
 
 class FakeClient:
@@ -87,9 +98,12 @@ class FakeClient:
             {"task": {"id": "t1", "file_id": "f1", "file_name": name or "x"}},
         )
 
-    async def get_task_status(self, task_id, file_id):
-        self.calls.append(("get_task_status", task_id, file_id))
-        return self.responses.get("get_task_status", DownloadStatus.done)
+    async def offline_list(self, size=10000, next_page_token=None, phase=None):
+        self.calls.append(("offline_list", size, tuple(phase or ())))
+        answer = self.responses.get("offline_list", phase_page("PHASE_TYPE_COMPLETE"))
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     async def get_share_info(self, share_link, pass_code=None):
         self.calls.append(("get_share_info", share_link, pass_code))
@@ -223,47 +237,93 @@ class TestOfflineDownload:
         await service.offline_download("https://example.com/a", folder="/X", name="a")
         assert ("offline_download", "https://example.com/a", "folder-1", "a") in client.calls
 
-    async def test_waiting_on_an_unknown_task_reports_not_found(self, db):
+    async def test_a_task_without_a_file_id_is_still_followed(self, db):
+        # PikPak answers a new URL task with an empty file_id. Treating that
+        # as "unknown" skipped the wait and told the user it was fetching.
+        client = FakeClient(offline_download={"task": {"id": "t1", "file_id": ""}})
+        service = make_service(db, client)
+        task = await service.offline_download("https://example.com/a")
+        assert task.known
+        assert await service.wait_for_task(task) is DownloadStatus.done
+        assert task.file_id == "f1"
+
+    async def test_waiting_on_nothing_reports_not_found(self, db):
         service = make_service(db, FakeClient(offline_download={}))
         task = await service.offline_download("https://example.com/a")
         assert await service.wait_for_task(task) is DownloadStatus.not_found
 
-    async def test_completed_task_is_reported_done(self, db):
-        service = make_service(db, FakeClient())
+    async def test_a_file_without_a_task_is_already_done(self, db):
+        client = FakeClient(offline_download={"file": {"id": "f9", "name": "n.bin"}})
+        service = make_service(db, client)
         task = await service.offline_download("https://example.com/a")
         assert await service.wait_for_task(task) is DownloadStatus.done
 
-    async def test_a_failed_status_check_is_not_a_failed_transfer(self, db, monkeypatch):
-        # pikpakapi answers `error` when its own request failed. The task may
-        # well still be running, so that is "unknown", never final: a final
-        # answer here made delivery unpublish a file PikPak was still reading.
+    async def test_completed_task_is_reported_done(self, db):
+        client = FakeClient()
+        service = make_service(db, client)
+        task = await service.offline_download("https://example.com/a")
+        assert await service.wait_for_task(task) is DownloadStatus.done
+        phases = next(call[2] for call in client.calls if call[0] == "offline_list")
+        assert set(phases) == {
+            "PHASE_TYPE_PENDING", "PHASE_TYPE_RUNNING",
+            "PHASE_TYPE_COMPLETE", "PHASE_TYPE_ERROR",
+        }
+
+    async def test_a_pending_task_is_not_done(self, db, monkeypatch):
+        # The bug seen on the NAS: PikPak creates the target file the moment
+        # a task is queued, and pikpakapi's get_task_status() took that file
+        # for a finished transfer.
         monkeypatch.setattr("tgmd.pikpak._POLL_INTERVAL", 0.01)
-        service = make_service(
-            db, FakeClient(get_task_status=DownloadStatus.error), task_timeout=0.05
-        )
+        client = FakeClient(offline_list=phase_page("PHASE_TYPE_PENDING"))
+        service = make_service(db, client, task_timeout=0.05)
         task = await service.offline_download("https://example.com/a")
         assert await service.wait_for_task(task) is DownloadStatus.downloading
 
-    async def test_polling_carries_on_past_a_failed_check(self, db, monkeypatch):
-        monkeypatch.setattr("tgmd.pikpak._POLL_INTERVAL", 0.0)
-        client = SequencedClient(
-            [DownloadStatus.downloading, DownloadStatus.error, DownloadStatus.done]
+    async def test_a_failed_task_is_an_error_with_pikpaks_reason(self, db):
+        client = FakeClient(
+            offline_list=phase_page("PHASE_TYPE_ERROR", message="Download timed out")
         )
+        service = make_service(db, client)
+        task = await service.offline_download("https://example.com/a")
+        assert await service.wait_for_task(task) is DownloadStatus.error
+        assert task.message == "Download timed out"
+
+    async def test_a_failed_status_check_is_not_a_failed_transfer(self, db, monkeypatch):
+        # A failed list request means "could not tell this time". The task
+        # may well still be running, so that is never final.
+        monkeypatch.setattr("tgmd.pikpak._POLL_INTERVAL", 0.01)
+        client = FakeClient(offline_list=PikpakException("network down"))
+        service = make_service(db, client, task_timeout=0.05)
+        task = await service.offline_download("https://example.com/a")
+        assert await service.wait_for_task(task) is DownloadStatus.downloading
+
+    async def test_polling_carries_on_until_the_task_finishes(self, db, monkeypatch):
+        monkeypatch.setattr("tgmd.pikpak._POLL_INTERVAL", 0.0)
+        client = SequencedClient([
+            phase_page("PHASE_TYPE_PENDING"),
+            PikpakException("blip"),
+            {"tasks": []},
+            phase_page("PHASE_TYPE_RUNNING"),
+            phase_page("PHASE_TYPE_COMPLETE"),
+        ])
         service = make_service(db, client)
         task = await service.offline_download("https://example.com/a")
         assert await service.wait_for_task(task) is DownloadStatus.done
 
 
 class SequencedClient(FakeClient):
-    """Answers status checks from a script, then repeats the last answer."""
+    """Answers task-list requests from a script, then repeats the last one."""
 
-    def __init__(self, statuses):
+    def __init__(self, pages):
         super().__init__()
-        self._statuses = list(statuses)
+        self._pages = list(pages)
 
-    async def get_task_status(self, task_id, file_id):
-        self.calls.append(("get_task_status", task_id, file_id))
-        return self._statuses.pop(0) if len(self._statuses) > 1 else self._statuses[0]
+    async def offline_list(self, size=10000, next_page_token=None, phase=None):
+        self.calls.append(("offline_list", size, tuple(phase or ())))
+        page = self._pages.pop(0) if len(self._pages) > 1 else self._pages[0]
+        if isinstance(page, Exception):
+            raise page
+        return page
 
 
 class TestShareLinks:

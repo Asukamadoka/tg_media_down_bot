@@ -38,10 +38,13 @@ class FakeBot:
 
 
 class FakePikPak:
-    def __init__(self, *, available=True, status=DownloadStatus.done, error=None) -> None:
+    def __init__(
+        self, *, available=True, status=DownloadStatus.done, error=None, message=""
+    ) -> None:
         self.available = available
         self.status = status
         self.error = error
+        self.message = message
 
     async def available_for(self, user_id):
         return self.available
@@ -52,6 +55,7 @@ class FakePikPak:
         return OfflineTask(task_id="t", file_id="f", name=name or "a <b> & c.iso")
 
     async def wait_for_task(self, task, *, timeout=None, user_id=None):
+        task.message = self.message
         return self.status
 
 
@@ -169,6 +173,22 @@ class TestPikPak:
         files = FakeFiles()
         pikpak = FakePikPak(error=PikPakError("quota exceeded"))
         with pytest.raises(DeliveryError, match="quota exceeded"):
+            await make(db, pikpak=pikpak, files=files).to_pikpak(sample, INFO)
+        assert files.live == set()
+
+    async def test_pikpaks_reason_for_a_failure_reaches_the_user(self, db, sample):
+        files = FakeFiles()
+        pikpak = FakePikPak(status=DownloadStatus.error, message="URL <expired>")
+        with pytest.raises(DeliveryError, match="URL &lt;expired&gt;"):
+            await make(db, pikpak=pikpak, files=files).to_pikpak(sample, INFO)
+        assert files.live == set()
+
+    async def test_no_task_is_a_failure_not_still_fetching(self, db, sample):
+        # Seen on the NAS: nothing was fetching, yet the user was told the
+        # file would "appear in your drive shortly".
+        files = FakeFiles()
+        pikpak = FakePikPak(status=DownloadStatus.not_found)
+        with pytest.raises(DeliveryError, match="no download task"):
             await make(db, pikpak=pikpak, files=files).to_pikpak(sample, INFO)
         assert files.live == set()
 
