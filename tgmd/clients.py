@@ -11,9 +11,11 @@ Two clients are needed, and for different reasons:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 
 from telethon import TelegramClient
+from telethon.errors import RPCError
 from telethon.sessions import StringSession
 
 from .config import Config
@@ -125,8 +127,23 @@ async def start_clients(
         )
         return bot, None
 
-    await user.connect()
-    if not await user.is_user_authorized():
+    try:
+        await user.connect()
+        authorized = await user.is_user_authorized()
+    except RPCError as exc:
+        # Telegram can revoke a session outright: AuthKeyDuplicatedError when
+        # the same key was used from two IP addresses at once, or the account
+        # ended the session on another device. Raising here crash-looped the
+        # whole bot and took /setup telegram, the way to fix it, down too.
+        log.error(
+            "Telegram rejected the user session (%s); continuing without it. "
+            "An admin can sign in again with /setup telegram.",
+            type(exc).__name__,
+        )
+        with contextlib.suppress(Exception):
+            await user.disconnect()
+        return bot, None
+    if not authorized:
         log.error(
             "the user session is not authorized; run `python -m tgmd.login` to "
             "create a fresh one. Continuing without it."
