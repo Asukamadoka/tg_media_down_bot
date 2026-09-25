@@ -433,6 +433,18 @@ class BotHandlers:
 
     async def on_cache(self, event) -> None:
         """Choose the upload cache channel without hunting for its id."""
+        if await self._is_channel_post(event):
+            # A post in a broadcast channel carries the channel as its sender,
+            # never the person who wrote it, so the allow list cannot vouch
+            # for it. Accept it when an admin of this bot also runs the
+            # channel: anyone else could otherwise add the bot to a channel of
+            # their own and have every cached file copied into it.
+            if not await self._channel_run_by_admin(event.chat_id):
+                log.info("refused /cache in channel %s: no bot admin runs it", event.chat_id)
+                await event.reply(t("cache.channel_not_admin"))
+                return
+            await self._use_cache_chat(event, event.chat_id)
+            return
         if not await self._authorized(event):
             return
         if not self._config.access.is_admin(event.sender_id):
@@ -467,6 +479,29 @@ class BotHandlers:
             else t("cache.state_none")
         )
         await event.reply(t("cache.help", state=state), parse_mode="html")
+
+    @staticmethod
+    async def _is_channel_post(event) -> bool:
+        """True for a post in a broadcast channel (not a group or a DM)."""
+        if event.is_private or not getattr(event, "is_channel", False):
+            return False
+        if getattr(event, "is_group", False):
+            return False
+        return event.sender_id is None or event.sender_id == event.chat_id
+
+    async def _channel_run_by_admin(self, chat_id: int) -> bool:
+        """Whether one of this bot's admins is the channel's creator or an admin."""
+        for admin_id in self._config.access.admin_user_ids:
+            try:
+                permissions = await self._bot.get_permissions(chat_id, admin_id)
+            except Exception:
+                log.debug("could not read %s's rights in %s", admin_id, chat_id, exc_info=True)
+                continue
+            if getattr(permissions, "is_creator", False) or getattr(
+                permissions, "is_admin", False
+            ):
+                return True
+        return False
 
     async def _use_cache_chat(self, event, chat_id: int) -> None:
         """Verify the bot can really use a chat as a cache, then store it."""

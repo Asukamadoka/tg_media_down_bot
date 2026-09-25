@@ -345,6 +345,10 @@ CATALOG: dict[str, dict[str, str]] = {
                              'n in a reading account and connect PikPak, both from here.'
                          ),
         'cache.only_admin': 'Only an admin can change the upload cache.',
+        'cache.channel_not_admin': (
+            'None of this bot\'s admins runs this channel, so it cannot become the upload cache.'
+            ' Make the admin\'s own account an admin of the channel, then send /cache again.'
+        ),
         'cache.disabled': 'Upload cache disabled. Every request downloads again.',
         'cache.bad_id': (
                             'That does not look like a chat id. Ids look like '
@@ -1165,6 +1169,10 @@ CATALOG: dict[str, dict[str, str]] = {
                              'PikPak。'
                          ),
         'cache.only_admin': '只有管理员能修改上传缓存。',
+        'cache.channel_not_admin': (
+            '这个频道的管理员里没有本机器人的管理员，不能设为上传缓存。请把管理员本人的账号设为频道管理员'
+            '，再发一次 /cache。'
+        ),
         'cache.disabled': '上传缓存已关闭。之后每次请求都会重新下载。',
         'cache.bad_id': (
                             '这看起来不像一个会话 id。id 的样子是 '
