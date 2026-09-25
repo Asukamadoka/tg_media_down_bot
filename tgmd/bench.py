@@ -11,8 +11,15 @@ real network rather than guessed::
 ``--route`` is the experiment switch for direct media endpoints
 (``TG_DIRECT_MEDIA``): ``normal`` uses the endpoint Telethon would, which on
 the NAS goes through the proxy; ``media`` uses only the DC's media-only
-endpoint, which the mihomo rule sends direct; ``both`` runs each connection
-count once each way, on the same file, one after the other.
+endpoint; ``both`` runs each connection count once each way, on the same
+file, one after the other.
+
+``media`` and ``both`` are refused unless ``--same-egress-ip`` is given
+(docs/wms/M7 §7.1): the media connections reuse the session's auth key, and
+when they leave from a different IP address than the main connection (direct
+vs. proxy), Telegram treats the key as stolen and revokes the reading
+account's session (AuthKeyDuplicatedError). Pass it only when every
+connection of this host leaves through the same public IP address.
 
 It reads through the same account the bot does (``TG_USER_SESSION``, the
 session saved by ``/setup telegram``, or the session file), and runs happily
@@ -38,7 +45,7 @@ from .config import ConfigError, load_config
 from .db import Database
 from .downloader import Downloader, has_downloadable_media
 from .links import LinkError, parse_message_link
-from .parallel import MediaRoute, default_endpoints, media_endpoints
+from .parallel import default_endpoints, media_endpoints
 from .resolver import ResolveError, Resolver
 from .setup import stored_user_session
 from .utils import human_rate, human_size
@@ -74,8 +81,25 @@ def build_parser() -> argparse.ArgumentParser:
         default="config",
         help="which endpoints to download from (default: whatever TG_DIRECT_MEDIA says)",
     )
+    parser.add_argument(
+        "--same-egress-ip",
+        action="store_true",
+        help=(
+            "allow --route media/both. DANGER: only when every connection leaves "
+            "through the same public IP; otherwise Telegram revokes the reading "
+            "session (AuthKeyDuplicatedError)"
+        ),
+    )
     parser.add_argument("--keep", action="store_true", help="keep the downloaded copies")
     return parser
+
+
+REFUSED_ROUTE = (
+    "--route {route} is refused: the media route reuses the session's auth key, and "
+    "from a second IP address Telegram revokes the reading session "
+    "(AuthKeyDuplicatedError). Add --same-egress-ip only if every connection of this "
+    "host leaves through the same public IP address."
+)
 
 
 async def _reader(config, work: Path) -> TelegramClient | None:
@@ -101,6 +125,9 @@ async def _reader(config, work: Path) -> TelegramClient | None:
 
 
 async def run(args: argparse.Namespace) -> int:
+    if args.route in ("media", "both") and not args.same_egress_ip:
+        print(REFUSED_ROUTE.format(route=args.route), file=sys.stderr)
+        return 2
     load_dotenv()
     try:
         config = load_config()
@@ -173,8 +200,7 @@ def _downloader(client, count: int, route: str, config) -> Downloader:
         # Media endpoints only: if the direct route fails, the row says so
         # (it falls back to "Telethon default") instead of quietly proxying.
         return Downloader(client, connections=count, endpoints=media_endpoints)
-    if config.telegram.direct_media == "auto":
-        return Downloader(client, connections=count, route=MediaRoute())
+    # TG_DIRECT_MEDIA=auto is refused here as in the bot (docs/wms/M7 §7.1).
     return Downloader(client, connections=count)
 
 

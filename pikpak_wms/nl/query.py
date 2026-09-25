@@ -23,7 +23,13 @@ from ..rules import template as templates
 from ..rules.schema import CATEGORIES
 from ..rules.units import check_moment
 
-Intent = Literal["download", "move", "rename", "classify", "archive", "trash", "list", "schedule"]
+Intent = Literal[
+    "download", "move", "rename", "classify", "archive", "trash", "list", "schedule",
+    # M7: the whole-drive jobs, run on request
+    "organize_tree", "organize_inbox", "dedupe", "big_report",
+]
+TIDY_INTENTS = ("organize_tree", "organize_inbox", "dedupe", "big_report")
+Part = Literal["slim", "big", "loose"]
 Kind = Literal["video", "image", "audio", "document", "archive", "subtitle"]
 
 INTENTS: tuple[str, ...] = Intent.__args__  # type: ignore[attr-defined]
@@ -89,6 +95,8 @@ class Filters(_Strict):
 class ActionArgs(_Strict):
     dest: str | None = None
     template: str | None = None
+    part: Part | None = None
+    """organize_tree only: one part of it (``big``: 「把大文件单独放一起」)."""
 
     @field_validator("template")
     @classmethod
@@ -119,7 +127,11 @@ class Query(_Strict):
     def _schedule_needs_an_action(self) -> Query:
         # A schedule says *when*; the intent must still say *what*.
         if self.schedule is not None and self.intent in ("schedule", "list"):
-            self.needs_clarification = self.needs_clarification or "schedule_what"
+            self.needs_clarification = self.needs_clarification or "nl.ask.schedule_what"
+        # The M7 jobs take a folder at most: they already run on their own
+        # schedule, and a filter would change what "tidy" means.
+        if self.intent in TIDY_INTENTS and (self.schedule is not None or not self.filters.empty):
+            self.needs_clarification = self.needs_clarification or "nl.ask.tidy_plain"
         return self
 
     def canonical(self) -> dict[str, Any]:
@@ -182,10 +194,11 @@ WIRE_SCHEMA: dict[str, Any] = {
         "action_args": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["dest", "template"],
+            "required": ["dest", "template", "part"],
             "properties": {
                 "dest": _nullable({"type": "string"}),
                 "template": _nullable({"type": "string"}),
+                "part": _nullable({"type": "string", "enum": ["slim", "big", "loose"]}),
             },
         },
         "schedule": _nullable({

@@ -327,6 +327,65 @@ CATALOG: dict[str, dict[str, str]] = {
         "cli.events.raw_only": (
             "Only --raw exists for now: the format is undocumented (docs/wms/EXTRAS.md §5)."
         ),
+        # ---- whitelist (M7 §1)
+        "protect.skipped": (
+            "whitelist: {count} action(s) left out (protected folders and shared files are never to"
+            "uched)"
+        ),
+        "protect.shares_cached": "the share list could not be read; used the one from {at}",
+        "protect.shares_unresolved": (
+            "{count} shared item(s) are not in the index yet; run a stocktake"
+        ),
+        "protect.shares_failed": (
+            "cannot read the share list, so nothing is planned (shared files must stay protected): "
+            "{error}"
+        ),
+        "protect.root": "protecting / would freeze the whole drive",
+        "protect.not_protected": "{path} is not protected",
+        # ---- tidying the tree, the big-files report (M7 §2 to §5)
+        "tidy.counts": (
+            "tidy: {empty} empty folder(s) and {junk} junk file(s) trashed, {flatten} nested chain("
+            "s) lifted; {big_folders} big folder(s) and {big_files} big file(s) set apart; {groups}"
+            " group(s) of {grouped} file(s), {misc} to misc, {other} to other, {images} image(s); {"
+            "shelved} shelved from the inbox"
+        ),
+        "tidy.scope": "top-level folder {path} ({size})",
+        "big.files": "The {count} biggest files:",
+        "big.folders": "The {count} biggest folders:",
+        "big.stale": "Big files unchanged for {days} days or more ({count}):",
+        "big.line": "{n:>3}. {size:>10}  {path}",
+        "big.reclaim": (
+            "Could free about {size} (stale big files, plus {duplicates} of duplicate copies)."
+        ),
+        "big.never_deletes": (
+            "Nothing is deleted automatically: each item has its own trash button."
+        ),
+        # ---- M7 jobs
+        "job.planned_many": (
+            "{name}: {count} plan(s), {actions} action(s) in all, waiting for confirmation"
+        ),
+        "job.applied_many": (
+            "{name}: {applied} action(s) carried out, {remaining} left for the next run"
+        ),
+        "big.summary": "big-files report: the {files} biggest files; about {size} could be freed",
+        # ---- M7 intents
+        "nl.intent.organize_tree": "tidy the top-level folders",
+        "nl.intent.organize_inbox": "shelve what landed in the entry folders",
+        "nl.intent.dedupe": "remove duplicate copies",
+        "nl.intent.big_report": "report the biggest files and folders",
+        "nl.batch": "{count} plans, one per top-level folder; each can be confirmed on its own.",
+        "nl.ask.tidy_plain": (
+            "Tidying, dedupe and the report take a folder at most, no time or type conditions, and "
+            "they already run on a schedule. Say for example “整理一下 /Cosplay” or “去重”."
+        ),
+        "nl.ask.organize_top": (
+            "Tidying works on a whole top-level folder. Tidy {path}’s top-level folder, or somethin"
+            "g else?"
+        ),
+        # ---- M7 command line
+        "cli.protect.usage": "usage: wms protect ls | wms protect add /path | wms protect rm /path",
+        "cli.protect.paths": "Protected folders:",
+        "cli.protect.shared": "Shared content ({count}):",
     },
     "zh": {
         "action.rename": "重命名  {old}  →  {new}",
@@ -552,5 +611,46 @@ CATALOG: dict[str, dict[str, str]] = {
         "cli.events.raw_only": (
             "目前只有 --raw：这个接口的格式没有文档（见 docs/wms/EXTRAS.md §5）。"
         ),
+        # ---- whitelist (M7 §1)
+        "protect.skipped": "白名单豁免 {count} 项（受保护目录和分享过的内容一律不动）",
+        "protect.shares_cached": "分享列表读取失败，沿用 {at} 的那一份",
+        "protect.shares_unresolved": "有 {count} 个分享的文件不在本地索引里，请先盘点",
+        "protect.shares_failed": (
+            "读不到分享列表，所以不生成计划（分享过的内容必须受保护）：{error}"
+        ),
+        "protect.root": "保护 / 等于冻结整个网盘，不支持",
+        "protect.not_protected": "{path} 不在白名单里",
+        # ---- tidying the tree, the big-files report (M7 §2 to §5)
+        "tidy.counts": (
+            "整理：清理空目录 {empty} 个、垃圾文件 {junk} 个，压平单链嵌套 {flatten} 处；大目录 {bi"
+            "g_folders} 个、大文件 {big_files} 个单独存放；归集 {groups} 组共 {grouped} 个文件，{mi"
+            "sc} 个进「杂」，{other} 个进「其他」，图片 {images} 张；入口目录上架 {shelved} 项"
+        ),
+        "tidy.scope": "一级目录 {path}（{size}）",
+        "big.files": "最大的 {count} 个文件：",
+        "big.folders": "最大的 {count} 个目录：",
+        "big.stale": "超过 {days} 天没有变化的大文件（{count} 个）：",
+        "big.line": "{n:>3}. {size:>10}  {path}",
+        "big.reclaim": "估计可以腾出约 {size}（久未变化的大文件，加上重复副本 {duplicates}）。",
+        "big.never_deletes": "不会自动删除任何东西：每一项都要单独点「移入回收站」。",
+        # ---- M7 jobs
+        "job.planned_many": "{name}：{count} 份计划，共 {actions} 个动作，等待确认",
+        "job.applied_many": "{name}：执行了 {applied} 个动作，还剩 {remaining} 个留到下一轮",
+        "big.summary": "大文件报告：最大的 {files} 个文件；估计可腾出约 {size}",
+        # ---- M7 intents
+        "nl.intent.organize_tree": "整理各个一级目录",
+        "nl.intent.organize_inbox": "把入口目录里的东西上架",
+        "nl.intent.dedupe": "去重",
+        "nl.intent.big_report": "列出最大的文件和目录",
+        "nl.batch": "共 {count} 份计划，每个一级目录一份，可以分别确认。",
+        "nl.ask.tidy_plain": (
+            "整理、去重和大文件报告最多指定一个目录，不接受时间、类型之类的条件，而且它们本来就按时"
+            "自动运行。可以直接说「整理一下 /Cosplay」或「去重」。"
+        ),
+        "nl.ask.organize_top": "整理以一级目录为单位。要整理 {path} 所在的整个一级目录，还是别的？",
+        # ---- M7 command line
+        "cli.protect.usage": "用法：wms protect ls | wms protect add /路径 | wms protect rm /路径",
+        "cli.protect.paths": "受保护的目录：",
+        "cli.protect.shared": "分享过的内容（{count} 项）：",
     },
 }

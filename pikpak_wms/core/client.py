@@ -123,6 +123,30 @@ class WmsClient:
         except (TypeError, ValueError):
             return Quota(used=0, limit=0)
 
+    async def shares(self, *, page_size: int = 100) -> list[dict]:
+        """Every share the account ever made, expired ones included.
+
+        pikpakapi has no call for this, so it goes through the SDK's own
+        authenticated GET (docs/wms/M7 §1).
+        """
+        api = await self._provider()
+        url = f"https://{getattr(api, 'PIKPAK_API_HOST', 'api-drive.mypikpak.com')}"
+        url += "/drive/v1/share/list"
+        found: list[dict] = []
+        token: str | None = None
+        for _page in range(1000):  # a hard stop, should the token never run out
+            params: dict[str, Any] = {"limit": page_size, "thumbnail_size": "SIZE_SMALL"}
+            if token:
+                params["page_token"] = token
+            page = await self._call("_request_get", url, params)
+            page = page if isinstance(page, dict) else {}
+            items = page.get("data") or page.get("shares") or page.get("list") or []
+            found.extend(item for item in items if isinstance(item, dict))
+            token = page.get("next_page_token") or None
+            if not token:
+                break
+        return found
+
     async def events(self, *, page_size: int = 100, token: str | None = None) -> dict:
         return await self._call("events", size=page_size, next_page_token=token)
 

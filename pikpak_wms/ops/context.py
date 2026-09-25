@@ -7,8 +7,9 @@ is only the provider of the logged-in PikPak client.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ..config import Config
 from ..core.client import Provider, WmsClient
@@ -21,6 +22,8 @@ class Context:
     config: Config
     client: WmsClient
     store: Store
+    cache: dict[str, Any] = field(default_factory=dict)
+    """Short-lived per-process memos (the share list, see ops.protect)."""
 
     async def close(self) -> None:
         await self.store.close()

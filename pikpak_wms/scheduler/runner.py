@@ -44,7 +44,7 @@ class WmsScheduler:
         self._scheduler: AsyncIOScheduler | None = None
 
     def jobs(self) -> list[ScheduledJob]:
-        return [job for job in self.ctx.config.schedule.jobs if job.enabled]
+        return [job for job in self.ctx.config.schedule.effective_jobs() if job.enabled]
 
     def scheduled_rules(self) -> list[tuple[str, str]]:
         """``[(rule name, cron), ...]`` for enabled rules that carry a schedule."""

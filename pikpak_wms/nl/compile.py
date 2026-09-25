@@ -185,7 +185,7 @@ def explain(query: Query, config: Config, *, now: datetime, tz: tzinfo) -> list[
 
 @dataclass
 class Proposal:
-    kind: Literal["plan", "listing", "rule"]
+    kind: Literal["plan", "listing", "rule", "batch", "report"]
     query: Query
     notes: list[dict[str, Any]] = field(default_factory=list)
     plan: Plan | None = None
@@ -193,6 +193,10 @@ class Proposal:
     matches: list[FileNode] = field(default_factory=list)
     rules: list[Rule] = field(default_factory=list)
     translator: str = ""
+    plan_ids: list[int] = field(default_factory=list)
+    """``batch``: organize_tree's plans, one per top-level folder."""
+    big: Any = None
+    """``report``: the big-files report (docs/wms/M7 §5)."""
 
     @property
     def count(self) -> int:

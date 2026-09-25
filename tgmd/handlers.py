@@ -18,7 +18,7 @@ from .portal import PikPakLoginPortal
 from .tasks import Job, JobKind, JobQueue, QueueFull
 from .utils import escape_html, human_size, parse_id_list, truncate
 from .verify import run_live_checks
-from .wms import WmsError, plan_message
+from .wms import WmsError, batch_message, plan_message, report_message
 
 log = logging.getLogger(__name__)
 
@@ -645,12 +645,89 @@ class BotHandlers:
                 )
             elif action == "rules":
                 await self._wms_rules(event, embedded)
+            elif action in ("organize", "dedupe", "big", "protect", "plans"):
+                await self._wms_m7(event, embedded, action, parts[2:])
             else:
                 await event.reply(t("wms.usage"), parse_mode="html")
         except ValueError:
             await event.reply(t("wms.bad_id", value=escape_html(argument)))
         except WmsError as exc:
             await event.reply(t("wms.error", error=escape_html(exc.display())))
+
+    async def _wms_m7(self, event, embedded, action: str, args: list[str]) -> None:
+        """/wms organize tree|inbox, dedupe, big, protect, plans (M7 §6).
+        Everything is planned first and waits for a button, like any plan."""
+        if action == "protect":
+            await self._wms_protect(event, embedded, args)
+            return
+        if action == "plans":
+            await self._wms_plans(event, embedded)
+            return
+        if action == "organize":
+            what = args[0].lower() if args else ""
+            if what not in ("tree", "inbox"):
+                await event.reply(t("wms.organize.usage"), parse_mode="html")
+                return
+            job = f"organize-{what}"
+        else:
+            job = "dedupe" if action == "dedupe" else "big-report"
+        await event.reply(t("wms.working"))
+        if job == "organize-tree" and len(args) >= 2:
+            result = await embedded.organize_scope(" ".join(args[1:]))
+        else:
+            result = await embedded.run_job(job, apply=False)
+        if result is None:
+            await event.reply(t("wms.failed_see_log"))
+            return
+        if result.big is not None:
+            text, buttons = report_message(result.big)
+            await event.reply(text, parse_mode="html", buttons=buttons)
+            return
+        ids = list(result.plan_ids or ([result.plan_id] if result.plan_id else []))
+        if not ids:
+            await event.reply(escape_html(result.summary))
+            return
+        if len(ids) == 1:
+            lines = await embedded.plan_lines(ids[0])
+            text, buttons = plan_message(lines, ids[0], details=True)
+        else:
+            summaries = await embedded.plan_overview(ids)
+            text, buttons = batch_message(
+                result.name,
+                [{**item, "scope": str(item["source"]).partition(":")[2] or item["source"]}
+                 for item in summaries],
+            )
+        await event.reply(text, parse_mode="html", buttons=buttons)
+
+    async def _wms_protect(self, event, embedded, args: list[str]) -> None:
+        verb = args[0].lower() if args else "ls"
+        path = " ".join(args[1:]).strip()
+        if verb not in ("ls", "add", "rm") or (verb != "ls" and not path.startswith("/")):
+            await event.reply(t("wms.protect.usage"), parse_mode="html")
+            return
+        listing = await embedded.protect(verb, path)
+        paths = "\n".join(f"• <code>{escape_html(p)}</code>" for p in listing["paths"]) or "-"
+        text = t("wms.protect.list", paths=paths)
+        if listing["shared_enabled"]:
+            shared = listing["shared"]
+            shown = "\n".join(f"• <code>{escape_html(p)}</code>" for p in shared[:30]) or "-"
+            if len(shared) > 30:
+                shown += "\n…"
+            text += "\n\n" + t("wms.protect.shared", count=len(shared), paths=shown)
+        else:
+            text += "\n\n" + t("wms.protect.shared_off")
+        await event.reply(text, parse_mode="html")
+
+    async def _wms_plans(self, event, embedded) -> None:
+        rows = await embedded.open_plans(limit=30)
+        if not rows:
+            await event.reply(t("wms.plans.none"))
+            return
+        text, buttons = batch_message(
+            t("wms.plans.header"),
+            [{**row, "scope": str(row["source"])} for row in rows],
+        )
+        await event.reply(text, parse_mode="html", buttons=buttons)
 
     async def _nl_button(self, event, user_id: int) -> None:
         try:
@@ -748,6 +825,12 @@ class BotHandlers:
         if event.data.startswith(b"wms:nl:"):
             await self._nl_button(event, user_id)
             return
+        if event.data.startswith(b"wms:bt:"):
+            await self._trash_button(event, embedded)
+            return
+        if event.data.startswith(b"wms:detail:"):
+            await self._detail_button(event, embedded)
+            return
         try:
             _prefix, verb, raw = event.data.decode().split(":", 2)
             item = int(raw)
@@ -772,6 +855,41 @@ class BotHandlers:
         await event.answer()
         # The buttons go away with the edit, so a second press cannot repeat it.
         await event.edit(result, parse_mode="html", buttons=None)
+
+    async def _trash_button(self, event, embedded) -> None:
+        """[🗑 n] under the big-files report: one item to the trash, audited.
+        The report stays, so the other buttons can still be used."""
+        file_id = event.data.decode(errors="replace").removeprefix("wms:bt:")
+        try:
+            outcome = await embedded.trash_item(file_id)
+        except WmsError as exc:
+            await event.answer(exc.display()[:190], alert=True)
+            return
+        if outcome is None or not outcome[1].audit_ids:
+            await event.answer(t("wms.trash.gone"), alert=True)
+            return
+        path, report = outcome
+        await event.answer()
+        await event.reply(
+            t("wms.trashed", path=escape_html(path), summary=escape_html(report.summary()),
+              audit=report.audit_ids[0]),
+            parse_mode="html",
+        )
+
+    async def _detail_button(self, event, embedded) -> None:
+        """[details]: the whole plan as a new message, with its own buttons."""
+        try:
+            plan_id = int(event.data.decode().rsplit(":", 1)[1])
+            lines = await embedded.plan_lines(plan_id, limit=200)
+        except (UnicodeDecodeError, ValueError):
+            await event.answer()
+            return
+        except WmsError as exc:
+            await event.answer(exc.display()[:190], alert=True)
+            return
+        await event.answer()
+        text, buttons = plan_message(lines, plan_id)
+        await event.reply(text, parse_mode="html", buttons=buttons)
 
     async def on_message(self, event) -> None:
         """Handle anything that is not a command: links, or attached media."""

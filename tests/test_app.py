@@ -105,7 +105,7 @@ def fake_clients(monkeypatch):
     bot = FakeClient()
     user = FakeClient(user_id=987654321, username="reader", is_bot=False)
 
-    async def fake_start_clients(config, stored_session=None):
+    async def fake_start_clients(config, stored_session=None, *, on_rejected=None):
         return bot, user
 
     monkeypatch.setattr("tgmd.app.start_clients", fake_start_clients)

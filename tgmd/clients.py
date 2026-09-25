@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
 
 from telethon import TelegramClient
 from telethon.errors import RPCError
@@ -86,14 +87,23 @@ def build_bot_client(config: Config) -> TelegramClient:
     )
 
 
+Rejected = Callable[[str, str], Awaitable[None]]
+"""``(source, reason)``: Telegram refused the reading account's session."""
+
+
 async def start_clients(
-    config: Config, stored_session: str | None = None
+    config: Config,
+    stored_session: str | None = None,
+    *,
+    on_rejected: Rejected | None = None,
 ) -> tuple[TelegramClient, TelegramClient | None]:
     """Connect both clients and return ``(bot, user)``.
 
     The user client is optional: without it the bot still works for chats it is
     itself a member of, and the setup wizard can add one later without a
-    restart, so this must never block startup.
+    restart, so this must never block startup. When Telegram refuses the
+    session, ``on_rejected`` hears where it came from (``user_session_source``)
+    and why, so the app can drop a dead stored session and tell the admins.
     """
     bot = build_bot_client(config)
     await bot.start(bot_token=config.telegram.bot_token)
@@ -142,6 +152,7 @@ async def start_clients(
         )
         with contextlib.suppress(Exception):
             await user.disconnect()
+        await _rejected(on_rejected, config, stored_session, type(exc).__name__)
         return bot, None
     if not authorized:
         log.error(
@@ -149,6 +160,7 @@ async def start_clients(
             "create a fresh one. Continuing without it."
         )
         await user.disconnect()
+        await _rejected(on_rejected, config, stored_session, "not authorized")
         return bot, None
 
     account = await user.get_me()
@@ -158,3 +170,15 @@ async def start_clients(
         account.id,
     )
     return bot, user
+
+
+async def _rejected(
+    on_rejected: Rejected | None, config: Config, stored: str | None, reason: str
+) -> None:
+    if on_rejected is None:
+        return
+    chosen = user_session_source(config, stored)
+    try:
+        await on_rejected(chosen[1] if chosen else "", reason)
+    except Exception:  # reporting must never stop the bot from starting
+        log.exception("could not report the rejected user session")

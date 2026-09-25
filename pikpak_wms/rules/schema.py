@@ -248,9 +248,150 @@ class Rule(_Strict):
         return normalize_path(value)
 
 
+# ------------------------------------------------ M7: tidying the whole tree
+
+
+def _size_field(value: Any) -> int:
+    return parse_size(value)
+
+
+class LooseSpec(_Strict):
+    """Files sitting directly in a top-level folder (docs/wms/M7 §2)."""
+
+    min_group: int = Field(2, ge=2)
+    """Files sharing a name key (or a long enough prefix) that make a group."""
+    min_prefix: int = Field(4, ge=2)
+    """Shortest common prefix, in characters, that makes two names one group."""
+    misc: str = "杂"
+    """Where videos that joined no group go, inside their top-level folder."""
+    other: str = "其他"
+    """Where everything that is neither a video nor an image goes."""
+    images_to: str = "/写真/杂"
+    """Where every loose image goes, whichever folder it was in."""
+    noise: list[str] = Field(default_factory=list)
+    """Extra regular expressions removed from names before grouping."""
+
+    @field_validator("misc", "other")
+    @classmethod
+    def _folder_name(cls, value: str) -> str:
+        if not value.strip() or "/" in value:
+            raise ValueError(f"{value!r} must be a plain folder name")
+        return value.strip()
+
+    @field_validator("images_to")
+    @classmethod
+    def _absolute(cls, value: str) -> str:
+        return normalize_path(value)
+
+    @field_validator("noise")
+    @classmethod
+    def _patterns(cls, value: list[str]) -> list[str]:
+        for pattern in value:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"noise pattern {pattern!r} does not compile: {exc}") from exc
+        return value
+
+
+class SlimSpec(_Strict):
+    """Inside the second-level folders (docs/wms/M7 §3.1). All of it goes to the trash."""
+
+    flatten: bool = True
+    """A folder holding one folder and no files: lift the inner contents up."""
+    empty_folders: bool = True
+    junk_extensions: list[str] = Field(
+        default_factory=lambda: ["url", "html", "txt", "lnk", "apk"])
+    """Trashed whatever their size."""
+    junk_words: list[str] = Field(default_factory=lambda: ["最新地址", "防屏蔽", "更多资源"])
+    junk_words_max_size: int = 1024**2
+    """A name with a junk word is junk only below this size."""
+
+    @field_validator("junk_extensions", mode="before")
+    @classmethod
+    def _extensions(cls, value: Any) -> list[str]:
+        return [item.lower().lstrip(".") for item in _listify(value) or []]
+
+    @field_validator("junk_words_max_size", mode="before")
+    @classmethod
+    def _size(cls, value: Any) -> int:
+        return _size_field(value)
+
+
+class BigSpec(_Strict):
+    """Big folders and files get a place of their own (docs/wms/M7 §3.2)."""
+
+    folder: int = 50 * 1024**3
+    """A second-level folder at least this big moves to ``<to>/<top>/<name>``."""
+    file: int = 4 * 1024**3
+    """A file at least this big (depth 3 or more) moves to ``<to>/<top>/``."""
+    to: str = "/大文件"
+
+    @field_validator("folder", "file", mode="before")
+    @classmethod
+    def _size(cls, value: Any) -> int:
+        return _size_field(value)
+
+    @field_validator("to")
+    @classmethod
+    def _absolute(cls, value: str) -> str:
+        return normalize_path(value)
+
+
+class InboxSpec(_Strict):
+    """The two entry folders, shelved every hour (docs/wms/M7 §4)."""
+
+    folders: list[str] = Field(default_factory=lambda: ["/Telegram", "/Pack From Shared"])
+    aliases: dict[str, list[str]] = Field(default_factory=dict)
+    """Top-level folder name → more words that mean it, e.g. ``写真: [cos, cosplay]``."""
+    min_name: int = Field(2, ge=1)
+    """A top-level name shorter than this never matches on its own."""
+
+    @field_validator("folders", mode="before")
+    @classmethod
+    def _folders(cls, value: Any) -> list[str]:
+        return [normalize_path(item) for item in _listify(value) or []]
+
+    @field_validator("aliases", mode="before")
+    @classmethod
+    def _aliases(cls, value: Any) -> dict[str, list[str]]:
+        return {str(name).strip("/"): _listify(words) or []
+                for name, words in (value or {}).items()}
+
+
+class ReportSpec(_Strict):
+    """The weekly big-files report (docs/wms/M7 §5). It never deletes anything."""
+
+    files: int = Field(20, ge=1, le=50)
+    folders: int = Field(10, ge=0, le=30)
+    stale_days: int = Field(90, ge=1)
+    stale: int = Field(10, ge=0, le=30)
+
+
+class TidySpec(_Strict):
+    """``tidy:`` in the rules file: how organize-tree / organize-inbox work.
+
+    Thresholds, word lists and aliases live here, not in code (rule 3).
+    """
+
+    skip: list[str] = Field(default_factory=list)
+    """Top-level folders never tidied (protected ones are skipped anyway)."""
+    loose: LooseSpec = Field(default_factory=LooseSpec)
+    slim: SlimSpec = Field(default_factory=SlimSpec)
+    big: BigSpec = Field(default_factory=BigSpec)
+    inbox: InboxSpec = Field(default_factory=InboxSpec)
+    report: ReportSpec = Field(default_factory=ReportSpec)
+
+    @field_validator("skip", mode="before")
+    @classmethod
+    def _skip(cls, value: Any) -> list[str]:
+        return [normalize_path(item) for item in _listify(value) or []]
+
+
 class RuleSet(_Strict):
     version: int = 1
     rules: list[Rule] = Field(default_factory=list)
+    tidy: TidySpec = Field(default_factory=TidySpec)
 
     @field_validator("rules")
     @classmethod

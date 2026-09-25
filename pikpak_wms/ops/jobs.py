@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from ..config import ScheduledJob
 from ..core.errors import NotFoundError
 from ..core.models import ActionType, Plan
 from ..i18n import t
 from ..rules.actions import Deliver
-from . import inbound, organize, outbound, plans
+from ..rules.units import human_size
+from . import inbound, organize, outbound, plans, tidy
 from .context import Context
 from .stocktake import stocktake
 
@@ -30,6 +32,11 @@ class JobResult:
     plan_id: int | None = None
     plan: Plan | None = None
     report: plans.ApplyReport | None = None
+    plan_ids: list[int] = field(default_factory=list)
+    """Jobs that plan in batches (organize-tree: one plan per top-level folder)."""
+    reports: list[plans.ApplyReport] = field(default_factory=list)
+    big: Any = None
+    """big-report: the :class:`pikpak_wms.ops.tidy.BigReport`."""
 
 
 async def _plan_job(
@@ -47,9 +54,67 @@ async def _plan_job(
     return JobResult(job.name, report.summary(), plan_id, plan, report)
 
 
+async def _refresh(ctx: Context) -> None:
+    """An incremental stocktake first: M7 jobs read the whole index."""
+    cfg = ctx.config
+    await stocktake(ctx.client, ctx.store, roots=cfg.stocktake.roots, full=False,
+                    page_size=cfg.stocktake.page_size)
+
+
+async def _batch_job(ctx: Context, job: ScheduledJob, prefix: str,
+                     planned: list[Plan]) -> JobResult:
+    """Save each plan, retire the job's stale ones, and apply when asked,
+    within one ``max_actions_per_run`` for the whole run (the rest next run)."""
+    ids: list[int] = []
+    for plan in planned:
+        plan_id = await plans.save(ctx, plan)
+        if plan_id is not None:
+            ids.append(plan_id)
+    await plans.supersede(ctx, prefix=prefix, keep=set(ids))
+    result = JobResult(job.name, "", plan_id=ids[0] if ids else None,
+                       plan=planned[0] if len(planned) == 1 else None, plan_ids=ids)
+    if not ids:
+        result.summary = t("job.nothing", name=job.name)
+        return result
+    if not job.apply:
+        actions = sum(len(p) for p in planned)
+        result.summary = t("job.planned_many", name=job.name, count=len(ids), actions=actions)
+        return result
+    budget = ctx.config.runtime.max_actions_per_run
+    for plan_id in ids:
+        if budget <= 0:
+            break
+        report = await plans.apply(ctx, plan_id, limit=budget)
+        result.reports.append(report)
+        budget -= report.applied + sum(report.skipped.values()) + len(report.failed)
+        if report.stopped:
+            break
+    result.report = result.reports[0] if len(result.reports) == 1 else None
+    applied = sum(r.applied for r in result.reports)
+    remaining = sum(r.remaining for r in result.reports)
+    result.summary = t("job.applied_many", name=job.name, applied=applied,
+                       remaining=remaining)
+    return result
+
+
 async def run_job(ctx: Context, job: ScheduledJob, *, deliver: Deliver | None = None) -> JobResult:
     cfg = ctx.config
-    if job.name in ("stocktake", "stocktake-full"):
+    if job.name in (tidy.TREE, tidy.INBOX, "dedupe", "big-report"):
+        await _refresh(ctx)
+    if job.name == tidy.TREE:
+        result = await _batch_job(ctx, job, f"{tidy.TREE}:", await tidy.organize_tree(ctx))
+    elif job.name == tidy.INBOX:
+        result = await _batch_job(ctx, job, tidy.INBOX, [await tidy.organize_inbox(ctx)])
+    elif job.name == "dedupe":
+        plan = await organize.dedupe(ctx, scope=cfg.dedupe.scope,
+                                     keep_under=cfg.dedupe.keep_under)
+        result = await _batch_job(ctx, job, "dedupe", [plan])
+    elif job.name == "big-report":
+        report = await tidy.big_report(ctx)
+        result = JobResult(job.name, t("big.summary", files=len(report.files),
+                                       size=human_size(report.reclaimable)))
+        result.big = report
+    elif job.name in ("stocktake", "stocktake-full"):
         report = await stocktake(
             ctx.client, ctx.store, roots=cfg.stocktake.roots,
             full=job.name == "stocktake-full" or not cfg.stocktake.incremental,

@@ -298,6 +298,30 @@ turns on two things in Telegram, both for admins only:
   straight away (`apply`). Rules only see folders in their `scope`, so point
   `PIKPAK_FOLDER` inside one, such as `/Inbox`; the bot says so if it is not.
 
+### Tidying the whole drive
+
+Beyond the rules file, the warehouse knows three whole-drive jobs of its own
+(docs/wms/M7). Each one only plans; you confirm with a button.
+
+* **Whitelist.** `/收藏`, `/Cosplaytales Nako EP#1-24` and `/小千` by default
+  (`protect.paths` in `wms.yaml`, or `/wms protect add|rm|ls`), plus
+  everything you ever shared, read live from PikPak before each plan. No plan
+  touches them, whatever made it.
+* **organize-tree** (daily, one plan per top-level folder): files lying
+  directly in a top-level folder are grouped by name (`/A/<group>/`), other
+  videos go to `/A/杂/`, images to `/写真/杂/`, the rest to `/A/其他/`; inside
+  the second-level folders empty folders and junk (`.url`, `.txt`, 「最新地址」…)
+  go to the trash and single-folder chains are lifted; second-level folders of
+  50 GiB or more, and files of 4 GiB or more, move to `/大文件/<A>/`.
+* **organize-inbox** (hourly): what lands in `/Telegram` and
+  `/Pack From Shared` and names a top-level folder moves there; the rest is
+  grouped where it is.
+* **dedupe** (weekly, carried out on its own) and a weekly **big-files
+  report** with a 🗑 button per item. Nothing is ever deleted without a press.
+
+Thresholds, word lists and folder aliases live under `tidy:` in the rules
+file; see `config/rules.example.yaml`.
+
 ### Natural-language commands
 
 Admins can also just say what they want, in a private chat or with `/do`:
@@ -315,7 +339,11 @@ Permanent deletion is never reachable this way.
 A built-in parser handles the common phrasings on its own (`NL_BACKEND=rules`,
 the default). Set `NL_BACKEND=claude` (with `ANTHROPIC_API_KEY`) or
 `NL_BACKEND=ollama` (with `OLLAMA_URL`) to hand the sentences it does not
-understand to a model; `NL_FALLBACK` names a second one.
+understand to a model; `NL_FALLBACK` names a second one. `NL_BACKEND=openai`
+takes any OpenAI-compatible endpoint (LM Studio, llama.cpp, Ollama's `/v1`,
+vLLM, DeepSeek, DashScope) through `NL_OPENAI_BASE_URL`, `NL_OPENAI_MODEL`
+and `NL_OPENAI_API_KEY`. 「整理一下 Pack From Shared」「把大文件单独放一起」
+「去重」「看看最大的文件」 start the jobs above.
 
 **Privacy.** The parser runs on your machine. When a model is used, it is sent
 exactly three things: the sentence you typed, the schema of the answer, and the
@@ -342,6 +370,11 @@ anywhere.
 | `/setup` | the setup checklist; `/setup pikpak` for anyone, `/setup telegram` for admins |
 | `/cache` | admins only: use a channel as the upload cache |
 | `/verify` | admins only: identity and configuration report |
+| `/wms` | admins only: the PikPak warehouse (`/wms help` lists the rest) |
+| `/wms organize tree\|inbox` | admins only: plan tidying the top-level folders, or shelving the entry folders |
+| `/wms dedupe`, `/wms big` | admins only: plan removing duplicates; the biggest files with 🗑 buttons |
+| `/wms protect ls\|add\|rm <path>` | admins only: the whitelist no plan ever touches |
+| `/do <sentence>` | admins only: a natural-language command, planned first |
 
 Progress is reported in a single message that is edited as the transfer runs,
 throttled to one edit every `progress_interval` seconds so Telegram does not
@@ -361,7 +394,7 @@ The settings worth knowing about:
 | `download.media_template` | `{chat}/{name}` | layout under the media directory (`MEDIA_TEMPLATE`) |
 | `download.local_url_prefix` | none | prefix for kept files' paths in replies (`LOCAL_URL_PREFIX`) |
 | `download.connections` | 4 | connections per large file (`DOWNLOAD_CONNECTIONS`, at most 8); 1 turns parallel download off |
-| `telegram.direct_media` | off | `auto` downloads from Telegram's media-only endpoints first, falling back to the ordinary one (`TG_DIRECT_MEDIA`) |
+| `telegram.direct_media` | off | `auto` is refused and runs as `off`: it got the reading session revoked (`TG_DIRECT_MEDIA`, see docs/HANDOFF.md) |
 | `download.max_batch` | 50 | cap on messages expanded from one range link |
 | `download.max_queue_per_user` | 20 | per-user queue limit |
 | `download.filename_template` | `{chat}/{message_id}_{name}` | layout under `DOWNLOAD_DIR` |
@@ -376,7 +409,7 @@ The settings worth knowing about:
 | `wms.enabled` | false | run the PikPak warehouse's scheduled jobs in the bot (`WMS_ENABLED`) |
 | `wms.account` | first admin with an account | whose PikPak drive the warehouse manages (`WMS_ACCOUNT`) |
 | `wms.auto_shelve` | `plan` | after a transfer into PikPak: `plan`, `apply` or `off` (`WMS_AUTO_SHELVE`) |
-| `NL_BACKEND` / `NL_FALLBACK` | `rules` / `none` | who reads sentences the parser does not: `claude` or `ollama` |
+| `NL_BACKEND` / `NL_FALLBACK` | `rules` / `none` | who reads sentences the parser does not: `claude`, `ollama` or `openai` |
 
 Template fields: `chat`, `chat_id`, `message_id`, `topic_id`, `name`, `stem`,
 `ext`, `date`. An unknown field is rejected at startup rather than at the

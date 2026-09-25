@@ -171,7 +171,11 @@ class TestInBot:
         try:
             assert inbot.embedded is not None
             # Listed by next run time, so compare as a set.
-            assert sorted(inbot.embedded.scheduled()) == ["organize", "stocktake"]
+            # The configured two, plus the four M7 jobs (schedule.builtin).
+            assert sorted(inbot.embedded.scheduled()) == [
+                "big-report", "dedupe", "organize", "organize-inbox", "organize-tree",
+                "stocktake",
+            ]
             assert (tmp_path / "wms.sqlite3").exists()
         finally:
             await inbot.stop()

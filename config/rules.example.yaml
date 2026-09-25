@@ -137,3 +137,37 @@ rules:
       older_than: 7d
     actions:
       - trash: {}
+
+# ================= 整理整棵网盘（docs/wms/M7 §2–§4）=================
+# organize-tree / organize-inbox 的阈值、词表、别名都在这里，不在代码里（铁律 3）。
+# 这一段整段可以省略，省略时就是下面这些默认值。
+tidy:
+  skip: []                    # 不整理的一级目录（白名单里的本来就跳过）
+  loose:                      # 一级目录里直接放着的文件（§2）
+    min_group: 2              # 至少几个文件才成组
+    min_prefix: 4             # 名字归一化后共同前缀至少几个字符
+    misc: 杂                  # 没归进组的视频
+    other: 其他               # 既不是视频也不是图片的
+    images_to: /写真/杂       # 图片统一放这里，重名时加 _<短哈希>
+    noise: []                 # 额外要从名字里去掉的正则
+  slim:                       # 二级目录里的精简（§3.1），都是进回收站
+    flatten: true             # 压平「只有一个子目录、没有文件」的单链
+    empty_folders: true
+    junk_extensions: [url, html, txt, lnk, apk]   # 不论大小
+    junk_words: [最新地址, 防屏蔽, 更多资源]       # 名字带这些词、且小于下面的大小
+    junk_words_max_size: 1MiB
+  big:                        # 大目录和大文件（§3.2）
+    folder: 50GiB             # 二级目录 ≥ 这个大小：整体移到 <to>/<一级目录>/
+    file: 4GiB                # 深度 ≥ 3 的文件 ≥ 这个大小：移到 <to>/<一级目录>/
+    to: /大文件
+  inbox:                      # 入口目录上架（§4）
+    folders: [/Telegram, /Pack From Shared]
+    aliases:                  # 一级目录名 → 也算指向它的词
+      写真: [cos, cosplay]
+    min_name: 2               # 太短的一级目录名单独不算匹配
+  report:                     # 每周大文件报告（§5），只报告不删除
+    files: 20
+    folders: 10
+    stale_days: 90
+    stale: 10
+

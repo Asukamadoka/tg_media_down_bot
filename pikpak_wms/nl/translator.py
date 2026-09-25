@@ -1,15 +1,19 @@
 """Translators: a sentence → a :class:`Query` (or a question back), nothing more.
 
-Three backends share one interface, one schema check and one test set:
+Four backends share one interface, one schema check and one test set:
 
 * ``rules``: :mod:`pikpak_wms.nl.rules_parser`, always tried first;
 * ``claude``: the Anthropic API, structured output bound to the Query schema;
-* ``ollama``: a local model, constrained decoding with the same schema.
+* ``ollama``: a local model, constrained decoding with the same schema;
+* ``openai``: any OpenAI-compatible chat endpoint (docs/wms/M7 §7.3): LM
+  Studio, llama.cpp ``llama-server``, Ollama's ``/v1``, vLLM, DeepSeek,
+  通义千问 (DashScope compatible mode). ``response_format`` carries the
+  schema; a server that does not take a schema gets ``json_object`` instead,
+  and the answer is checked against the schema here either way.
 
-``NL_BACKEND`` (``rules`` | ``claude`` | ``ollama``, default ``rules``) names
-the model to hand a sentence to when the rules parser declines it, and
-``NL_FALLBACK`` (``none`` | ``claude`` | ``ollama``, default ``none``) a second
-one after that.
+``NL_BACKEND`` (``rules`` | ``claude`` | ``ollama`` | ``openai``, default
+``rules``) names the model to hand a sentence to when the rules parser
+declines it, and ``NL_FALLBACK`` (``none`` or one of those) a second one.
 
 **Privacy boundary.** A model is sent the sentence, the Query schema, and
 the current date, time and time zone — never file names, paths from the
@@ -33,7 +37,7 @@ from .rules_parser import RulesTranslator
 
 log = logging.getLogger(__name__)
 
-BACKENDS = ("rules", "claude", "ollama")
+BACKENDS = ("rules", "claude", "ollama", "openai")
 DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 DEFAULT_OLLAMA_MODEL = "qwen2.5:3b"
 DEFAULT_OLLAMA_URL = "http://ollama:11434"
@@ -62,8 +66,14 @@ given JSON schema exactly.
 Fields:
 - intent: download (fetch files to the user's NAS), move, rename, classify (sort into \
 folders by file type), archive (move old files into dated archive folders), trash (move to \
-the recycle bin; permanent deletion is never possible), list (show matching files), or \
-schedule (only when the sentence sets up a recurring job and names no other action).
+the recycle bin; permanent deletion is never possible), list (show matching files), \
+schedule (only when the sentence sets up a recurring job and names no other action), \
+organize_tree (tidy the drive's top-level folders: group loose files, set big files and \
+folders apart, clear junk; scope.path may name one top-level folder), organize_inbox \
+(shelve what landed in the entry folders /Telegram and /Pack From Shared; scope.path may \
+name one of them), dedupe (remove duplicate copies; scope.path may limit it), or \
+big_report (show the biggest files and folders). The last four take no filters and no \
+schedule.
 - scope.path: the drive folder the instruction is limited to, as an absolute path such as \
 /Inbox; "/" when none is named. scope.recursive: true unless the sentence says otherwise.
 - filters.created_after / created_before: when files arrived in the drive (转存, 入库, \
@@ -78,7 +88,9 @@ midnight) or a duration counted back from now: "7d", "12h", "2w" (a month is 30d
 regular expression (use it for "starts with" / "ends with").
 - action_args.dest: target folder for move (absolute drive path); for download a \
 sub-folder under the NAS media folder, or null. action_args.template: the naming template \
-for rename, with fields like {name}, {stem}, {ext}.
+for rename, with fields like {name}, {stem}, {ext}. action_args.part: organize_tree only, \
+"big" when the sentence is only about putting big files together, "slim" for only junk and \
+empty folders, "loose" for only the loose files; null otherwise.
 - schedule.cron: five-field cron in the given time zone when the sentence asks for a \
 recurring run (每天 = daily); null otherwise.
 - needs_clarification: null, unless the sentence cannot be turned into a query without \
@@ -100,6 +112,10 @@ def user_message(text: str, now: datetime, tz: tzinfo) -> str:
 
 
 def _parse_answer(raw: str, backend: str) -> Query | Clarification:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        # Some local models fence their JSON even in JSON mode.
+        raw = raw.strip("`").removeprefix("json").strip()
     try:
         return as_result(from_wire(json.loads(raw)))
     except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:
@@ -216,6 +232,101 @@ class OllamaTranslator:
         return _parse_answer(raw, self.name)
 
 
+class OpenAITranslator:
+    """Any OpenAI-compatible ``/chat/completions`` endpoint (docs/wms/M7 §7.3).
+
+    ``NL_OPENAI_BASE_URL`` (e.g. ``http://192.168.1.10:1234/v1``),
+    ``NL_OPENAI_MODEL``, and ``NL_OPENAI_API_KEY`` (may be empty for a local
+    server). The schema goes in ``response_format``; when the server refuses
+    that (HTTP 400/404/415/422, as DeepSeek does), the request is repeated
+    once with ``{"type": "json_object"}`` and the schema in the prompt, and
+    the answer is validated here all the same.
+    """
+
+    name = "openai"
+
+    def __init__(self, *, base_url: str | None = None, model: str | None = None,
+                 api_key: str | None = None, post: Any = None, timeout: float = 120.0) -> None:
+        self.base_url = (base_url if base_url is not None
+                         else os.environ.get("NL_OPENAI_BASE_URL", "")).strip().rstrip("/")
+        self.model = (model if model is not None
+                      else os.environ.get("NL_OPENAI_MODEL", "")).strip()
+        self.api_key = (api_key if api_key is not None
+                        else os.environ.get("NL_OPENAI_API_KEY", "")).strip()
+        self.timeout = timeout
+        self._post = post or self._http_post
+        self.json_mode = False
+        """Set once the server turned the schema down; later calls skip straight to it."""
+
+    async def _http_post(  # pragma: no cover - real network
+        self, url: str, body: dict[str, Any], headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        import aiohttp
+
+        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        async with aiohttp.ClientSession(timeout=timeout) as session, session.post(
+            url, json=body, headers=headers
+        ) as response:
+            try:
+                data = await response.json(content_type=None)
+            except (ValueError, aiohttp.ContentTypeError):
+                data = {"error": {"message": (await response.text())[:200]}}
+            return response.status, data if isinstance(data, dict) else {}
+
+    def _body(self, text: str, now: datetime, tz: tzinfo, *, json_mode: bool) -> dict[str, Any]:
+        system = SYSTEM_PROMPT
+        if json_mode:
+            system += ("\n\nAnswer with one JSON object and nothing else, matching this JSON "
+                       "Schema:\n" + json.dumps(wire_schema(), ensure_ascii=False))
+            response_format: dict[str, Any] = {"type": "json_object"}
+        else:
+            response_format = {"type": "json_schema", "json_schema": {
+                "name": "query", "strict": True, "schema": wire_schema()}}
+        return {
+            "model": self.model,
+            "temperature": 0,
+            "response_format": response_format,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_message(text, now, tz)},
+            ],
+        }
+
+    async def _ask(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        try:
+            return await self._post(f"{self.base_url}/chat/completions", body, headers)
+        except Exception as exc:
+            raise TranslationError(f"openai: {exc}", key="nl.error.backend",
+                                   backend=self.name, error=type(exc).__name__) from exc
+
+    async def translate(self, text: str, now: datetime, tz: tzinfo) -> Query | Clarification:
+        if not self.base_url or not self.model:
+            raise TranslationError("openai: NL_OPENAI_BASE_URL and NL_OPENAI_MODEL are needed",
+                                   key="nl.error.backend", backend=self.name,
+                                   error="NL_OPENAI_BASE_URL / NL_OPENAI_MODEL")
+        status, answer = await self._ask(self._body(text, now, tz, json_mode=self.json_mode))
+        if status in (400, 404, 415, 422) and not self.json_mode:
+            log.info("openai backend: the server refused json_schema (HTTP %s); "
+                     "using json_object", status)
+            self.json_mode = True
+            status, answer = await self._ask(self._body(text, now, tz, json_mode=True))
+        if status >= 400:
+            message = str(((answer or {}).get("error") or {}).get("message") or "")[:120]
+            raise TranslationError(f"openai: HTTP {status}: {message}", key="nl.error.backend",
+                                   backend=self.name, error=f"HTTP {status}")
+        choice = ((answer or {}).get("choices") or [{}])[0] or {}
+        message = choice.get("message") or {}
+        if message.get("refusal"):
+            return Clarification(question="nl.ask.declined")
+        if choice.get("finish_reason") == "length":
+            raise TranslationError("openai: answer cut off", key="nl.error.backend",
+                                   backend=self.name, error="length")
+        return _parse_answer(str(message.get("content") or ""), self.name)
+
+
 class Chain:
     """Try each translator in turn; the first that handles the sentence wins.
 
@@ -252,6 +363,8 @@ def _make(name: str) -> Translator:
         return ClaudeTranslator()
     if name == "ollama":
         return OllamaTranslator()
+    if name == "openai":
+        return OpenAITranslator()
     raise ValueError(f"unknown translator {name!r}; use one of {', '.join(BACKENDS)}")
 
 
@@ -268,6 +381,6 @@ def from_environment() -> Chain:
     fallback = os.environ.get("NL_FALLBACK", "none").strip().lower() or "none"
     for value, variable in ((backend, "NL_BACKEND"), (fallback, "NL_FALLBACK")):
         if value not in (*BACKENDS, "none"):
-            raise WmsError(f"{variable}={value} is not one of rules, claude, ollama, none",
+            raise WmsError(f"{variable}={value} is not one of rules, claude, ollama, openai, none",
                            key="nl.error.setting", variable=variable, value=value)
     return build(backend, fallback)
