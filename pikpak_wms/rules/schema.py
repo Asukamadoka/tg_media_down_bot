@@ -264,19 +264,32 @@ class LooseSpec(_Strict):
     """Shortest common prefix, in characters, that makes two names one group."""
     misc: str = "杂"
     """Where videos that joined no group go, inside their top-level folder."""
-    other: str = "其他"
-    """Where everything that is neither a video nor an image goes."""
+    other: str = "/其他"
+    """Where everything that is neither a video nor an image goes: one folder
+    for the whole drive (M7.1 A2), or a bare name for one per top-level folder."""
     images_to: str = "/写真/杂"
     """Where every loose image goes, whichever folder it was in."""
     noise: list[str] = Field(default_factory=list)
     """Extra regular expressions removed from names before grouping."""
 
-    @field_validator("misc", "other")
+    @field_validator("misc")
     @classmethod
     def _folder_name(cls, value: str) -> str:
         if not value.strip() or "/" in value:
             raise ValueError(f"{value!r} must be a plain folder name")
         return value.strip()
+
+    @field_validator("other")
+    @classmethod
+    def _other(cls, value: str) -> str:
+        value = value.strip()
+        if value.startswith("/"):
+            if normalize_path(value) == "/":
+                raise ValueError("other cannot be the drive root")
+            return normalize_path(value)
+        if not value or "/" in value:
+            raise ValueError(f"{value!r} must be an absolute path or a plain folder name")
+        return value
 
     @field_validator("images_to")
     @classmethod
@@ -319,12 +332,16 @@ class SlimSpec(_Strict):
 
 
 class BigSpec(_Strict):
-    """Big folders and files get a place of their own (docs/wms/M7 §3.2)."""
+    """Big folders and files get a place of their own (docs/wms/M7 §3.2, M7.1 A1).
+
+    The unit is the second-level folder, which is never split up: it moves
+    whole to ``<to>/<top>/<name>`` when it is ``folder`` or bigger, or holds
+    any file of ``file`` or more. A file of ``file`` or more lying directly
+    in a top-level folder moves to ``<to>/<top>/``.
+    """
 
     folder: int = 50 * 1024**3
-    """A second-level folder at least this big moves to ``<to>/<top>/<name>``."""
     file: int = 4 * 1024**3
-    """A file at least this big (depth 3 or more) moves to ``<to>/<top>/``."""
     to: str = "/大文件"
 
     @field_validator("folder", "file", mode="before")
@@ -359,6 +376,38 @@ class InboxSpec(_Strict):
                 for name, words in (value or {}).items()}
 
 
+class AdsSpec(_Strict):
+    """Loose files that look like advertising (M7.1 A4.2). Both must hold:
+
+    * it is an image, an archive, an executable, or a video under ``video_max``;
+    * its name has a domain-like piece (``tuu88.com``) or a word from ``words``.
+
+    They go to the trash in a plan of their own, never applied without a press.
+    A big video whose name only carries a site prefix is left alone.
+    """
+
+    enabled: bool = True
+    video_max: int = 30 * 1024**2
+    suffixes: list[str] = Field(default_factory=lambda: [
+        "com", "net", "org", "vip", "cc", "xyz", "top", "me", "tv", "club", "info", "io", "co",
+        "cn", "la", "in", "app", "site", "live", "fun", "win", "icu", "shop", "pw"])
+    words: list[str] = Field(default_factory=lambda: [
+        "二维码", "QR", "发布器", "最新地址", "防屏蔽", "永久地址", "精彩直播", "扫码", "加群",
+        "福利群", "官方网站", "更多资源", "地址发布", "下载器"])
+    executables: list[str] = Field(default_factory=lambda: [
+        "exe", "apk", "bat", "cmd", "msi", "dmg", "scr", "vbs", "jar"])
+
+    @field_validator("video_max", mode="before")
+    @classmethod
+    def _size(cls, value: Any) -> int:
+        return _size_field(value)
+
+    @field_validator("suffixes", "executables", mode="before")
+    @classmethod
+    def _lower(cls, value: Any) -> list[str]:
+        return [item.lower().lstrip(".") for item in _listify(value) or []]
+
+
 class ReportSpec(_Strict):
     """The weekly big-files report (docs/wms/M7 §5). It never deletes anything."""
 
@@ -381,6 +430,7 @@ class TidySpec(_Strict):
     big: BigSpec = Field(default_factory=BigSpec)
     inbox: InboxSpec = Field(default_factory=InboxSpec)
     report: ReportSpec = Field(default_factory=ReportSpec)
+    ads: AdsSpec = Field(default_factory=AdsSpec)
 
     @field_validator("skip", mode="before")
     @classmethod

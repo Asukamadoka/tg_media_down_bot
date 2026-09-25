@@ -12,7 +12,14 @@ real network rather than guessed::
 (``TG_DIRECT_MEDIA``): ``normal`` uses the endpoint Telethon would, which on
 the NAS goes through the proxy; ``media`` uses only the DC's media-only
 endpoint; ``both`` runs each connection count once each way, on the same
-file, one after the other.
+file, one after the other. ``v2`` is ``TG_DIRECT_MEDIA=v2``: direct
+connections to a non-home DC's media endpoint on a key of their own
+(tgmd.direct); a file in the home DC, or a refusal, goes the ordinary way,
+and the ``via`` column says which way each run went.
+
+``v2`` needs no ``--same-egress-ip``: its key is used on the direct
+connections only, so no key is ever seen from two addresses. It shares the
+keys the bot stores in its database.
 
 ``media`` and ``both`` are refused unless ``--same-egress-ip`` is given
 (docs/wms/M7 §7.1): the media connections reuse the session's auth key, and
@@ -43,6 +50,7 @@ from telethon import TelegramClient
 from .clients import user_session_source
 from .config import ConfigError, load_config
 from .db import Database
+from .direct import DirectRouteV2
 from .downloader import Downloader, has_downloadable_media
 from .links import LinkError, parse_message_link
 from .parallel import default_endpoints, media_endpoints
@@ -77,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--route",
-        choices=("config", "normal", "media", "both"),
+        choices=("config", "normal", "media", "both", "v2"),
         default="config",
         help="which endpoints to download from (default: whatever TG_DIRECT_MEDIA says)",
     )
@@ -151,6 +159,11 @@ async def run(args: argparse.Namespace) -> int:
         print("no reading account; sign one in with /setup telegram first", file=sys.stderr)
         return 2
 
+    # v2 keeps its keys (and rests) in the bot's database, so a measurement
+    # neither negotiates a key the bot already has nor leaves one behind.
+    db = Database(config.download.db_path)
+    await db.connect()
+    direct = DirectRouteV2(db)
     try:
         await client.connect()
         if not await client.is_user_authorized():
@@ -169,31 +182,36 @@ async def run(args: argparse.Namespace) -> int:
         routes = ["normal", "media"] if args.route == "both" else [args.route]
         print(
             f"{'route':>6}  {'connections':>11}  {'size':>10}  {'seconds':>8}  "
-            f"{'rate':>12}  dc  endpoint"
+            f"{'rate':>12}  dc  {'via':>9}  endpoint"
         )
         for count in args.connections:
             for route in routes:
                 target = work / f"run-{count}-{route}.bin"
-                downloader = _downloader(client, count, route, config)
+                downloader = _downloader(client, count, route, config, direct)
                 await downloader.download(message, target)
                 transfer = downloader.last
                 print(
                     f"{route:>6}  {transfer.connections:>11}  {human_size(transfer.size):>10}  "
                     f"{transfer.seconds:>8.1f}  {human_rate(transfer.rate):>12}  "
                     f"{transfer.dc_id if transfer.dc_id is not None else '?':>2}  "
-                    f"{transfer.endpoint or 'Telethon default'}"
+                    f"{transfer.route:>9}  {transfer.endpoint or 'Telethon default'}"
                 )
                 if not args.keep:
                     target.unlink(missing_ok=True)
         return 0
     finally:
         await client.disconnect()
+        await db.close()
         if not args.keep:
             shutil.rmtree(work, ignore_errors=True)
 
 
-def _downloader(client, count: int, route: str, config) -> Downloader:
+def _downloader(client, count: int, route: str, config, direct=None) -> Downloader:
     """A downloader forced onto one route, so the rows compare like with like."""
+    if route == "v2" or (
+        route == "config" and config is not None and config.telegram.direct_media == "v2"
+    ):
+        return Downloader(client, connections=count, direct=direct)
     if route == "normal":
         return Downloader(client, connections=count, endpoints=default_endpoints)
     if route == "media":

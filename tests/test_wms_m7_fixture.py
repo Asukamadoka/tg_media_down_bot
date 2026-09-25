@@ -29,6 +29,7 @@ from pikpak_wms.core.ratelimit import TokenBucket
 from pikpak_wms.i18n import set_language
 from pikpak_wms.ops import organize, plans, protect, tidy
 from pikpak_wms.ops.context import Context
+from pikpak_wms.rules.names import name_key
 from pikpak_wms.rules.schema import TidySpec
 from pikpak_wms.store.db import Store
 
@@ -130,8 +131,9 @@ class TestPlansOverTheFixture:
         started = time.perf_counter()
         inbox = await tidy.organize_inbox(ctx, spec=spec)
         timings["inbox"] = round(time.perf_counter() - started, 2)
-        protect.apply_to(inbox, protection)
-        check("inbox", summary(inbox))
+        for plan in inbox:
+            protect.apply_to(plan, protection)
+        check("inbox", {"plans": [summary(plan) for plan in inbox]})
 
         started = time.perf_counter()
         dedupe = await organize.dedupe(ctx)
@@ -160,22 +162,41 @@ class TestPlansOverTheFixture:
         sources = {plan.source.partition(":")[2] for plan in stored}
         assert not sources & {f"/{name}" for name in PROTECTED + INBOXES}
 
-        # §3.2: every big second-level folder outside the whitelist and the
-        # entry folders moves to /大文件/<A>/, whole.
+        # M7.1 A1: a second-level folder of 50 GiB or more, or holding any file
+        # of 4 GiB or more, moves whole; nothing leaves one on its own.
+        heavy: dict[str, tuple[int, int]] = {}
+        for node in fixture.nodes:
+            parts = node.path.split("/")
+            if node.is_folder or len(parts) < 4 or parts[1] not in OTHERS:
+                continue
+            key = "/".join(parts[:3])
+            total, biggest = heavy.get(key, (0, 0))
+            heavy[key] = (total + node.size, max(biggest, node.size))
+        expected = {path for path, (total, biggest) in heavy.items()
+                    if (total >= 50 * GiB or biggest >= 4 * GiB) and not protection.holds(path)}
         big_moves = [a for a in actions if a.rule_name == "tidy:big-folder"
                      and a.type is ActionType.MOVE]
-        assert len(big_moves) == 27
-        assert all(a.after["path"].startswith("/大文件/") for a in big_moves)
-        huge = [a for a in actions if a.rule_name == "tidy:big-file"
-                and a.type is ActionType.MOVE]
-        assert huge and all(int(a.before["size"]) >= 4 * GiB for a in huge)
+        assert {a.before["path"] for a in big_moves} == expected
+        assert all(a.after["path"] == "/大文件" + a.before["path"] for a in big_moves)
+        assert not [a for a in actions if a.type is ActionType.MOVE
+                    and a.before["path"].count("/") >= 3
+                    and a.after["path"].startswith("/大文件")]
 
-        # §2: no loose file is left in a tidied top-level folder, bar shared ones.
+        # §2: every loose file in a tidied top-level folder is moved or trashed,
+        # bar shared ones and groups named like their folder (M7.1 A4.1).
         loose_left = {n.path for n in fixture.nodes if not n.is_folder
                       and n.path.count("/") == 2 and n.path.split("/")[1] in OTHERS}
-        moved = {a.before["path"] for a in actions if a.type in (ActionType.MOVE,
-                                                                  ActionType.RENAME)}
-        assert {p for p in loose_left - moved if not protection.covers(p)} == set()
+        handled = {a.before["path"] for a in actions if a.type in (
+            ActionType.MOVE, ActionType.RENAME, ActionType.TRASH)}
+        for path in loose_left - handled:
+            top, name = path.split("/")[1], path.split("/")[2]
+            assert protection.covers(path) or tidy.nests(name_key(name), top), path
+        others = [a for a in actions if a.rule_name == "tidy:other" and a.type is ActionType.MOVE]
+        assert others and all(a.after["parent_path"] == "/其他" for a in others)
+        for action in actions:
+            if action.rule_name == "tidy:group" and action.type is ActionType.MOVE:
+                top, sub = action.after["path"].split("/")[1:3]
+                assert not tidy.nests(sub, top), action.after["path"]
 
         # The same index gives the same plans.
         again = await tidy.organize_tree(ctx, spec=TidySpec())
@@ -186,5 +207,5 @@ class TestPlansOverTheFixture:
         planned = await tidy.organize_tree(drive_ctx, spec=TidySpec())
         sample = tidy.sample_moves(planned, 20)
         assert sample == tidy.sample_moves(planned, 20)  # the same every time
-        per_folder = Counter(src.split("/")[1] for src, _ in sample)
+        per_folder = Counter(item["plan"] for item in sample)
         assert max(per_folder.values()) <= 20

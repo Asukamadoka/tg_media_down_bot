@@ -262,23 +262,24 @@ async def default_endpoints(client, dc_id: int) -> list:
 
 
 async def media_endpoints(client, dc_id: int) -> list:
-    """This DC's ``media_only`` IPv4 endpoints, from Telegram's own config.
+    """This DC's ``media_only`` endpoints, from Telegram's own config.
 
     Telethon never picks these: its ``_get_dc`` matches on id, IPv6 and CDN
     only, and takes the first hit. They serve file downloads with the same
-    authorisation key as the DC's ordinary endpoint.
+    authorisation key as the DC's ordinary endpoint. IPv4 comes first; the
+    IPv6 ones (M7.1 §B2.5) follow, for a host that routes IPv6.
     """
     await client._get_dc(dc_id)  # noqa: SLF001 - loads Telegram's config
     config = type(client)._config  # noqa: SLF001 - where Telethon keeps it
-    return [
+    found = [
         option
         for option in config.dc_options
         if option.id == dc_id
         and option.media_only
-        and not option.ipv6  # IPv6 is not routed yet; see HANDOFF 2c
         and not option.cdn
         and not option.tcpo_only  # needs obfuscation Telethon's TCP does not do
     ]
+    return sorted(found, key=lambda option: bool(option.ipv6))
 
 
 class MediaRoute:

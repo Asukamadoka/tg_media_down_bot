@@ -1,14 +1,14 @@
 {
- "actions": 339,
+ "actions": 334,
  "by_rule": {
+  "tidy:ad:trash": 1,
   "tidy:group:create_folder": 33,
-  "tidy:group:move": 88,
-  "tidy:image:create_folder": 1,
+  "tidy:group:move": 86,
   "tidy:image:move": 1,
   "tidy:misc:create_folder": 18,
   "tidy:misc:move": 192,
-  "tidy:other:create_folder": 3,
-  "tidy:other:move": 3
+  "tidy:other:create_folder": 1,
+  "tidy:other:move": 2
  },
  "first_plan": {
   "actions": 29,
@@ -34,9 +34,9 @@
    "  mkdir   /Cosplay/小千",
    "  move    /Cosplay/小千 EP16 x265.mp4  →  /Cosplay/小千/小千 EP16 x265.mp4"
   ],
-  "sha256": "c9ceabd98a201fca59fca3e79dd650c0510b0c3e7cbb887a0cf73ecb719f2da3",
+  "sha256": "c2cf7062bfed5c5469214c0f1234bd44e6e25efb567f3b6b195565635f7cba13",
   "source": "organize-tree:/Cosplay"
  },
- "plans": 18,
- "sha256": "2c8ae77a48a20117a3a5ee2b349b99ed875936d76ca088bacf39cf0a98f29fa2"
+ "plans": 19,
+ "sha256": "00c922771c7169a712b30fb736e632a3f47a7365d773f54a077a220a16942fe6"
 }

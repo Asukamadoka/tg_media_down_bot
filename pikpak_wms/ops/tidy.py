@@ -55,6 +55,13 @@ from . import protect
 from .context import Context
 
 TREE, INBOX = "organize-tree", "organize-inbox"
+TREE_ADS, INBOX_ADS = "organize-tree-ads", "organize-inbox-ads"
+"""Suspected ads get a plan of their own, confirmed on its own, never applied
+by a job (M7.1 A4.2)."""
+
+
+def is_ads_plan(source: str) -> bool:
+    return source.split(":", 1)[0] in (TREE_ADS, INBOX_ADS)
 
 
 def load_spec(ctx: Context) -> TidySpec:
@@ -175,7 +182,8 @@ class Tidier:
         path = self.where(node.path)
         return node if path == node.path else replace(node, path=path)
 
-    async def move(self, node: FileNode, dest: str, rule: str) -> list[Action]:
+    async def move(self, node: FileNode, dest: str, rule: str,
+                   extra: dict[str, Any] | None = None) -> list[Action]:
         node = self.current(node)
         dest = normalize_path(dest)
         if dest == parent_of(node.path):
@@ -192,7 +200,8 @@ class Tidier:
         actions = await self.planner.need_folder(dest, rule)
         actions.append(Action(
             ActionType.MOVE, node.file_id, before=node.snapshot(),
-            after={"path": new_path, "parent_path": dest, "create_missing": True},
+            after={"path": new_path, "parent_path": dest, "create_missing": True,
+                   **(extra or {})},
             rule_name=rule,
         ))
         self.planner.vacate(node.path)
@@ -246,8 +255,11 @@ async def _tidier(ctx: Context, spec: TidySpec, protection: protect.Protection,
 
 
 def _special(spec: TidySpec) -> set[str]:
-    """Top-level folders organize-tree leaves alone."""
-    return {top_of(spec.big.to), *(top_of(f) for f in spec.inbox.folders), *spec.skip}
+    """Top-level folders organize-tree leaves alone (and inbox never shelves into)."""
+    special = {top_of(spec.big.to), *(top_of(f) for f in spec.inbox.folders), *spec.skip}
+    if spec.loose.other.startswith("/"):
+        special.add(top_of(spec.loose.other))  # the drive-wide 其他 (M7.1 A2)
+    return special
 
 
 # ------------------------------------------------------------ §3.1 slimming
@@ -262,14 +274,14 @@ def _is_junk(node: FileNode, spec: TidySpec) -> bool:
 
 
 async def _slim(td: Tidier, tree: Tree, top: str, plan: Plan, counts: dict[str, int]) -> None:
+    """Inside the second-level folders only (M7.1 A1): a second-level folder
+    itself is never trashed or moved here, so what it holds stays its own."""
     spec = td.spec.slim
     below = [n for n in tree.below(top) if depth(n.path) >= 2]
-    # The loose-file buckets may be empty now and filled again below.
-    buckets = {join_path(top, td.spec.loose.misc), join_path(top, td.spec.loose.other)}
     if spec.empty_folders:
         for node in below:
-            if (node.is_folder and tree.files.get(node.path, 0) == 0
-                    and node.path not in buckets
+            if (node.is_folder and depth(node.path) >= 3
+                    and tree.files.get(node.path, 0) == 0
                     and not td.is_gone(node.path)
                     and not td.protection.covers(node.path)
                     and not td.protection.holds(node.path)):
@@ -344,20 +356,36 @@ def _chain(tree: Tree, node: FileNode) -> tuple[FileNode, FileNode] | None:
 # ---------------------------------------------------------------- §3.2 big
 
 
+def _weight(td: Tidier, tree: Tree, folder: str) -> tuple[int, int]:
+    """(total size, biggest file) of a folder after this plan's slimming:
+    junk already planned for the trash does not count (M7.1 A1: slim first)."""
+    total = biggest = 0
+    for node in tree.below(folder):
+        if node.is_folder or td.is_gone(td.where(node.path)):
+            continue
+        total += node.size
+        biggest = max(biggest, node.size)
+    return total, biggest
+
+
 async def _big(td: Tidier, tree: Tree, top: str, plan: Plan, counts: dict[str, int]) -> None:
+    """Second-level folders move whole, never split up (M7.1 A1): one that is
+    ``big.folder`` or bigger, or holds any file of ``big.file`` or more, goes
+    to ``<big.to>/<A>/`` with everything in it. Only files lying directly in
+    the top-level folder move on their own."""
     big = td.spec.big
     home = join_path(big.to, top.strip("/"))
-    moved: set[str] = set()
     for second in tree.folders(top):
-        if td.is_gone(second.path) or tree.size.get(second.path, 0) < big.folder:
+        if td.is_gone(second.path):
+            continue
+        total, biggest = _weight(td, tree, second.path)
+        if total < big.folder and biggest < big.file:
             continue
         if await td.attempt(plan, "tidy:big-folder", second,
                             lambda s=second: td.move(s, home, "tidy:big-folder")):
-            moved.add(second.path)
             counts["big_folders"] += 1
-    for node in tree.below(top):
-        if (node.is_folder or depth(node.path) < 3 or node.size < big.file
-                or td.is_gone(td.where(node.path)) or _under_any(node.path, moved)):
+    for node in tree.loose(top):
+        if node.size < big.file or td.is_gone(node.path):
             continue
         if await td.attempt(plan, "tidy:big-file", node,
                             lambda n=node: td.move(n, home, "tidy:big-file")):
@@ -370,7 +398,7 @@ def _emptied(td: Tidier, tree: Tree, top: str, plan: Plan, counts: dict[str, int
     if not td.spec.slim.empty_folders:
         return
     for node in tree.below(top):
-        if (node.is_folder and depth(node.path) >= 2 and tree.files.get(node.path, 0) > 0
+        if (node.is_folder and depth(node.path) >= 3 and tree.files.get(node.path, 0) > 0
                 and td.leaving.get(node.path, 0) >= tree.files[node.path]
                 and not td.is_gone(td.where(node.path))
                 and td.where(node.path) == node.path
@@ -386,23 +414,88 @@ def _short(node: FileNode) -> str:
     return re.sub(r"[^0-9a-z]", "", (node.hash or node.file_id or "x").lower())[:6] or "x"
 
 
+def _compact(text: str) -> str:
+    return re.sub(r"\s+", "", text).casefold()
+
+
+def nests(group: str, folder_name: str) -> bool:
+    """A group named (almost) like the folder it sits in, which would only add
+    a level: /Nako/Nako/… (M7.1 A4.1). Compared after name normalisation,
+    each containing the other counts."""
+    a = _compact(name_key(group) or group)
+    b = _compact(name_key(folder_name) or folder_name)
+    return bool(a and b) and (a in b or b in a)
+
+
+def is_ad(node: FileNode, spec: TidySpec) -> bool:
+    """M7.1 A4.2: the kind of file ads come as, *and* a name that says so."""
+    ads = spec.ads
+    if not ads.enabled or node.is_folder:
+        return False
+    kind = category_of(node)
+    ext = node.extension.lower()
+    small_video = kind == "video" and node.size < ads.video_max
+    if not (kind in ("image", "archive") or ext in ads.executables or small_video):
+        return False
+    stem = unicodedata.normalize("NFKC", stem_of(node.name)).casefold()
+    if ads.suffixes:
+        domain = (r"(?<![a-z0-9])[a-z0-9][a-z0-9-]*\.(?:"
+                  + "|".join(re.escape(x) for x in ads.suffixes) + r")(?![a-z0-9])")
+        if re.search(domain, stem):
+            return True
+    for word in ads.words:
+        folded = word.casefold()
+        if not folded:
+            continue
+        if folded.isascii():
+            if re.search(rf"(?<![a-z0-9]){re.escape(folded)}(?![a-z0-9])", stem):
+                return True
+        elif folded in stem:
+            return True
+    return False
+
+
+def _ads(td: Tidier, files: list[FileNode], ads: Plan | None,
+         counts: dict[str, int]) -> list[FileNode]:
+    """Ad-like files go to the ``ads`` plan's trash; the rest is returned."""
+    if ads is None:
+        return files
+    kept = []
+    for node in files:
+        if is_ad(node, td.spec):
+            ads.actions.extend(td.trash(node, "tidy:ad"))
+            counts["ads"] += 1
+        else:
+            kept.append(node)
+    return kept
+
+
 async def _loose(
     td: Tidier, folder: str, files: list[FileNode], subfolders: list[FileNode],
-    plan: Plan, counts: dict[str, int],
+    plan: Plan, counts: dict[str, int], *, ads: Plan | None = None, skip_big: bool = True,
 ) -> None:
-    """Group the files lying directly in ``folder`` (current paths)."""
+    """Group the files lying directly in ``folder`` (current paths).
+
+    Files of ``big.file`` or more are the big part's (``skip_big``); ad-like
+    files go to ``ads``; a group named like ``folder`` itself stays put.
+    """
     loose = td.spec.loose
     noise = [re.compile(p, re.IGNORECASE) for p in loose.noise]
+    here = folder.rsplit("/", 1)[-1]
+    if skip_big:
+        files = [f for f in files if f.size < td.spec.big.file]
+    files = _ads(td, files, ads, counts)
     images = [f for f in files if category_of(f) == "image"]
     others = [f for f in files if category_of(f) != "image"]
 
     for node in images:
-        await td.attempt(plan, "tidy:image", node, lambda n=node: _image(td, n))
+        await td.attempt(plan, "tidy:image", node,
+                         lambda n=node: _to_shared(td, n, loose.images_to, "tidy:image", folder))
         counts["images"] += 1
 
     existing: dict[str, str] = {}
     for sub in subfolders:
-        if td.is_gone(sub.path):
+        if td.is_gone(sub.path) or nests(sub.name, here):
             continue
         key = name_key(sub.name, noise)
         if not is_messy(key):
@@ -414,6 +507,10 @@ async def _loose(
                                     min_prefix=loose.min_prefix, noise=noise)
     for group in groups:
         target = existing.get(group.name.casefold(), group.name)
+        if nests(target, here):
+            # /Nako/Nako/… would only add a level: these stay where they are.
+            counts["stayed"] += len(group.members)
+            continue
         dest = join_path(folder, target)
         for index in group.members:
             node = others[index]
@@ -426,28 +523,37 @@ async def _loose(
         key = name_key(node.name, noise)
         if not is_messy(key) and key.casefold() in existing:
             dest = join_path(folder, existing[key.casefold()])
-            rule, bucket = "tidy:group", "grouped"
+            work, bucket = (lambda n=node, d=dest: td.move(n, d, "tidy:group")), "grouped"
+            rule = "tidy:group"
         elif category_of(node) == "video":
-            dest, rule, bucket = join_path(folder, loose.misc), "tidy:misc", "misc"
+            dest = join_path(folder, loose.misc)
+            work, bucket = (lambda n=node, d=dest: td.move(n, d, "tidy:misc")), "misc"
+            rule = "tidy:misc"
+        elif loose.other.startswith("/"):
+            rule, bucket = "tidy:other", "other"
+            work = lambda n=node: _to_shared(td, n, loose.other, "tidy:other", folder)  # noqa: E731
         else:
-            dest, rule, bucket = join_path(folder, loose.other), "tidy:other", "other"
-        if await td.attempt(plan, rule, node, lambda n=node, d=dest, r=rule: td.move(n, d, r)):
+            dest = join_path(folder, loose.other)
+            work, bucket = (lambda n=node, d=dest: td.move(n, d, "tidy:other")), "other"
+            rule = "tidy:other"
+        if await td.attempt(plan, rule, node, work):
             counts[bucket] += 1
 
 
-async def _image(td: Tidier, node: FileNode) -> list[Action]:
-    dest = td.spec.loose.images_to
+async def _to_shared(td: Tidier, node: FileNode, dest: str, rule: str,
+                     source: str) -> list[Action]:
+    """Into a folder the whole drive shares (/写真/杂, /其他). A name already
+    there gets "_<short hash>"; the audit keeps where the file came from."""
     node = td.current(node)
     if dest == parent_of(node.path):
         return []
     actions: list[Action] = []
     if await td.planner.occupant(join_path(dest, node.name)) not in (None, node.file_id):
-        # Same name already there: keep both, the newcomer gets "_<short hash>".
         ext = node.name[len(stem_of(node.name)):]
-        renamed, node = await td.rename(node, f"{stem_of(node.name)}_{_short(node)}{ext}",
-                                        "tidy:image")
+        renamed, node = await td.rename(node, f"{stem_of(node.name)}_{_short(node)}{ext}", rule)
         actions.extend(renamed)
-    actions.extend(await td.move(node, dest, "tidy:image"))
+    actions.extend(await td.move(node, dest, rule, {"source_top": top_of(source),
+                                                    "source_folder": source}))
     return actions
 
 
@@ -455,7 +561,7 @@ async def _image(td: Tidier, node: FileNode) -> list[Action]:
 
 
 COUNT_KEYS = ("empty", "junk", "flatten", "big_folders", "big_files", "groups", "grouped",
-              "misc", "other", "images", "shelved")
+              "misc", "other", "images", "shelved", "stayed", "ads")
 
 
 def _counts() -> dict[str, int]:
@@ -488,9 +594,12 @@ async def organize_tree(
         tops = [n for n in tops if n.path == wanted]
     stamp = (at or _now()).isoformat(timespec="seconds")
     result: list[Plan] = []
+    # One planner for every top-level folder: they share /其他 and /写真/杂,
+    # so two folders' files of one name must not both claim it.
+    td = await _tidier(ctx, spec, protection, at)
     for top in tops:
-        td = await _tidier(ctx, spec, protection, at)
         plan = Plan(source=f"{TREE}:{top.path}", generated_at=stamp)
+        ads = Plan(source=f"{TREE_ADS}:{top.path}", generated_at=stamp)
         counts = _counts()
         if "slim" in parts:
             await _slim(td, tree, top.path, plan, counts)
@@ -500,11 +609,14 @@ async def organize_tree(
             _emptied(td, tree, top.path, plan, counts)
         if "loose" in parts:
             await _loose(td, top.path, [td.current(f) for f in tree.loose(top.path)],
-                         tree.folders(top.path), plan, counts)
+                         tree.folders(top.path), plan, counts, ads=ads)
         _summarize(plan, counts)
         if plan.actions or plan.notes:
             plan.note("tidy.scope", path=top.path, size=human_size(tree.size.get(top.path, 0)))
             result.append(plan)
+        if ads.actions:
+            ads.note("tidy.ads", count=len(ads.actions), path=top.path)
+            result.append(ads)
     return result
 
 
@@ -521,7 +633,7 @@ def _word_pattern(word: str) -> re.Pattern[str]:
 def _destinations(tree: Tree, spec: TidySpec,
                   protection: protect.Protection) -> list[tuple[str, str, re.Pattern[str]]]:
     """``(top folder, word, pattern)``, longest word first, for shelving."""
-    special = {top_of(f) for f in spec.inbox.folders} | {top_of(spec.big.to)} | set(spec.skip)
+    special = _special(spec)
     out: list[tuple[str, str, re.Pattern[str]]] = []
     for top in tree.folders("/"):
         if top.path in special or protection.covers(top.path):
@@ -546,13 +658,16 @@ def shelf_for(name: str, destinations: list[tuple[str, str, re.Pattern[str]]]) -
 async def organize_inbox(
     ctx: Context, *, folders: list[str] | None = None, at: datetime | None = None,
     spec: TidySpec | None = None,
-) -> Plan:
-    """Shelve what landed in the entry folders (one plan for all of them)."""
+) -> list[Plan]:
+    """Shelve what landed in the entry folders: one plan for all of them, and
+    a second one for suspected ads when there are any."""
     spec = spec or load_spec(ctx)
     protection = await protect.load(ctx)
     tree = Tree.build(await ctx.store.nodes_under("/"))
     td = await _tidier(ctx, spec, protection, at)
-    plan = Plan(source=INBOX, generated_at=(at or _now()).isoformat(timespec="seconds"))
+    stamp = (at or _now()).isoformat(timespec="seconds")
+    plan = Plan(source=INBOX, generated_at=stamp)
+    ads = Plan(source=INBOX_ADS, generated_at=stamp)
     counts = _counts()
     destinations = _destinations(tree, spec, protection)
     arrivals: dict[str, list[FileNode]] = defaultdict(list)
@@ -561,7 +676,11 @@ async def organize_inbox(
         if inbox not in tree.by_path or protection.covers(inbox):
             continue
         leftovers: list[FileNode] = []
-        for entry in tree.kids.get(inbox, []):
+        entries = tree.kids.get(inbox, [])
+        clean = {n.file_id for n in _ads(td, [e for e in entries if not e.is_folder], ads, counts)}
+        for entry in entries:
+            if not entry.is_folder and entry.file_id not in clean:
+                continue  # an ad: planned for the trash, not shelved
             top = shelf_for(entry.name, destinations)
             if top is None:
                 if not entry.is_folder:
@@ -574,13 +693,17 @@ async def organize_inbox(
                     arrivals[top].append(replace(entry, path=join_path(top, entry.name)))
             elif not entry.is_folder:
                 leftovers.append(entry)
-        await _loose(td, inbox, leftovers, tree.folders(inbox), plan, counts)
+        await _loose(td, inbox, leftovers, tree.folders(inbox), plan, counts, skip_big=False)
     for top in sorted(arrivals):
         # Newcomers join the grouping of the folder they moved into (§4 rule 1).
         files = [*tree.loose(top), *arrivals[top]]
-        await _loose(td, top, files, tree.folders(top), plan, counts)
+        await _loose(td, top, files, tree.folders(top), plan, counts, ads=ads)
     _summarize(plan, counts)
-    return plan
+    result = [plan]
+    if ads.actions:
+        ads.note("tidy.ads", count=len(ads.actions), path=", ".join(inboxes))
+        result.append(ads)
+    return result
 
 
 # -------------------------------------------------------------- big report
@@ -695,16 +818,19 @@ def trash_plan(node: FileNode) -> Plan:
     return plan
 
 
-def sample_moves(plans: list[Plan], per_folder: int, *, seed: int = 7) -> list[tuple[str, str]]:
-    """For spot checks (M7 §8): up to ``per_folder`` moves from each plan, as
-    ``(from, to)``, picked the same way every time."""
+def sample_moves(plans: list[Plan], per_folder: int, *, seed: int = 7) -> list[dict[str, str]]:
+    """For spot checks (M7 §8): up to ``per_folder`` moves from each plan (and
+    trashes from each ads plan), picked the same way every time. Each is
+    ``{"plan", "action", "rule", "from", "to"}``; ``to`` is empty for a trash."""
     import random
 
-    out: list[tuple[str, str]] = []
+    out: list[dict[str, str]] = []
     for plan in plans:
-        moves = [a for a in plan.actions if a.type is ActionType.MOVE]
-        chosen = random.Random(f"{seed}:{plan.source}").sample(moves, min(per_folder, len(moves)))
-        out += [(a.before.get("path", ""), a.after.get("path", ""))
+        wanted = ActionType.TRASH if is_ads_plan(plan.source) else ActionType.MOVE
+        pool = [a for a in plan.actions if a.type is wanted]
+        chosen = random.Random(f"{seed}:{plan.source}").sample(pool, min(per_folder, len(pool)))
+        out += [{"plan": plan.source, "action": str(a.type), "rule": a.rule_name,
+                 "from": a.before.get("path", ""), "to": a.after.get("path", "")}
                 for a in sorted(chosen, key=lambda a: a.before.get("path", ""))]
     return out
 

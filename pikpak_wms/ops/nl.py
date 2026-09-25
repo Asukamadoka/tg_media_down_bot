@@ -56,8 +56,8 @@ async def _tidy_proposal(ctx: Context, query: Query, now: datetime) -> Proposal:
         planned = await tidy.organize_tree(ctx, scope=None if scope == "/" else scope,
                                            at=now, parts=parts)
     elif query.intent == "organize_inbox":
-        planned = [await tidy.organize_inbox(ctx, folders=None if scope == "/" else [scope],
-                                             at=now)]
+        planned = await tidy.organize_inbox(ctx, folders=None if scope == "/" else [scope],
+                                            at=now)
     else:
         planned = [await organize.dedupe(ctx, scope=scope,
                                          keep_under=ctx.config.dedupe.keep_under)]

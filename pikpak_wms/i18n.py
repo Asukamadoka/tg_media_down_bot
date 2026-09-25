@@ -343,12 +343,6 @@ CATALOG: dict[str, dict[str, str]] = {
         "protect.root": "protecting / would freeze the whole drive",
         "protect.not_protected": "{path} is not protected",
         # ---- tidying the tree, the big-files report (M7 §2 to §5)
-        "tidy.counts": (
-            "tidy: {empty} empty folder(s) and {junk} junk file(s) trashed, {flatten} nested chain("
-            "s) lifted; {big_folders} big folder(s) and {big_files} big file(s) set apart; {groups}"
-            " group(s) of {grouped} file(s), {misc} to misc, {other} to other, {images} image(s); {"
-            "shelved} shelved from the inbox"
-        ),
         "tidy.scope": "top-level folder {path} ({size})",
         "big.files": "The {count} biggest files:",
         "big.folders": "The {count} biggest folders:",
@@ -386,6 +380,18 @@ CATALOG: dict[str, dict[str, str]] = {
         "cli.protect.usage": "usage: wms protect ls | wms protect add /path | wms protect rm /path",
         "cli.protect.paths": "Protected folders:",
         "cli.protect.shared": "Shared content ({count}):",
+        # ---- M7.1
+        "tidy.counts": (
+            "tidy: {empty} empty folder(s) and {junk} junk file(s) trashed, {flatten} nested chain("
+            "s) lifted; {big_folders} big folder(s) moved whole, {big_files} loose big file(s) set "
+            "apart; {groups} group(s) of {grouped} file(s), {misc} to misc, {other} to other, {imag"
+            "es} image(s), {stayed} left in place (a group named like its folder); {shelved} shelve"
+            "d from the inbox; {ads} suspected ad(s) in a plan of their own"
+        ),
+        "tidy.ads": (
+            "suspected ads in {path}: {count} file(s) to the trash. Check each before confirming; t"
+            "his plan is never applied on its own."
+        ),
     },
     "zh": {
         "action.rename": "重命名  {old}  →  {new}",
@@ -621,11 +627,6 @@ CATALOG: dict[str, dict[str, str]] = {
         "protect.root": "保护 / 等于冻结整个网盘，不支持",
         "protect.not_protected": "{path} 不在白名单里",
         # ---- tidying the tree, the big-files report (M7 §2 to §5)
-        "tidy.counts": (
-            "整理：清理空目录 {empty} 个、垃圾文件 {junk} 个，压平单链嵌套 {flatten} 处；大目录 {bi"
-            "g_folders} 个、大文件 {big_files} 个单独存放；归集 {groups} 组共 {grouped} 个文件，{mi"
-            "sc} 个进「杂」，{other} 个进「其他」，图片 {images} 张；入口目录上架 {shelved} 项"
-        ),
         "tidy.scope": "一级目录 {path}（{size}）",
         "big.files": "最大的 {count} 个文件：",
         "big.folders": "最大的 {count} 个目录：",
@@ -652,5 +653,16 @@ CATALOG: dict[str, dict[str, str]] = {
         "cli.protect.usage": "用法：wms protect ls | wms protect add /路径 | wms protect rm /路径",
         "cli.protect.paths": "受保护的目录：",
         "cli.protect.shared": "分享过的内容（{count} 项）：",
+        # ---- M7.1
+        "tidy.counts": (
+            "整理：清理空目录 {empty} 个、垃圾文件 {junk} 个，压平单链嵌套 {flatten} 处；大目录整体"
+            "移走 {big_folders} 个，散落大文件 {big_files} 个；归集 {groups} 组共 {grouped} 个文件"
+            "，{misc} 个进「杂」，{other} 个进「其他」，图片 {images} 张，{stayed} 个原地不动（组名"
+            "和所在目录同名）；入口目录上架 {shelved} 项；广告疑似 {ads} 个另列一份计划"
+        ),
+        "tidy.ads": (
+            "{path} 里的广告疑似：{count} 个文件移入回收站。请逐个核对后再确认；这份计划不会自动执"
+            "行。"
+        ),
     },
 }

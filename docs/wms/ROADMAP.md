@@ -11,8 +11,9 @@
 > | M5 | bot 命令族 `/wms`；入库之后自动上架（按规则生成 Plan，默认 dry-run 通知 + 一键确认） |
 > | M6 | 自然语言指令，见 `M6-natural-language.md` |
 > | M7 | 按用户规则整理网盘（白名单、散落文件归集、精简与大文件、入口上架、定期去重），见 `M7-organize-rules.md` |
+> | M7.1 | M7 的修订（大目录整体移动、全局 `/其他`、防嵌套、广告单独成计划、`--sample --json`）和直连媒体线路 v2，见 `M7.1-revisions.md` |
 >
-> **进度**：M1–M7 全部完成（见 `docs/HANDOFF.md` 各节）。M4 的手机端验收等公网 HTTPS 地址；M6 的模型后端准确率等 Cowork 在 NAS 上实测。
+> **进度**：M1–M7.1 全部完成（见 `docs/HANDOFF.md` 各节）。M4 的手机端验收等公网 HTTPS 地址；M6 的模型后端准确率等 Cowork 在 NAS 上实测。
 >
 > 另外一并做（先写规格再实现）：按 hash 去重、归档、基于 `events` 的增量盘点、出库推送 aria2、`star` / `share` 动作。下面是原路线图，保留作背景。
 

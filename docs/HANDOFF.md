@@ -1173,3 +1173,195 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai   # �
 8. **分享列表接口的返回格式**：按 PikPak 网页端的格式解析（`data` 列表、`file_id` 字段，也兼容 `file_ids`）。我没法连真实账号验证，请先跑 `wms protect ls`：如果解析出的路径数不是 20，把 `docker compose logs` 里的相关内容贴回来。
 9. **M5 的「入库后自动上架」仍然跑原来的 organize 规则**，不是 organize-inbox；organize-inbox 靠每小时的定时任务。要不要让 bot 转存完成后也立刻触发一次 organize-inbox，请用户定。
 10. **big-report 的「可腾出空间」是粗略估算**（久未变化的大文件 + 重复副本），不代表建议全部删除。
+
+## 阶段 3 · WMS M7.1：M7 规则修订 + 直连媒体线路 v2
+
+规格：`docs/wms/M7.1-revisions.md`。A 部分改的是 M7 的整理规则；B 部分重做直连媒体线路，这次每条直连用它自己的 auth key。
+
+### 这一阶段做了什么
+
+**A. 整理规则的修订**（`pikpak_wms/ops/tidy.py`、`rules/schema.py`）
+
+- **A1 大目录整体移动**：
+  - 二级目录满足下面任一条件，就整个移到 `/大文件/<A>/<目录名>/`：
+    - 总大小 ≥ `big.folder`（50 GiB）；
+    - 里面有一个 ≥ `big.file`（4 GiB）的文件。
+  - 不再把深层的大文件单独拎出来；一级目录里直接放着的 ≥ 4 GiB 文件仍移到 `/大文件/<A>/`。
+  - 精简只在二级目录内部进行：空目录和垃圾文件从深度 3 起算，二级目录本身不会被删。
+- **A2 全局 `/其他`**：
+  - 既不是视频也不是图片的散落文件，从所有一级目录统一移到 `/其他/`。重名时文件名后加 `_<短哈希>`。
+  - 审计记下 `source_top` 和 `source_folder`，撤销时回到原处。
+  - `/其他` 不存在时，计划里自带一条建目录。
+  - 规则文件里 `tidy.loose.other` 写成不带 `/` 的名字（如 `其他`），就退回到「每个一级目录各一个」。
+  - 所有一级目录共用一个计划器，两个目录里的同名文件不会抢同一个目标路径。
+- **A4.1 防嵌套**：
+  - 归一化之后，组名和所在一级目录名互相包含的（`Nako` 与 `Nako合集`、`小千` 与 `小千合集`），这组文件原地不动，计入计划摘要里的「留在原处」。
+  - 同名的已有子目录也不再吸收文件。入口上架同样遵守这条。
+- **A4.2 广告文件**：
+  - 判定条件是两条同时满足：
+    - 类型：图片、压缩包、可执行文件，或小于 `ads.video_max`（30 MiB）的视频；
+    - 名字：带域名，或含词表里的词（`二维码`、`QR`、`发布器`、`最新地址`……；英文词按单词边界匹配）。
+  - 这些文件进一份单独的计划，来源是 `organize-tree-ads:/A` 或 `organize-inbox-ads`，动作全是移进回收站。
+  - **任何定时任务都不会自动执行它**，只能人工点确认。命令行 `--apply` 也跳过它。
+  - 词表和阈值在规则文件 `tidy.ads`；`enabled: false` 关掉。
+- **A4.3 `--sample --json`**：
+  - `wms organize-tree --sample N --json` 输出一个 JSON 数组，每项是 `{plan, action, rule, from, to}`，不会被折行打断。
+  - 不加 `--json` 时每条一行：`from  →  to`，广告的是 `🗑 path`。
+
+**更正 M7 的一处说法**：M7 的 HANDOFF 写着 `--sample` 连计划都不存，实际上当时存了。这一版改好了：`--sample` 只在内存里生成计划、过一遍白名单、抽样打印，不写库。
+
+**B. 直连媒体线路 v2**（`tgmd/direct.py`，`TG_DIRECT_MEDIA=v2`，默认 `off`）
+
+- **只给非本 DC 用**：
+  - 下载器发现文件在本 DC，就直接走普通路线；
+  - `DirectRouteV2.sources()` 被要求连本 DC 时直接抛 `AssertionError`；
+  - 读不到本 DC 编号时也不用 v2。
+- **独立 key**：
+  - 在直连的 `MTProtoSender(None)` 上做 DH 握手，得到一把新 key。连接显式传 `proxy=None`，只连 `media_only` 端点。
+  - 主连接（经代理）调用 `auth.exportAuthorization(dc)`，得到的授权在直连连接上用 `auth.importAuthorization` 导入。经过代理的只有这份一次性的授权字节，key 本身不经过。
+  - 代码里完全不碰 Telethon 的 `_borrow_exported_sender`，也不碰 `session.auth_key`。
+- **持久化**：新表 `direct_keys`，主键是（账号 id, dc_id, 出口），存 key 和创建时间。
+  - 出口分 `ipv4` 和 `ipv6`，各用各的 key，所以一把 key 只会从一种地址出去。
+  - 带上账号 id，是为了换读取账号后不会误用旧账号的 key。
+  - 重启后直接复用，不再握手。两个下载同时第一次用某个 DC 时，只协商一次。
+- **出错回落**：
+  - key 被拒（`AUTH_KEY_UNREGISTERED` 这类 401、`AuthKeyDuplicatedError`、`AuthKeyNotFound`）：删掉这把 key，该 DC 冷却 24 小时。
+  - `importAuthorization` 失败：不存 key，冷却 24 小时。
+  - **FloodWait**（无论出在导出、导入还是下载途中）：
+    - 该 DC 冷却 24 小时；
+    - **先等满 FloodWait 要求的秒数，再改走普通路线**，不会换条路接着请求；
+    - 超过 300 秒的，这个文件按原有规则报错。
+  - 所有媒体端点都连不上：冷却 30 分钟。
+  - 冷却记录存在 `kv` 表，重启后仍然有效。
+  - 以上每种情况，这个文件都会回落到普通路线，照常下完。
+- **护栏**：
+  - 同一 DC 同时最多 4 条直连（按 DC 计，bot 账号和读取账号合计）；
+  - 直连条数取 `DOWNLOAD_CONNECTIONS` 和剩余名额中的较小值，不会额外增加连接；
+  - 日志里每个文件一行，末尾是 `route direct-v2` 或 `route proxy`。
+- **IPv6**：`media_endpoints()` 不再过滤 IPv6 端点，排序时 IPv4 在前。
+- **bench**：
+  - `python -m tgmd.bench <链接> --route v2` 不需要 `--same-egress-ip`；
+  - 输出多了一列 `via`，显示每次实际走的是 `direct-v2` 还是 `proxy`；
+  - 和 bot 共用数据库里的 key，测速不会另外生成 key，也不会留下多余的 key；
+  - v1 的 `media`/`both` 仍要加 `--same-egress-ip`；
+  - `TG_DIRECT_MEDIA=auto` 仍然拒绝。
+- **部署文档**：
+  - `deploy/restricted-network/mihomo/config.example.yaml`：
+    - 新增 `TG` fallback 组；
+    - 三条 DIRECT 规则写在 Telegram 大段之前；
+    - Telegram 全部 IP 段走 `TG`；
+    - `ipv6: true`，`dns.ipv6` 保持 `false`。
+  - `docker-compose.yml`：加了一段注释掉的 IPv6 网络配置。
+  - `README.md`：新增「Telegram 固定一个出口」「直连媒体线路 v2」「IPv6」三节。
+
+### 验收证据
+
+- **测试**：1130 → 1189（+59）。3.11 与 3.12 全绿，ruff 零告警。
+  - 新增：
+    - `test_direct.py` 34 个，包括：
+      - 本 DC 永远不走 v2；
+      - 新 key 通过直连 DH 生成，`proxy=None`，export 走主连接、import 走直连；
+      - key 从不是 Telethon 的，也从不借 exported sender；
+      - 重启后复用 key；
+      - IPv6 用单独的 key；
+      - 并发时只协商一次；
+      - 两种 key 被拒、import 失败、FloodWait（先等后回落）、长 FloodWait、连不上，每种都会冷却并回落；
+      - 冷却期内一次都不尝试，冷却记录重启后仍在；
+      - 每个 DC 最多 4 条，并计入 `DOWNLOAD_CONNECTIONS`；
+      - 日志里的 route；
+      - 旧库自动加上新表；
+      - 用到的 Telethon 私有行为有测试钉住。
+    - `test_wms_m71.py` 20 个：全局 `/其他`（含撤销）、防嵌套、广告、`--sample --json`。
+    - 另外：`test_wms_m7.py` +1、`test_wms_m7_bot.py` +1（v2 的装配）、`test_bench.py` +2、`test_config.py` +1。
+  - **改了预期值的旧测试**（功能按规格改了，按红线 7 在这里写明；没有删除任何测试）：
+    - `test_wms_m7.py`、`test_wms_m7_bot.py`、`test_wms_m7_fixture.py`：
+      - 其他文件改去 `/其他`；
+      - 深层大文件不再单独提取，改成整个二级目录移走；
+      - 精简不再删除二级目录本身；
+      - 入口上架遵守防嵌套；
+      - inbox 现在返回计划列表；
+      - `sample_moves` 返回字典。
+      - 夹具的不变量按新规则重写，4 份快照重新生成。
+    - `test_parallel.py` 4 处：`media_endpoints` 现在也返回 IPv6 端点，排在 IPv4 后面。
+- **夹具上的结果**（80,964 个条目）：
+  - big：38 份计划，82 个二级目录整体移走（M7 是 27 个目录加 64 个单独文件）；
+  - loose：1 个广告文件进了单独的计划；
+  - inbox：一份 556 个动作的上架计划，外加一份 1 个动作的广告计划；
+  - 白名单拦下的动作：3 个；
+  - 耗时（沙箱，秒）：完整 organize-tree 2.8（41 份计划，804 个动作），organize-inbox 1.3，dedupe 0.7，大文件报告 1.3。
+- **没法在沙箱里验证的**：v2 在真实 Telegram 上的握手、导入和速度。全部测试都用假 client，没有联网。这部分由 Cowork 在 NAS 上测。
+
+### NAS 上要改什么
+
+- **不改也能跑**：`TG_DIRECT_MEDIA` 默认 `off`。数据库只新增了一张表 `direct_keys`，启动时自动创建。没有新增必填的环境变量。
+- **整理规则会变**（升级后下一轮定时任务就按新规则出计划）：
+  - 其他文件去 `/其他`；
+  - 大目录整体移走；
+  - 广告单独成计划，不会自动执行。
+  - 旧的待确认计划会被新一轮计划标为「已丢弃」。
+- **要用 v2**（建议等 Cowork 测过再在 bot 上长期开）：
+  1. mihomo：照 `deploy/restricted-network/mihomo/config.example.yaml` 核对规则顺序。三条 DIRECT **在 Telegram 段之前**：
+     ```
+     - IP-CIDR,149.154.166.111/32,DIRECT,no-resolve
+     - IP-CIDR6,2001:67c:4e8:f002::b/128,DIRECT,no-resolve
+     - IP-CIDR6,2001:67c:4e8:f004::b/128,DIRECT,no-resolve
+     ```
+     `TG` 组保持 `fallback`（你们已经改好了）。
+  2. **只用 DC4 的 IPv4**：到这一步就够了。
+  3. **要连 DC2（只有 IPv6）和 DC4 的 IPv6**（Docker 29）：
+     - 在 compose 里取消 `networks: default: enable_ipv6: true` 那段的注释，子网用一个 ULA `/64`。
+       - bot 用 `network_mode: service:proxy`，和 proxy 共用一个网络栈，所以只需要给 proxy 所在的 `default` 网络开 IPv6。
+       - Docker 27 起 `ip6tables` 默认打开，容器的 IPv6 出站会 NAT 成宿主机的 `240e:` 地址。
+       - 如果 `daemon.json` 里写过 `"ip6tables": false`，要删掉。
+     - mihomo 设 `ipv6: true`（`dns.ipv6` 保持 `false`）。
+     - 网络要重建：`docker compose down && docker compose up -d`。只 restart 不生效。
+     - 验证命令见 `deploy/restricted-network/README.md`「IPv6」一节。
+  4. `.env` 设 `TG_DIRECT_MEDIA=v2`，然后 `docker compose up -d bot`。
+- **注意**：`data/db` 里现在多了直连 key，和会话一样是凭据，备份时照同样的标准保管。
+
+### 用户需要在 Telegram 里做什么
+
+1. `/wms organize tree`：
+   - 看计划：大目录应当整个移到 `/大文件/<A>/`，其他文件应当去 `/其他`，不应再出现 `/<A>/<和 A 几乎同名>/`；
+   - 如果某个一级目录多了一份「广告」计划，点 📄 看明细，确认都是广告再点 ✅。
+2. `/wms organize inbox`：同样检查，广告计划单独确认。
+3. v2 打开后，发一个 DC4 频道里的受限视频给 bot。回来后 `/verify`，确认用户会话一行正常。
+
+### 给 Cowork 的核验手段
+
+```bash
+docker compose run --rm bot wms stocktake
+docker compose run --rm bot wms organize-tree --sample 20 --json > sample.json   # 不存计划；每项 {plan, action, rule, from, to}
+docker compose run --rm bot wms organize-tree --part big                         # 应当只有「整个二级目录 → /大文件/<A>/」和一级目录里的大文件
+docker compose run --rm bot wms organize-inbox
+
+# v2 实测（M7.1 §B3）：挑一个 DC4 文件，普通路线和 v2 各跑 1 条和 4 条连接。
+# 全程盯着 bot 里 /verify 的用户会话一行；只要出现一次会话异常，立即设 TG_DIRECT_MEDIA=off 并回报。
+docker compose exec bot python -m tgmd.bench '<DC4 文件链接>' --route normal --connections 1,4
+docker compose exec bot python -m tgmd.bench '<DC4 文件链接>' --route v2     --connections 1,4
+docker compose logs bot | grep -E 'direct-v2|route (direct-v2|proxy)'
+```
+
+- `via` 列显示 `direct-v2` 才说明这一行真的走了直连。显示 `proxy` 的话，看日志里 `direct-v2 not used for DC 4 (...)` 括号里的原因。
+- 第一次跑 v2 会有一行 `negotiated a new key for DC 4 over ipv4`，之后的运行不应再出现。
+- DC5 文件跑 `--route v2` 应当全部是 `proxy`（本 DC 不走 v2）。
+
+### 怎么回滚
+
+- 镜像回滚到 `sha-6414f95`（M7）。
+  - 新表 `direct_keys` 留在库里，旧版本不认识它，也不会读它；
+  - 旧版本见到 `TG_DIRECT_MEDIA=v2` 会报配置错误，所以回滚前先把它改回 `off`；
+  - 整理计划方面，旧版本会重新按 M7 的规则出计划。
+- 只关 v2：`TG_DIRECT_MEDIA=off`，重启 bot。要连 key 一起清掉，就在库里执行 `DELETE FROM direct_keys`；不清也无害。
+
+### 待决问题
+
+1. **bot 账号的下载也走 v2**：
+   - bot 自己收到的文件也在它自己的 DC 之外时，同样用 v2，key 按账号分开存；
+   - 冷却和「每 DC 最多 4 条」按 DC 计，两个账号合计，这是偏保守的做法。
+   - 只想给读取账号用的话告诉我。
+2. **连不上的 DC 每 30 分钟试一次**：DC1、DC3、DC5 的媒体端点从 NAS 连不上。DC5 是本 DC，不会试。DC1 的文件每 30 分钟会有一个多等最多约 20 秒（IPv4 和 IPv6 各 10 秒超时），然后照常走代理。嫌多的话可以把这个间隔调长，或者只对 DC2、DC4 启用。
+3. **IPv6 网络配置默认注释掉**：`default` 网络开 IPv6 要重建网络、会断一下 bot，所以让你们自己决定什么时候开。
+4. **v2 的速度没有实测**：DC4 直连到底比经代理（4 条约 1.0 MiB/s）快多少，等 Cowork 的数字。
+5. **A4.2 的词表**：按简报给的例子起步（`二维码`、`QR`、`发布器`、`最新地址`、`防屏蔽`、`扫码`、`加群`、`福利群`……，全部在规则文件里）。真实索引上误判的，直接改 `tidy.ads.words`。
+6. **分组误判率**：还是等 `--sample --json` 的抽查结果，§8 的要求是不超过 5%。

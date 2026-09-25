@@ -458,13 +458,21 @@ def _tidy_command(build, *, apply_now: bool, limit: int | None, as_json: bool,
         await stocktake_ops.stocktake(ctx.client, ctx.store, roots=ctx.config.stocktake.roots,
                                       full=False, page_size=ctx.config.stocktake.page_size)
         planned = await build(ctx)
+        if sample:
+            # A spot check stores nothing, but shows exactly what would be
+            # stored: the whitelist still applies.
+            protection = await protect.load(ctx)
+            for plan in planned:
+                protect.apply_to(plan, protection)
+            return planned, [None] * len(planned), []
         ids = [await plans.save(ctx, plan) for plan in planned]
-        if not sample:
-            await plans.supersede(ctx, prefix=prefix, keep={i for i in ids if i})
+        await plans.supersede(ctx, prefix=prefix, keep={i for i in ids if i})
         reports = []
         if apply_now:
             budget = limit if limit is not None else ctx.config.runtime.max_actions_per_run
-            for plan_id in (i for i in ids if i):
+            for plan, plan_id in zip(planned, ids, strict=True):
+                if plan_id is None or tidy.is_ads_plan(plan.source):
+                    continue  # suspected ads are confirmed one plan at a time
                 if budget <= 0:
                     break
                 report = await plans.apply(ctx, plan_id, limit=budget)
@@ -473,15 +481,20 @@ def _tidy_command(build, *, apply_now: bool, limit: int | None, as_json: bool,
         return planned, ids, reports
 
     planned, ids, reports = _run(work)
+    if sample:
+        # Spot checks (M7 §8): N moves from each plan, the same each time.
+        # Written raw, one per line, never wrapped (M7.1 A4.3).
+        picked = tidy.sample_moves(planned, sample)
+        if as_json:
+            typer.echo(json.dumps(picked, ensure_ascii=False, indent=1))
+        else:
+            for item in picked:
+                typer.echo(f"{item['from']}  →  {item['to'] or '🗑'}")
+        return
     if as_json:
-        console.print_json(json.dumps(
+        typer.echo(json.dumps(
             [{"id": i, "plan": p.to_dict()} for p, i in zip(planned, ids, strict=True)],
             ensure_ascii=False))
-        return
-    if sample:
-        # Spot checks (M7 §8): N moves from each top-level folder, the same each time.
-        for source, target in tidy.sample_moves(planned, sample):
-            console.print(f"{source}  →  {target}", markup=False)
         return
     for plan, plan_id in zip(planned, ids, strict=True):
         for line in plans.plan_lines(plan, plan_id=plan_id, limit=40):
@@ -514,7 +527,7 @@ def organize_tree_command(
         return tidy.organize_tree(ctx, scope=scope, parts=set(part) if part else None)
 
     _tidy_command(build, apply_now=_wants_apply(apply_flag) and not sample, limit=limit,
-                  as_json=as_json, sample=sample, prefix=f"{tidy.TREE}:")
+                  as_json=as_json, sample=sample, prefix=tidy.TREE)
 
 
 @app.command(name="organize-inbox")
@@ -526,7 +539,7 @@ def organize_inbox_command(
 ) -> None:
     """Shelve what landed in the entry folders (docs/wms/M7 §4)."""
     async def build(ctx):
-        return [await tidy.organize_inbox(ctx, folders=folder or None)]
+        return await tidy.organize_inbox(ctx, folders=folder or None)
 
     _tidy_command(build, apply_now=_wants_apply(apply_flag), limit=limit, as_json=as_json,
                   sample=0, prefix=tidy.INBOX)

@@ -141,6 +141,29 @@ class TestRoutes:
         assert bench._downloader(object(), 4, "config", auto)._route is None  # noqa: SLF001
         assert bench._downloader(object(), 4, "config", off)._route is None  # noqa: SLF001
 
+    def test_v2_uses_the_direct_route_with_its_own_keys(self):
+        direct = object()
+        downloader = bench._downloader(object(), 4, "v2", None, direct)  # noqa: SLF001
+        assert downloader._direct is direct  # noqa: SLF001
+        assert downloader._route is None  # noqa: SLF001
+        v2 = SimpleNamespace(telegram=SimpleNamespace(direct_media="v2"))
+        assert bench._downloader(object(), 4, "config", v2, direct)._direct is direct  # noqa: SLF001
+        assert bench._downloader(object(), 4, "normal", v2, direct)._direct is None  # noqa: SLF001
+
+    async def test_v2_needs_no_same_egress_ip(self, env, monkeypatch, capsys):
+        # M7.1 §B3: its key is only ever used on the direct connections.
+        FakeDownloader.runs = []
+        monkeypatch.setattr(
+            bench, "user_session_source", lambda config, stored: (object(), "env")
+        )
+        monkeypatch.setattr(bench, "TelegramClient", FakeClient)
+        monkeypatch.setattr(bench, "Resolver", FakeResolver)
+        monkeypatch.setattr(bench, "Downloader", FakeDownloader)
+        assert await bench.run(args(connections=(1, 4), route="v2")) == 0
+        out = capsys.readouterr().out
+        assert FakeDownloader.runs == [1, 4]
+        assert "via" in out and "proxy" in out  # the fake took the ordinary route
+
     @pytest.mark.parametrize("route", ["media", "both"])
     async def test_the_media_route_needs_same_egress_ip(self, route, capsys):
         assert await bench.run(args(route=route)) == 2

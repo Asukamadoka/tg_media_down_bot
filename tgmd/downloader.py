@@ -22,6 +22,8 @@ from telethon.tl.types import (
     MessageMediaWebPage,
 )
 
+from .direct import ROUTE as DIRECT_ROUTE
+from .direct import DirectFlood, DirectRouteV2
 from .i18n import Explained
 from .parallel import (
     MAX_CONNECTIONS,
@@ -189,6 +191,8 @@ class Transfer:
     connections: int
     dc_id: int | None
     endpoint: str | None = None
+    route: str = "proxy"
+    """``direct-v2`` or ``proxy`` (the ordinary route, whatever it goes through)."""
 
     @property
     def rate(self) -> float:
@@ -205,6 +209,7 @@ class Downloader:
         connections: int = 1,
         endpoints: EndpointChooser = default_endpoints,
         route: MediaRoute | None = None,
+        direct: DirectRouteV2 | None = None,
     ) -> None:
         self._client = client
         self._connections = max(1, min(connections, MAX_CONNECTIONS))
@@ -212,6 +217,9 @@ class Downloader:
         # TG_DIRECT_MEDIA=auto: prefer media endpoints, which on the NAS are
         # reachable without the proxy. Overrides ``endpoints``.
         self._route = route
+        # TG_DIRECT_MEDIA=v2: direct connections on keys of their own, for
+        # files outside the home DC; the ordinary route when it cannot.
+        self._direct = direct
         self.last: Transfer | None = None
 
     async def download(
@@ -251,7 +259,7 @@ class Downloader:
         # One line per file, so the operator can see where their files live
         # (which DC) and what a connection count actually buys.
         log.info(
-            "downloaded %s: %s in %.1fs (%s) from DC %s over %d connection(s)%s",
+            "downloaded %s: %s in %.1fs (%s) from DC %s over %d connection(s)%s, route %s",
             info.file_name,
             human_size(transfer.size),
             transfer.seconds,
@@ -259,6 +267,7 @@ class Downloader:
             transfer.dc_id if transfer.dc_id is not None else "?",
             transfer.connections,
             f" via {transfer.endpoint}" if transfer.endpoint else "",
+            transfer.route,
         )
         return path
 
@@ -274,9 +283,12 @@ class Downloader:
         if document is None or not size:
             return None
         dc_id = document.dc_id
+        direct = self._direct is not None and await self._direct.available(
+            self._client, dc_id
+        )
         if self._connections >= 2 and size >= MIN_PARALLEL_SIZE:
             count = self._connections
-        elif await self._direct_route_to(dc_id):
+        elif direct or await self._direct_route_to(dc_id):
             count = 1
         else:
             return None
@@ -290,6 +302,12 @@ class Downloader:
             if fresh is None or getattr(fresh, "document", None) is None:
                 raise ParallelUnavailable("the message is gone")
             return document_location(fresh.document)
+
+        if direct:
+            transfer = await self._via_direct(document, size, count, destination, progress,
+                                              cancel, refresh)
+            if transfer is not None:
+                return transfer
 
         route = self._route
         chooser = route.endpoints if route is not None else self._endpoints
@@ -337,6 +355,41 @@ class Downloader:
             except BaseException:
                 self._cleanup(destination)
                 raise
+        return None
+
+    async def _via_direct(self, document, size, count, destination, progress, cancel,
+                          refresh) -> Transfer | None:
+        """The v2 direct route. None sends the file to the ordinary route."""
+        assert self._direct is not None
+        dc_id = document.dc_id
+        try:
+            async with self._direct.sources(self._client, dc_id, count) as (sources, label):
+                await download_parts(
+                    sources,
+                    location=document_location(document),
+                    size=size,
+                    path=destination,
+                    progress=progress,
+                    cancel=cancel,
+                    refresh=refresh,
+                    flood_ceiling=_FLOOD_WAIT_CEILING,
+                )
+                return Transfer(size=size, seconds=0.0, connections=len(sources),
+                                dc_id=dc_id, endpoint=label, route=DIRECT_ROUTE)
+        except DirectFlood as exc:
+            self._cleanup(destination)
+            # The limit is the account's: the ordinary route waits it out too.
+            if exc.seconds > _FLOOD_WAIT_CEILING:
+                raise DownloadError(key="err.download.flood", seconds=exc.seconds) from exc
+            log.info("%s; the proxy route after it", exc)
+            await asyncio.sleep(exc.seconds + 1)
+        except ParallelUnavailable as exc:
+            self._cleanup(destination)
+            log.info("%s not used for DC %s (%s); using the proxy route", DIRECT_ROUTE,
+                     dc_id, exc)
+        except BaseException:
+            self._cleanup(destination)
+            raise
         return None
 
     async def _direct_route_to(self, dc_id: int) -> bool:

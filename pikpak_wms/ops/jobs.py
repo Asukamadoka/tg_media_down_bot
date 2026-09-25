@@ -65,11 +65,12 @@ async def _batch_job(ctx: Context, job: ScheduledJob, prefix: str,
                      planned: list[Plan]) -> JobResult:
     """Save each plan, retire the job's stale ones, and apply when asked,
     within one ``max_actions_per_run`` for the whole run (the rest next run)."""
-    ids: list[int] = []
+    saved: list[tuple[int, Plan]] = []
     for plan in planned:
         plan_id = await plans.save(ctx, plan)
         if plan_id is not None:
-            ids.append(plan_id)
+            saved.append((plan_id, plan))
+    ids = [plan_id for plan_id, _plan in saved]
     await plans.supersede(ctx, prefix=prefix, keep=set(ids))
     result = JobResult(job.name, "", plan_id=ids[0] if ids else None,
                        plan=planned[0] if len(planned) == 1 else None, plan_ids=ids)
@@ -81,7 +82,9 @@ async def _batch_job(ctx: Context, job: ScheduledJob, prefix: str,
         result.summary = t("job.planned_many", name=job.name, count=len(ids), actions=actions)
         return result
     budget = ctx.config.runtime.max_actions_per_run
-    for plan_id in ids:
+    for plan_id, plan in saved:
+        if tidy.is_ads_plan(plan.source):
+            continue  # suspected ads wait for a person, whatever the job says
         if budget <= 0:
             break
         report = await plans.apply(ctx, plan_id, limit=budget)
@@ -102,9 +105,10 @@ async def run_job(ctx: Context, job: ScheduledJob, *, deliver: Deliver | None = 
     if job.name in (tidy.TREE, tidy.INBOX, "dedupe", "big-report"):
         await _refresh(ctx)
     if job.name == tidy.TREE:
-        result = await _batch_job(ctx, job, f"{tidy.TREE}:", await tidy.organize_tree(ctx))
+        # "organize-tree" covers its ads plans ("organize-tree-ads:…") too.
+        result = await _batch_job(ctx, job, tidy.TREE, await tidy.organize_tree(ctx))
     elif job.name == tidy.INBOX:
-        result = await _batch_job(ctx, job, tidy.INBOX, [await tidy.organize_inbox(ctx)])
+        result = await _batch_job(ctx, job, tidy.INBOX, await tidy.organize_inbox(ctx))
     elif job.name == "dedupe":
         plan = await organize.dedupe(ctx, scope=cfg.dedupe.scope,
                                      keep_under=cfg.dedupe.keep_under)

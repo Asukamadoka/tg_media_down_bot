@@ -308,11 +308,15 @@ Beyond the rules file, the warehouse knows three whole-drive jobs of its own
   everything you ever shared, read live from PikPak before each plan. No plan
   touches them, whatever made it.
 * **organize-tree** (daily, one plan per top-level folder): files lying
-  directly in a top-level folder are grouped by name (`/A/<group>/`), other
-  videos go to `/A/杂/`, images to `/写真/杂/`, the rest to `/A/其他/`; inside
-  the second-level folders empty folders and junk (`.url`, `.txt`, 「最新地址」…)
-  go to the trash and single-folder chains are lifted; second-level folders of
-  50 GiB or more, and files of 4 GiB or more, move to `/大文件/<A>/`.
+  directly in a top-level folder are grouped by name (`/A/<group>/`, never a
+  group named like `/A` itself), other videos go to `/A/杂/`, images to
+  `/写真/杂/`, the rest to the one drive-wide `/其他/`; ad-like files (QR codes,
+  small videos named after a site…) go to a plan of their own that no job ever
+  carries out; inside the second-level folders empty folders and junk (`.url`,
+  `.txt`, 「最新地址」…) go to the trash and single-folder chains are lifted; a
+  second-level folder of 50 GiB or more, or holding a file of 4 GiB or more,
+  moves whole to `/大文件/<A>/`. `wms organize-tree --sample 20 --json` prints
+  a machine-readable spot check and stores nothing.
 * **organize-inbox** (hourly): what lands in `/Telegram` and
   `/Pack From Shared` and names a top-level folder moves there; the rest is
   grouped where it is.
@@ -394,7 +398,7 @@ The settings worth knowing about:
 | `download.media_template` | `{chat}/{name}` | layout under the media directory (`MEDIA_TEMPLATE`) |
 | `download.local_url_prefix` | none | prefix for kept files' paths in replies (`LOCAL_URL_PREFIX`) |
 | `download.connections` | 4 | connections per large file (`DOWNLOAD_CONNECTIONS`, at most 8); 1 turns parallel download off |
-| `telegram.direct_media` | off | `auto` is refused and runs as `off`: it got the reading session revoked (`TG_DIRECT_MEDIA`, see docs/HANDOFF.md) |
+| `telegram.direct_media` | off | `v2`: files outside the home DC come from directly reachable media endpoints, on a key used only there (`TG_DIRECT_MEDIA`, see deploy/restricted-network). `auto` is refused and runs as `off`: it got the reading session revoked |
 | `download.max_batch` | 50 | cap on messages expanded from one range link |
 | `download.max_queue_per_user` | 20 | per-user queue limit |
 | `download.filename_template` | `{chat}/{message_id}_{name}` | layout under `DOWNLOAD_DIR` |
