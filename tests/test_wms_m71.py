@@ -18,7 +18,7 @@ from pikpak_wms.core.client import WmsClient
 from pikpak_wms.core.models import ActionType
 from pikpak_wms.core.ratelimit import TokenBucket
 from pikpak_wms.i18n import set_language
-from pikpak_wms.ops import jobs, plans, tidy
+from pikpak_wms.ops import jobs, organize, plans, tidy
 from pikpak_wms.ops.context import Context
 from pikpak_wms.rules.schema import TidySpec
 from pikpak_wms.store.db import Store
@@ -86,6 +86,19 @@ class TestOneOtherFolder:
         (plan,) = await world.tree()
         assert plan.source == "organize-tree:/A"  # no plan for /其他 itself
         assert not [a for a in plan.actions if a.type is ActionType.CREATE_FOLDER]
+
+    async def test_layout_ensures_it(self, world):
+        # M7.1 A2: /其他 joins layout.ensure on its own.
+        layout = await organize.layout(world.ctx)
+        assert [a.after["path"] for a in layout.actions] == ["/其他"]
+        world.drive.add("/其他", folder=True)
+        await world.sync()
+        assert (await organize.layout(world.ctx)).actions == []
+
+    async def test_a_per_folder_name_is_not_ensured(self, world):
+        world.ctx.config.rules_file.write_text("tidy:\n  loose:\n    other: 其他\n",
+                                               encoding="utf-8")
+        assert (await organize.layout(world.ctx)).actions == []
 
     async def test_the_plan_makes_it_when_missing(self, world):
         world.drive.add("/A/x.zip", size=1)

@@ -1191,7 +1191,7 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai   # �
 - **A2 全局 `/其他`**：
   - 既不是视频也不是图片的散落文件，从所有一级目录统一移到 `/其他/`。重名时文件名后加 `_<短哈希>`。
   - 审计记下 `source_top` 和 `source_folder`，撤销时回到原处。
-  - `/其他` 不存在时，计划里自带一条建目录。
+  - `/其他` 自动加入 `layout.ensure`（`wms layout` 会建它）；即使没建，organize-tree 的计划里也会自带一条建目录。
   - 规则文件里 `tidy.loose.other` 写成不带 `/` 的名字（如 `其他`），就退回到「每个一级目录各一个」。
   - 所有一级目录共用一个计划器，两个目录里的同名文件不会抢同一个目标路径。
 - **A4.1 防嵌套**：
@@ -1256,7 +1256,7 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai   # �
 
 ### 验收证据
 
-- **测试**：1130 → 1189（+59）。3.11 与 3.12 全绿，ruff 零告警。
+- **测试**：1130 → 1191（+61）。3.11 与 3.12 全绿，ruff 零告警。
   - 新增：
     - `test_direct.py` 34 个，包括：
       - 本 DC 永远不走 v2；
@@ -1271,7 +1271,7 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai   # �
       - 日志里的 route；
       - 旧库自动加上新表；
       - 用到的 Telethon 私有行为有测试钉住。
-    - `test_wms_m71.py` 20 个：全局 `/其他`（含撤销）、防嵌套、广告、`--sample --json`。
+    - `test_wms_m71.py` 22 个：全局 `/其他`（含撤销、`layout.ensure`）、防嵌套、广告、`--sample --json`。
     - 另外：`test_wms_m7.py` +1、`test_wms_m7_bot.py` +1（v2 的装配）、`test_bench.py` +2、`test_config.py` +1。
   - **改了预期值的旧测试**（功能按规格改了，按红线 7 在这里写明；没有删除任何测试）：
     - `test_wms_m7.py`、`test_wms_m7_bot.py`、`test_wms_m7_fixture.py`：
@@ -1283,6 +1283,7 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai   # �
       - `sample_moves` 返回字典。
       - 夹具的不变量按新规则重写，4 份快照重新生成。
     - `test_parallel.py` 4 处：`media_endpoints` 现在也返回 IPv6 端点，排在 IPv4 后面。
+    - `test_wms_m2.py` 2 处：`layout` 现在总会带上 `/其他`（A2），执行数从 2 变成 3；另一处按路径取审计记录，不再取第一条。
 - **夹具上的结果**（80,964 个条目）：
   - big：38 份计划，82 个二级目录整体移走（M7 是 27 个目录加 64 个单独文件）；
   - loose：1 个广告文件进了单独的计划；
@@ -1294,7 +1295,8 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai   # �
 ### NAS 上要改什么
 
 - **不改也能跑**：`TG_DIRECT_MEDIA` 默认 `off`。数据库只新增了一张表 `direct_keys`，启动时自动创建。没有新增必填的环境变量。
-- **整理规则会变**（升级后下一轮定时任务就按新规则出计划）：
+- **organize-tree 定时任务**：NAS 上现在是 `enabled: false`（简报开头说的）。按 A3，先由 Cowork 用下面的 `--sample 20 --json` 和 `--part big` 抽查，误判率不超过 5% 再打开。
+- **整理规则会变**（organize-inbox 和重新打开后的 organize-tree 都按新规则出计划）：
   - 其他文件去 `/其他`；
   - 大目录整体移走；
   - 广告单独成计划，不会自动执行。

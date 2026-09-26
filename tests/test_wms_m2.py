@@ -364,7 +364,8 @@ class TestLayout:
         # The index has never seen /Inbox, so the plan includes it; applying
         # finds it exists and says so, and undo will not trash it.
         _, report = await plans.save_and_apply(w.ctx, await organize.layout(w.ctx))
-        assert report.applied == 2 and w.exists("/Media/电影")
+        # Three: the two listed, and M7.1's drive-wide /其他, always ensured.
+        assert report.applied == 3 and w.exists("/Media/电影") and w.exists("/其他")
         entries = {e["after"]["path"]: e for e in await w.store.audit_entries()}
         with pytest.raises(Refused, match="existed"):
             await plans.undo(w.ctx, entries["/Inbox"]["id"], apply_now=True)
@@ -378,7 +379,8 @@ class TestLayout:
         await plans.save_and_apply(w.ctx, await organize.layout(w.ctx))
         w.drive.add("/Media/kept.mkv", size=1)
         await w.sync()
-        entry = (await w.store.audit_entries())[0]
+        entry = next(e for e in await w.store.audit_entries()
+                     if e["after"]["path"] == "/Media")
         with pytest.raises(Refused, match="not empty"):
             await plans.undo(w.ctx, entry["id"], apply_now=True)
 
