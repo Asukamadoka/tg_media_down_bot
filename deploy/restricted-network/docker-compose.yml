@@ -65,6 +65,10 @@ services:
       # 直连媒体线路 v2（独立 auth key，docs/wms/M7.1 §B）：off（默认）| v2
       # 打开前先做 README.md「直连媒体线路 v2」里的检查。
       # TG_DIRECT_MEDIA: "v2"
+      # 经代理拿到的配置里没有 NAS 能直连的端点，所以手动指定（M7.2 C）：
+      # TG_DIRECT_ENDPOINTS: "4=149.154.166.111:443,4=149.154.166.110:443,4=149.154.166.120:443"
+      # 缓存频道里发的链接和视频也会被处理；每次顺带私聊第一个 admin 一句（M7.2 B），false 关掉：
+      # CHANNEL_REPLY_DM: "true"
     volumes:
       - ./data:/data
       # - <NAS 上的媒体共享目录>:/media

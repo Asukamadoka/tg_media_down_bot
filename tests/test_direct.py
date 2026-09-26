@@ -537,3 +537,56 @@ class TestTelethonStillHasWhatWeUse:
         request = _init_connection(client, ImportAuthorizationRequest(id=1, bytes=b"x"))
         assert request._bytes()  # noqa: SLF001
         assert ExportAuthorizationRequest(dc_id=4)._bytes()  # noqa: SLF001
+
+
+class TestManualEndpoints:
+    """M7.2 C: TG_DIRECT_ENDPOINTS, because the DC list Telegram hands out
+    through the proxy lacks the endpoints the NAS reaches directly."""
+
+    def route(self, db, clock):
+        manual = {4: [("149.154.166.110", 443), ("149.154.166.111", 443)],
+                  HOME: [("9.9.9.9", 443)]}
+        return DirectRouteV2(db, clock=clock, manual=manual)
+
+    async def test_tried_first(self, db, clock, senders):
+        route = self.route(db, clock)
+        found = await route.endpoints(FakeClient(), 4)
+        # Given order first; Telegram's own after, without repeating .111.
+        assert [o.ip_address for o in found] == [
+            "149.154.166.110", "149.154.166.111", "2001:67c:4e8:f004::b",
+        ]
+        async with route.sources(FakeClient(), 4, 1) as (_sources, label):
+            assert label == "direct-v2 149.154.166.110:443"
+
+    async def test_a_dc_with_only_a_manual_endpoint_becomes_available(self, db, clock, senders):
+        route = DirectRouteV2(db, clock=clock, manual={3: [("149.154.175.100", 443)]})
+        assert await route.available(FakeClient(), 3)
+
+    async def test_the_home_dc_s_entries_are_ignored(self, db, clock, senders, caplog):
+        route = self.route(db, clock)
+        with caplog.at_level(logging.WARNING, logger="tgmd.direct"):
+            assert not await route.available(FakeClient(), HOME)
+        assert "ignored" in caplog.text
+        with pytest.raises(AssertionError):
+            async with route.sources(FakeClient(), HOME, 1):
+                pass
+        assert senders.opened == []
+
+    async def test_an_endpoint_of_another_dc_rests_and_says_which(self, db, clock, senders,
+                                                                   caplog):
+        senders.fail = {"ImportAuthorizationRequest": AuthBytesInvalidError(request=None)}
+        route = self.route(db, clock)
+        with caplog.at_level(logging.WARNING, logger="tgmd.direct"), \
+                pytest.raises(ParallelUnavailable):
+            async with route.sources(FakeClient(), 4, 1):
+                pass
+        assert await route.resting(4)
+        assert "149.154.166.110:443" in caplog.text and "TG_DIRECT_ENDPOINTS" in caplog.text
+        assert await db.direct_key_get(ACCOUNT, 4, "ipv4") is None
+
+    async def test_the_same_rules_still_hold(self, db, clock, senders):
+        # Its own key, direct, no proxy: nothing changes for a manual endpoint.
+        async with self.route(db, clock).sources(FakeClient(), 4, 2):
+            pass
+        assert all(s.connection["proxy"] is None for s in senders.opened)
+        assert senders.opened[0].given_key is None

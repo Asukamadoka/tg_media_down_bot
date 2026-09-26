@@ -157,10 +157,10 @@ tidy:
     junk_extensions: [url, html, txt, lnk, apk]   # 不论大小
     junk_words: [最新地址, 防屏蔽, 更多资源]       # 名字带这些词、且小于下面的大小
     junk_words_max_size: 1MiB
-  big:                        # 大目录和大文件（§3.2，M7.1 A1）
-    # 二级目录是整体，不拆散：总大小 ≥ folder，或里面任意一个文件 ≥ file，
-    # 就整个移到 <to>/<一级目录>/<二级目录>/。一级目录里散落的 ≥ file 的文件
-    # 移到 <to>/<一级目录>/。
+  big:                        # 大目录和大文件（§3.2，M7.2 A）
+    # 二级目录是整体，永不拆散：总大小 ≥ folder 就整个移到
+    # <to>/<一级目录>/<二级目录>/；里面有大文件不算。一级目录里散落的
+    # ≥ file 的文件移到 <to>/<一级目录>/。
     folder: 50GiB
     file: 4GiB
     to: /大文件

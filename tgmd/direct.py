@@ -26,6 +26,11 @@ This route never shares a key (docs/wms/M7.1 §B2):
   back to the ordinary route.
 * At most four direct connections per DC run at once. They come out of
   ``DOWNLOAD_CONNECTIONS``; this route never adds connections.
+* ``TG_DIRECT_ENDPOINTS`` names endpoints to try first (M7.2 C): the DC list
+  Telegram hands out depends on where the request comes from, and the one
+  seen through the proxy lacks the endpoints the NAS reaches directly. An
+  entry that is not really that DC's shows up as a failed import: rested for
+  24 hours like any other, with the endpoint named in the log.
 """
 
 from __future__ import annotations
@@ -43,6 +48,7 @@ from telethon.errors.rpcbaseerrors import AuthKeyError, UnauthorizedError
 from telethon.network import MTProtoSender
 from telethon.tl.functions.auth import ExportAuthorizationRequest, ImportAuthorizationRequest
 from telethon.tl.functions.help import GetNearestDcRequest
+from telethon.tl.types import DcOption
 
 from .parallel import (
     ParallelUnavailable,
@@ -101,8 +107,12 @@ class DirectRouteV2:
         cooldown: float = COOLDOWN,
         connect_timeout: float = 10.0,
         clock: Callable[[], float] = time.time,
+        manual: dict[int, list[tuple[str, int]]] | None = None,
     ) -> None:
         self._db = db
+        # TG_DIRECT_ENDPOINTS, by DC: tried before Telegram's own list.
+        self._manual = {dc: list(items) for dc, items in (manual or {}).items()}
+        self._ignored_home: set[int] = set()
         self._per_dc = per_dc
         self._cooldown = cooldown
         self._connect_timeout = connect_timeout
@@ -127,15 +137,42 @@ class DirectRouteV2:
     def free(self, dc_id: int) -> int:
         return max(0, self._per_dc - self._in_use[dc_id])
 
+    async def endpoints(self, client, dc_id: int) -> list:
+        """The endpoints to try for ``dc_id``: TG_DIRECT_ENDPOINTS first, then
+        Telegram's own media endpoints, without repeats."""
+        manual = [
+            DcOption(id=dc_id, ip_address=ip, port=port, ipv6=":" in ip, media_only=True)
+            for ip, port in self._manual.get(dc_id, [])
+        ]
+        given = {(option.ip_address, option.port) for option in manual}
+        try:
+            found = await media_endpoints(client, dc_id)
+        except Exception:
+            if not manual:
+                raise
+            # The manual ones stand on their own.
+            log.debug("could not list media endpoints for DC %s", dc_id, exc_info=True)
+            found = []
+        return manual + [o for o in found if (o.ip_address, o.port) not in given]
+
+    def is_manual(self, endpoint) -> bool:
+        return (endpoint.ip_address, endpoint.port) in self._manual.get(endpoint.id, [])
+
     async def available(self, client, dc_id: int | None) -> bool:
         """True when a file in ``dc_id`` may try this route now."""
         home = self.home_dc(client)
-        if dc_id is None or home is None or dc_id == home:
+        if dc_id is None or home is None:
+            return False
+        if dc_id == home:
+            if dc_id in self._manual and dc_id not in self._ignored_home:
+                self._ignored_home.add(dc_id)
+                log.warning("direct-v2: TG_DIRECT_ENDPOINTS entries for DC %s are ignored: "
+                            "it is the home DC, which never uses this route", dc_id)
             return False
         if self.free(dc_id) == 0 or await self.resting(dc_id):
             return False
         try:
-            return bool(await media_endpoints(client, dc_id))
+            return bool(await self.endpoints(client, dc_id))
         except Exception:  # an optimisation must never fail a download
             log.debug("could not list media endpoints for DC %s", dc_id, exc_info=True)
             return False
@@ -182,7 +219,7 @@ class DirectRouteV2:
     async def _open_all(self, client, dc_id: int, count: int, senders: list) -> tuple:
         """Open the connections into ``senders``; return (account, egress, label)."""
         account = await self._account(client)
-        endpoints = await media_endpoints(client, dc_id)  # IPv4 first
+        endpoints = await self.endpoints(client, dc_id)  # manual, then IPv4, then IPv6
         for endpoint in endpoints:
             egress = egress_of(endpoint)
             try:
@@ -226,7 +263,11 @@ class DirectRouteV2:
             except FloodWaitError as exc:
                 await self._flood(dc_id, exc)
             except (_ImportFailed, *KEY_ERRORS) as exc:
-                await self.rest(dc_id, f"a new key for DC {dc_id} was refused: {exc}")
+                where = _describe(endpoint)
+                if self.is_manual(endpoint):
+                    # The likeliest cause: the address is not DC {dc_id}'s.
+                    where += f" (from TG_DIRECT_ENDPOINTS: is it really DC {dc_id}'s?)"
+                await self.rest(dc_id, f"a new key for DC {dc_id} was refused at {where}: {exc}")
                 raise ParallelUnavailable(
                     f"could not authorise a direct key for DC {dc_id}"
                 ) from exc

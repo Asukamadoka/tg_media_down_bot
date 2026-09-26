@@ -1,25 +1,24 @@
 {
- "actions": 120,
+ "actions": 54,
  "by_rule": {
-  "tidy:big-folder:create_folder": 38,
-  "tidy:big-folder:move": 82
+  "tidy:big-folder:create_folder": 27,
+  "tidy:big-folder:move": 27
  },
  "first_plan": {
-  "actions": 3,
+  "actions": 2,
   "by_rule": {
    "tidy:big-folder:create_folder": 1,
-   "tidy:big-folder:move": 2
+   "tidy:big-folder:move": 1
   },
   "first": [
    "  mkdir   /大文件/Cosplay",
-   "  move    /Cosplay/Yuki 合集  →  /大文件/Cosplay/Yuki 合集",
    "  move    /Cosplay/黑丝  →  /大文件/Cosplay/黑丝",
-   "  · tidy: 0 empty folder(s) and 0 junk file(s) trashed, 0 nested chain(s) lifted; 2 big folder(s) moved whole, 0 loose big file(s) set apart; 0 group(s) of 0 file(s), 0 to misc, 0 to other, 0 image(s), 0 left in place (a group named like its folder); 0 shelved from the inbox; 0 suspected ad(s) in a plan of their own",
+   "  · tidy: 0 empty folder(s) and 0 junk file(s) trashed, 0 nested chain(s) lifted; 1 big folder(s) moved whole, 0 loose big file(s) set apart; 0 group(s) of 0 file(s), 0 to misc, 0 to other, 0 image(s), 0 left in place (a group named like its folder); 0 shelved from the inbox; 0 suspected ad(s) in a plan of their own",
    "  · top-level folder /Cosplay (325.4 GiB)"
   ],
-  "sha256": "bd16f0950a147f2a68cc8023a0b2e8cf0667ca81218902e659d4d5dd52e5ce9d",
+  "sha256": "b429da4c062dfcb3797f3014d1bfd3f343aa991c9986b99492c1bf3cf95d789f",
   "source": "organize-tree:/Cosplay"
  },
- "plans": 38,
- "sha256": "cf9e49e2e70cd13ea3064e76a0e1c58443c149f04c6c4fe7ddc1f552367ed146"
+ "plans": 27,
+ "sha256": "188f6b1b95dc311218107739bddc3297f92b61607d2698abe1b1ec48db65cf1c"
 }

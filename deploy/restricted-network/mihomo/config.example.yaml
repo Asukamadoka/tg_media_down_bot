@@ -96,6 +96,9 @@ rules:
   # AuthKeyDuplicatedError；直连失败时 bot 自动改走普通路线（经 TG 组）。
   # 不用 v2（TG_DIRECT_MEDIA=off）时这三条留着也无害：bot 不会去连这些地址。
   - IP-CIDR,149.154.166.111/32,DIRECT,no-resolve
+  # TG_DIRECT_ENDPOINTS 里另外两个 DC4 端点（M7.2 C），同样只走 DIRECT。
+  - IP-CIDR,149.154.166.110/32,DIRECT,no-resolve
+  - IP-CIDR,149.154.166.120/32,DIRECT,no-resolve
   - IP-CIDR6,2001:67c:4e8:f002::b/128,DIRECT,no-resolve
   - IP-CIDR6,2001:67c:4e8:f004::b/128,DIRECT,no-resolve
   # Telegram 的全部 IP 段，固定走 TG 组。

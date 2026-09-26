@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from telethon import TelegramClient, events
 
@@ -10,7 +11,8 @@ from . import bootstrap
 from .buttons import callback_buttons, webview_button
 from .config import MODES, Config
 from .db import Database
-from .downloader import has_downloadable_media
+from .downloader import describe_media, has_downloadable_media
+from .forwarder import forwardable
 from .i18n import describe, display_mode, display_state, t
 from .links import LinkBundle, extract_links
 from .pikpak import PikPakError, PikPakService
@@ -23,6 +25,24 @@ from .wms import WmsError, batch_message, plan_message, report_message
 log = logging.getLogger(__name__)
 
 # Every user-facing string now lives in :mod:`tgmd.i18n`.
+
+# Whether an admin runs a channel is asked of Telegram at most this often.
+CHANNEL_CHECK_TTL = 600.0
+
+
+def _channel_bundle(text: str) -> LinkBundle:
+    """The links a cache-channel post may ask for: Telegram links and magnets
+    only (M7.2 B3). A web address posted there is not a download request."""
+    found = extract_links(text)
+    return LinkBundle(messages=found.messages, magnets=found.magnets, errors=found.errors)
+
+
+def _posted_video(message) -> bool:
+    """A video file somebody posted in the channel themselves."""
+    if not has_downloadable_media(message):
+        return False
+    info = describe_media(message)
+    return info.is_video or (info.mime_type or "").startswith("video/")
 
 
 def _plan_id(raw: str) -> int:
@@ -57,6 +77,9 @@ class BotHandlers:
         self._wizard = None
         self._wms = None
         self._wms_panel = None
+        # chat id -> (when, whether a bot admin runs it); see CHANNEL_CHECK_TTL.
+        self._channel_checks: dict[int, tuple[float, bool]] = {}
+        self._me = None
 
     @property
     def _has_user_client(self) -> bool:
@@ -439,7 +462,9 @@ class BotHandlers:
             # for it. Accept it when an admin of this bot also runs the
             # channel: anyone else could otherwise add the bot to a channel of
             # their own and have every cached file copied into it.
-            if not await self._channel_run_by_admin(event.chat_id):
+            # Asked afresh, not from the cache: this is how someone checks
+            # that making the admin a channel admin has worked.
+            if not await self._ask_channel_run_by_admin(event.chat_id):
                 log.info("refused /cache in channel %s: no bot admin runs it", event.chat_id)
                 await event.reply(t("cache.channel_not_admin"))
                 return
@@ -490,7 +515,19 @@ class BotHandlers:
         return event.sender_id is None or event.sender_id == event.chat_id
 
     async def _channel_run_by_admin(self, chat_id: int) -> bool:
-        """Whether one of this bot's admins is the channel's creator or an admin."""
+        """Whether one of this bot's admins is the channel's creator or an admin.
+
+        Remembered for :data:`CHANNEL_CHECK_TTL`, so a busy channel does not
+        cost a request to Telegram per post.
+        """
+        checked = self._channel_checks.get(chat_id)
+        if checked is not None and time.monotonic() - checked[0] < CHANNEL_CHECK_TTL:
+            return checked[1]
+        answer = await self._ask_channel_run_by_admin(chat_id)
+        self._channel_checks[chat_id] = (time.monotonic(), answer)
+        return answer
+
+    async def _ask_channel_run_by_admin(self, chat_id: int) -> bool:
         for admin_id in self._config.access.admin_user_ids:
             try:
                 permissions = await self._bot.get_permissions(chat_id, admin_id)
@@ -905,6 +942,12 @@ class BotHandlers:
                 await self._wizard.cancel(event.sender_id)
             return  # handled by a command handler, or simply unknown
 
+        if await self._is_channel_post(event):
+            # Its sender is the channel, never a person: the allow list cannot
+            # vouch for it, and no setup conversation can be open in it.
+            await self._on_channel_post(event)
+            return
+
         # A setup conversation owns the next message the admin sends, so it
         # gets first refusal. handle() is only awaited when one is active.
         if (
@@ -938,32 +981,106 @@ class BotHandlers:
         else:
             await event.reply(t("dispatch.prompt"))
 
+    # ------------------------------------------------------ the cache channel
+
+    async def _on_channel_post(self, event) -> None:
+        """A post in a broadcast channel (docs/wms/M7.2 B).
+
+        Only the cache channel takes requests, and only while a bot admin
+        runs it. The channel also receives the reading account's forwards and
+        the bot's own uploads, so anything forwarded, sent via a bot or sent
+        by this bot is never a request, which keeps it from feeding on itself.
+        The first admin stands in as the requester (mode, PikPak, quota).
+        """
+        cache = self._config.delivery.cache_chat_id
+        if cache is None or event.chat_id != cache:
+            return
+        message = event.message
+        if await self._posted_by_machine(message):
+            return
+        bundle = _channel_bundle(event.raw_text or "")
+        video = not bundle.actionable and _posted_video(message)
+        if not bundle.actionable and not video:
+            return  # a note, a photo, a sticker: not a request
+        if not await self._channel_run_by_admin(event.chat_id):
+            log.info("refused a request in channel %s: no bot admin runs it", event.chat_id)
+            await event.reply(t("channel.not_admin"))
+            return
+
+        requester = self._config.access.admin_user_ids[0]
+        if bundle.actionable:
+            queued = await self._submit_bundle(event, bundle, user_id=requester)
+            what = t("channel.what_links", count=len(queued),
+                     ids=", ".join(f"#{job_id}" for job_id in queued)) if queued else ""
+        else:
+            job_id = await self._submit_inbound(event, user_id=requester, channel=True)
+            what = t("channel.what_media", job_id=job_id) if job_id else ""
+        if what and self._config.delivery.channel_reply_dm:
+            try:
+                await self._bot.send_message(
+                    requester, t("channel.dm", what=what), parse_mode="html"
+                )
+            except Exception:  # noqa: BLE001 - an admin who never opened the chat
+                log.info("could not tell admin %s about a channel request", requester)
+
+    async def _posted_by_machine(self, message) -> bool:
+        """Forwarded, sent via a bot, or this bot's own post."""
+        if getattr(message, "fwd_from", None) is not None:
+            return True
+        if getattr(message, "via_bot_id", None):
+            return True
+        if getattr(message, "out", False):
+            return True
+        author = getattr(message, "post_author", None)
+        if author:
+            if self._me is None:
+                self._me = await self._bot.get_me()
+            names = {getattr(self._me, "first_name", None), getattr(self._me, "username", None)}
+            if author in names - {None}:
+                return True
+        return False
+
     async def _report_errors(self, event, bundle: LinkBundle) -> None:
         lines = "\n".join(f"• {escape_html(item)}" for item in bundle.errors[:5])
         await event.reply(
             t("dispatch.errors_header") + "\n" + lines, parse_mode="html"
         )
 
-    async def _submit_inbound(self, event) -> None:
-        """Queue media that was sent straight to the bot."""
-        mode = await self._mode_for(event.sender_id)
-        note = ""
-        if mode in ("telegram", "auto"):
-            # Sending the file back to the person who just sent it is pointless.
-            mode = "local"
-            note = t("inbound.note_local")
+    async def _submit_inbound(
+        self, event, *, user_id: int | None = None, channel: bool = False
+    ) -> int | None:
+        """Queue media that was sent straight to the bot. Returns the job id.
 
-        job_id = await self._db.record_job(event.sender_id, "<attached media>", mode)
+        ``channel``: a file posted in the cache channel (M7.2 B3), handled
+        in auto mode: forwardable, it is copied to ``user_id`` as is;
+        restricted, it is downloaded and kept on the NAS.
+        """
+        user_id = event.sender_id if user_id is None else user_id
+        note = ""
+        forward_to = None
+        if channel:
+            mode = "auto"
+            if forwardable(event.message, await event.get_chat()):
+                forward_to = user_id
+        else:
+            mode = await self._mode_for(user_id)
+            if mode in ("telegram", "auto"):
+                # Sending the file back to the person who just sent it is pointless.
+                mode = "local"
+                note = t("inbound.note_local")
+
+        job_id = await self._db.record_job(user_id, "<attached media>", mode)
         job = Job(
             id=job_id,
-            user_id=event.sender_id,
+            user_id=user_id,
             chat_id=event.chat_id,
             mode=mode,
             kind=JobKind.INBOUND,
             label="attached media",
             message=event.message,
-            pikpak_folder=await self._pikpak_folder_for(event.sender_id),
+            pikpak_folder=await self._pikpak_folder_for(user_id),
             reply_to=event.message.id,
+            forward_to=forward_to,
         )
         try:
             await self._queue.submit(job)
@@ -972,14 +1089,21 @@ class BotHandlers:
             await event.reply(
                 t("error.generic", error=escape_html(describe(exc))), parse_mode="html"
             )
-            return
+            return None
         await event.reply(
             t("inbound.queued", job_id=job_id, note=note), parse_mode="html"
         )
+        return job_id
 
-    async def _submit_bundle(self, event, bundle: LinkBundle) -> None:
-        """Queue every actionable item found in one incoming message."""
-        user_id = event.sender_id
+    async def _submit_bundle(
+        self, event, bundle: LinkBundle, *, user_id: int | None = None
+    ) -> list[int]:
+        """Queue every actionable item found in one incoming message.
+
+        Returns the ids queued. ``user_id`` is who the jobs count against;
+        by default whoever sent the message.
+        """
+        user_id = event.sender_id if user_id is None else user_id
         mode = await self._mode_for(user_id)
         folder = await self._pikpak_folder_for(user_id)
         queued: list[int] = []
@@ -1064,3 +1188,4 @@ class BotHandlers:
 
         if pieces:
             await event.reply("\n".join(pieces), parse_mode="html", link_preview=False)
+        return queued

@@ -590,6 +590,26 @@ class TestInbound:
         row = await harness.run(job)
         assert row["status"] == "failed"
 
+    async def test_a_forwardable_channel_post_is_copied_not_downloaded(self, make):
+        # M7.2 B3: a video posted in the cache channel, in auto mode.
+        harness = await make()
+        job = await harness.job("auto", JobKind.INBOUND, message=media_message(9),
+                                forward_to=USER)
+        row = await harness.run(job)
+        assert row["status"] == "done"
+        assert harness.bot_downloader.downloaded == []
+        assert harness.bot.uploads_to(USER) == [job.message.media]
+
+    async def test_a_failed_copy_falls_back_to_the_download(self, make, tmp_path):
+        harness = await make(media_dir=tmp_path / "m")
+        harness.bot.upload_error = RuntimeError("no")
+        job = await harness.job("auto", JobKind.INBOUND, message=media_message(9, "v.mp4"),
+                                forward_to=USER)
+        row = await harness.run(job)
+        assert row["status"] == "done"
+        assert harness.bot_downloader.downloaded == [9]
+        assert (tmp_path / "m" / "direct" / "v.mp4").is_file()
+
 
 class FakeReader:
     """The reading account, as far as forwarding goes."""
