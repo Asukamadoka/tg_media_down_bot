@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable
+from urllib.parse import quote
 
 from pikpakapi import DownloadStatus
 from telethon import TelegramClient
@@ -16,8 +18,9 @@ from telethon.tl.types import DocumentAttributeAudio, DocumentAttributeVideo
 from .config import Config
 from .db import Database
 from .downloader import MediaInfo
+from .i18n import Explained, t
 from .pikpak import PikPakError, PikPakService
-from .utils import human_size
+from .utils import escape_html, human_size, unique_path
 from .webserver import FileServer
 
 log = logging.getLogger(__name__)
@@ -28,7 +31,7 @@ ProgressCallback = Callable[[int, int], Awaitable[None] | None]
 CAPTION_LIMIT = 1024
 
 
-class DeliveryError(RuntimeError):
+class DeliveryError(Explained, RuntimeError):
     """Delivery failed, with a message meant for the user."""
 
 
@@ -93,7 +96,7 @@ class Delivery:
                 caption=caption[:CAPTION_LIMIT],
                 parse_mode="html",
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - any failure means "download instead"
             log.info("cache entry %s unusable (%s), re-downloading", key, exc)
             await self._db.cache_forget(key)
             return False
@@ -161,8 +164,7 @@ class Delivery:
         limit = self._config.delivery.max_upload_bytes
         if size > limit:
             raise TooLargeToUpload(
-                f"{human_size(size)} is over the {human_size(limit)} a bot can "
-                "upload"
+                key="err.delivery.too_large", size=human_size(size), limit=human_size(limit)
             )
 
         try:
@@ -176,114 +178,186 @@ class Delivery:
                 progress_callback=self._wrap_progress(progress),
             )
         except FloodWaitError as exc:
-            raise DeliveryError(
-                f"Telegram asked us to wait {exc.seconds}s before uploading again"
-            ) from exc
+            raise DeliveryError(key="err.delivery.flood", seconds=exc.seconds) from exc
         except Exception as exc:
-            raise DeliveryError(f"upload failed: {exc}") from exc
+            raise DeliveryError(key="err.delivery.upload_failed", error=exc) from exc
 
         if cache_key:
             await self._store_in_cache(cache_key, path, info)
 
-        return DeliveryResult(mode="telegram", summary=f"sent {human_size(size)}")
+        return DeliveryResult(mode="telegram", summary=t("delivery.sent", size=human_size(size)))
 
     # ----------------------------------------------------------------- local
 
-    async def to_local(self, path: Path, info: MediaInfo) -> DeliveryResult:
-        """Leave the file on disk and report where it landed."""
+    async def to_local(
+        self, path: Path, info: MediaInfo, *, keep_at: Path | None = None
+    ) -> DeliveryResult:
+        """Keep the file on the NAS and say where it is.
+
+        ``keep_at`` moves it there first, for a file that was downloaded into
+        the working directory and only later turned out to be one to keep
+        (too large to upload, say). Kept files are never deleted afterwards,
+        whatever ``delete_after_delivery`` says: keeping them is the point.
+        """
+        if keep_at is not None and keep_at != path and path.exists():
+            keep_at = unique_path(keep_at)
+            keep_at.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(shutil.move, str(path), str(keep_at))
+            path = keep_at
         size = path.stat().st_size if path.exists() else (info.size or 0)
-        try:
-            shown = path.relative_to(Path.cwd())
-        except ValueError:
-            shown = path
         return DeliveryResult(
             mode="local",
-            summary=f"saved to <code>{shown}</code> ({human_size(size)})",
+            summary=t("delivery.saved_local", path=escape_html(self.local_address(path)),
+                      size=human_size(size)),
             kept_local=True,
             remote_path=str(path),
         )
 
+    def local_address(self, path: Path) -> str:
+        """How the user should find a kept file.
+
+        With LOCAL_URL_PREFIX (say ``smb://10.10.10.2/media/``) it is that plus
+        the path inside the media directory, ready to paste into a file
+        manager. Without it, the path as the container sees it.
+        """
+        download = self._config.download
+        prefix = download.local_url_prefix
+        try:
+            inside = path.resolve().relative_to(download.media_root.resolve())
+        except ValueError:
+            return str(path)
+        if not prefix:
+            return str(download.media_root / inside)
+        return prefix.rstrip("/") + "/" + quote(inside.as_posix())
+
     # ---------------------------------------------------------------- pikpak
 
     async def to_pikpak(
-        self, path: Path, info: MediaInfo, *, folder: str | None = None
+        self,
+        path: Path,
+        info: MediaInfo,
+        *,
+        folder: str | None = None,
+        user_id: int | None = None,
+        delete_when_done: bool = False,
     ) -> DeliveryResult:
-        """Hand the file to PikPak by publishing it on the bot's HTTP server."""
-        if not self._pikpak.configured:
-            raise DeliveryError(
-                "PikPak is not configured. Set PIKPAK_USERNAME and PIKPAK_PASSWORD."
-            )
-        if not self._files.usable:
-            raise DeliveryError(
-                "PikPak cannot fetch Telegram media without the HTTP file "
-                "server. Set HTTP_ENABLED=true and PUBLIC_BASE_URL, or use "
-                "/mode local. Magnet and URL transfers work without it."
-            )
+        """Hand a downloaded file to PikPak by publishing it on the HTTP server.
 
+        If PikPak is still fetching when the wait runs out, the file has to
+        stay published, so the caller cannot delete it. ``delete_when_done``
+        hands that job to the file server, which deletes it once its URL
+        expires.
+        """
+        await self._check_pikpak_reachable(user_id)
         url = self._files.publish(path, name=info.file_name)
+        result = await self._hand_to_pikpak(
+            url,
+            info,
+            folder=folder,
+            user_id=user_id,
+            release=lambda: self._files.unpublish_all(path),
+        )
+        if result.kept_local and delete_when_done:
+            self._files.delete_on_expiry(path)
+        return result
+
+    async def stream_to_pikpak(
+        self,
+        opener,
+        info: MediaInfo,
+        *,
+        size: int,
+        folder: str | None = None,
+        user_id: int | None = None,
+    ) -> DeliveryResult:
+        """Hand a Telegram file to PikPak without it ever touching the disk.
+
+        PikPak's requests are answered by reading the matching bytes from
+        Telegram as they arrive (PIKPAK_STREAM). Nothing is left behind to
+        clean up: a stream still in use simply expires with its URL.
+        """
+        await self._check_pikpak_reachable(user_id)
+        stream_id, url = self._files.publish_stream(opener, name=info.file_name, size=size)
+        result = await self._hand_to_pikpak(
+            url,
+            info,
+            folder=folder,
+            user_id=user_id,
+            release=lambda: self._files.unpublish_stream(stream_id),
+        )
+        result.kept_local = False  # there is no local copy
+        return result
+
+    async def _check_pikpak_reachable(self, user_id: int | None) -> None:
+        if user_id is not None and not await self._pikpak.available_for(user_id):
+            raise DeliveryError(key="err.delivery.no_pikpak")
+        if not self._files.usable:
+            raise DeliveryError(key="err.delivery.needs_http")
+
+    async def _hand_to_pikpak(
+        self, url: str, info: MediaInfo, *, folder, user_id, release
+    ) -> DeliveryResult:
+        """Ask PikPak to fetch ``url``; ``release`` stops serving it."""
         status: DownloadStatus | None = None
         try:
             task = await self._pikpak.offline_download(
-                url, folder=folder, name=info.file_name
+                url, folder=folder, name=info.file_name, user_id=user_id
             )
-            status = await self._pikpak.wait_for_task(task)
+            status = await self._pikpak.wait_for_task(task, user_id=user_id)
         except PikPakError as exc:
-            self._files.unpublish_all(path)
-            raise DeliveryError(str(exc)) from exc
+            release()
+            raise DeliveryError(key="err.passthrough", error=exc) from exc
         finally:
             # Stop serving as soon as PikPak is done with it. While a task is
             # still running the URL has to stay alive, so it is left to expire.
             if status_is_final(status):
-                self._files.unpublish_all(path)
+                release()
 
         target = folder or self._config.pikpak.folder
+        remote = f"{target}/{info.file_name}"
         if status is DownloadStatus.done:
             return DeliveryResult(
                 mode="pikpak",
-                summary=f"saved to PikPak <code>{target}/{info.file_name}</code>",
-                remote_path=f"{target}/{info.file_name}",
+                summary=t("delivery.saved_pikpak", path=escape_html(remote)),
+                remote_path=remote,
             )
         if status is DownloadStatus.error:
-            raise DeliveryError("PikPak reported an error fetching the file")
+            if task.message:
+                raise DeliveryError(
+                    key="err.delivery.pikpak_failed", reason=escape_html(task.message)
+                )
+            raise DeliveryError(key="err.delivery.pikpak_error")
+        if status is DownloadStatus.not_found:
+            # PikPak accepted the request but gave back no task to follow, so
+            # nothing is fetching. Saying "still fetching" here was a lie.
+            raise DeliveryError(key="err.delivery.pikpak_no_task")
         return DeliveryResult(
             mode="pikpak",
-            summary=(
-                f"PikPak is still fetching <code>{info.file_name}</code>; it will "
-                "appear in your drive shortly"
-            ),
+            summary=t("delivery.pikpak_fetching", name=escape_html(info.file_name)),
             kept_local=True,
-            remote_path=f"{target}/{info.file_name}",
+            remote_path=remote,
         )
 
     async def url_to_pikpak(
-        self, url: str, *, folder: str | None = None, wait: bool = False
+        self,
+        url: str,
+        *,
+        folder: str | None = None,
+        user_id: int | None = None,
     ) -> DeliveryResult:
-        """Transfer a magnet link or direct URL without touching local disk."""
+        """Queue a magnet link or direct URL in PikPak. Nothing touches local disk."""
         try:
-            task = await self._pikpak.offline_download(url, folder=folder)
+            task = await self._pikpak.offline_download(
+                url, folder=folder, user_id=user_id
+            )
         except PikPakError as exc:
-            raise DeliveryError(str(exc)) from exc
+            raise DeliveryError(key="err.passthrough", error=exc) from exc
 
         target = folder or self._config.pikpak.folder
-        if not wait:
-            return DeliveryResult(
-                mode="pikpak",
-                summary=f"queued in PikPak: <code>{task.name}</code> → {target}",
-                remote_path=f"{target}/{task.name}",
-            )
-
-        status = await self._pikpak.wait_for_task(task)
-        if status is DownloadStatus.done:
-            return DeliveryResult(
-                mode="pikpak",
-                summary=f"saved to PikPak <code>{target}/{task.name}</code>",
-                remote_path=f"{target}/{task.name}",
-            )
-        if status is DownloadStatus.error:
-            raise DeliveryError(f"PikPak could not fetch {task.name}")
         return DeliveryResult(
             mode="pikpak",
-            summary=f"PikPak is still working on <code>{task.name}</code>",
+            summary=t("delivery.pikpak_queued", name=escape_html(task.name),
+                      folder=escape_html(target)),
             remote_path=f"{target}/{task.name}",
         )
 

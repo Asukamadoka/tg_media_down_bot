@@ -1,0 +1,116 @@
+# mihomo 配置模板 —— 复制成 config.yaml 后填入你自己的节点。
+#
+# 刻意的取舍，改之前先读：
+#
+# 1. 规则里只用 IP-CIDR，**不引用 GEOIP / GEOSITE**。
+#    那两个数据库要在启动时从 GitHub 下载；而典型的受限网络里
+#    github.com 本身就不通，一引用就是启动即卡死。
+#
+# 2. external-controller 只绑 127.0.0.1。不要往局域网发布 ——
+#    mihomo 的控制面默认无鉴权，暴露出去等于把代理白送人。
+#
+# 3. TUN 的 dns-hijack 顺带解决 DNS 污染：受限网络里
+#    api.telegram.org 经常被解析到无关的 IP 段。
+#
+# 4. Telegram 的所有 IP 段固定走一个 fallback 组（TG），不用 url-test：
+#    url-test 会在节点还能用时自己切换，同一个会话就可能同时出现在两个出口上。
+#    fallback 只在当前节点失效时才切。
+#
+# 5. ipv6: true 只为 TG_DIRECT_MEDIA=v2 的两个 IPv6 媒体端点（docs/wms/M7.1 §B）。
+#    dns.ipv6 保持 false：其他域名只解析 IPv4，不会因为 IPv6 通了而改走别的路。
+#    容器网络也要开 IPv6，见 ../README.md「IPv6」。
+
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: true
+external-controller: 127.0.0.1:9090
+
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  default-nameserver: ["223.5.5.5", "119.29.29.29"]
+  nameserver: ["223.5.5.5", "119.29.29.29"]
+
+tun:
+  enable: true
+  stack: system
+  auto-route: true
+  auto-detect-interface: true
+  dns-hijack: ["any:53"]
+
+# —— 二选一 ——
+
+# A) 订阅（机场给的 Clash/mihomo 格式链接）
+proxy-providers:
+  main:
+    type: http
+    url: "REPLACE_WITH_YOUR_SUBSCRIPTION_URL"
+    interval: 86400
+    path: ./providers/main.yaml
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+
+# B) 直写单个节点（用这种就把上面的 proxy-providers 整段删掉，
+#    并把 proxy-groups 里的 `use: ["main"]` 换成 `proxies: ["node-1"]`）
+# proxies:
+#   - name: "node-1"
+#     type: vless
+#     server: your.server.example
+#     port: 443
+#     uuid: 00000000-0000-0000-0000-000000000000
+#     tls: true
+#     network: ws
+#     ws-opts:
+#       path: /path
+
+proxy-groups:
+  - name: PROXY
+    type: url-test
+    use: ["main"]
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 100
+  # Telegram 专用：按顺序用第一个可用的节点，失效才换下一个。
+  # 写成 proxies: [...] 按你想要的优先顺序列节点名，或者像这里用 use。
+  - name: TG
+    type: fallback
+    use: ["main"]
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+
+rules:
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  # TG_DIRECT_MEDIA=v2 的三个媒体专用端点（2026-09-26 从 NAS 宿主机实测可直连）。
+  # 这三条【必须在下面的 Telegram 段之前】，否则会被 149.154.160.0/20 → TG 先匹配。
+  # v2 在这些连接上用的是专门协商的 key，只在直连出口上用，不会触发
+  # AuthKeyDuplicatedError；直连失败时 bot 自动改走普通路线（经 TG 组）。
+  # 不用 v2（TG_DIRECT_MEDIA=off）时这三条留着也无害：bot 不会去连这些地址。
+  - IP-CIDR,149.154.166.111/32,DIRECT,no-resolve
+  # TG_DIRECT_ENDPOINTS 里另外两个 DC4 端点（M7.2 C），同样只走 DIRECT。
+  - IP-CIDR,149.154.166.110/32,DIRECT,no-resolve
+  - IP-CIDR,149.154.166.120/32,DIRECT,no-resolve
+  - IP-CIDR6,2001:67c:4e8:f002::b/128,DIRECT,no-resolve
+  - IP-CIDR6,2001:67c:4e8:f004::b/128,DIRECT,no-resolve
+  # Telegram 的全部 IP 段，固定走 TG 组。
+  - IP-CIDR,91.105.192.0/23,TG,no-resolve
+  - IP-CIDR,91.108.4.0/22,TG,no-resolve
+  - IP-CIDR,91.108.8.0/21,TG,no-resolve
+  - IP-CIDR,91.108.16.0/21,TG,no-resolve
+  - IP-CIDR,91.108.56.0/22,TG,no-resolve
+  - IP-CIDR,95.161.64.0/20,TG,no-resolve
+  - IP-CIDR,149.154.160.0/20,TG,no-resolve
+  - IP-CIDR,185.76.151.0/24,TG,no-resolve
+  - IP-CIDR6,2001:67c:4e8::/48,TG,no-resolve
+  - IP-CIDR6,2001:b28:f23c::/46,TG,no-resolve
+  - IP-CIDR6,2a0a:f280::/32,TG,no-resolve
+  - MATCH,PROXY

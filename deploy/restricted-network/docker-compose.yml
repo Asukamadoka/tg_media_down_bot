@@ -1,0 +1,102 @@
+# 受限网络环境下的部署：mihomo 旁车 + 共享网络栈
+#
+# 适用场景：部署机所在网络无法直连 Telegram 的 MTProto 端点
+# （表现为 ConnectionError: Connection to Telegram failed 5 time(s)）。
+#
+# 用法：
+#   1. cp mihomo/config.example.yaml mihomo/config.yaml
+#   2. 编辑 mihomo/config.yaml，填入你自己的节点或订阅地址
+#   3. chmod 600 mihomo/config.yaml     # 里面有你的凭据
+#   4. cp ../../.env.example .env && 填好 TG_API_ID / TG_API_HASH / TG_BOT_TOKEN
+#   5. mkdir -p data/sessions data/db data/downloads && chown -R 10001:10001 data
+#      （镜像里跑的是 uid 10001，root 建的目录它写不进去）
+#   6. docker compose up -d
+
+services:
+  proxy:
+    image: metacubex/mihomo:latest
+    container_name: tg-bot-proxy
+    restart: unless-stopped
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    # 必须是非 127.x 的地址，这样 DNS 查询才会走 TUN 被 mihomo 劫持。
+    # 指向 127.0.0.11（Docker 内建 DNS）会绕过 TUN，DNS 污染就治不了。
+    dns: ["1.1.1.1", "8.8.8.8"]
+    volumes:
+      - ./mihomo:/root/.config/mihomo
+    # bot 共享本服务的 netns，所以端口只能声明在这里
+    ports:
+      - "8080:8080"
+
+  bot:
+    image: ghcr.io/asukamadoka/tg_media_down_bot:latest
+    container_name: tg-media-down-bot
+    restart: unless-stopped
+    network_mode: "service:proxy"
+    depends_on: [proxy]
+    env_file: .env
+    environment:
+      # 没有公网 HTTPS 地址时，开着也只是一条启动警告（阶段 1 起不再 exit 2），
+      # 只是 Telegram→PikPak 转存和 Mini App 登录不可用。
+      # 有了公网地址后，设 PUBLIC_BASE_URL 并把这里翻回 "true"。
+      HTTP_ENABLED: "false"
+      DEFAULT_MODE: "telegram"
+      LOG_LEVEL: "INFO"
+      # en | zh — what people read. Command names, their arguments and the
+      # deployment log stay English either way.
+      TGMD_LANG: "en"
+      # 媒体目录（local 模式、auto 模式里受限的文件、超过上传上限的文件）。
+      # 宿主机路径由用户决定，下面是占位；取消注释并同时打开 volumes 里那行。
+      # MEDIA_DIR: "/media"
+      # LOCAL_URL_PREFIX: "smb://<NAS 地址>/<共享名>/"
+      # PikPak 仓储（WMS）：在 bot 里按 ./data/db/wms.yaml 的 schedule 跑定时任务。
+      # 先 `docker compose run --rm bot wms ...` 手动试过再打开。
+      # WMS_ENABLED: "true"
+      # 入库后自动上架：plan（发计划 + 确认按钮，默认）| apply（直接执行）| off
+      # WMS_AUTO_SHELVE: "plan"
+      # 让转存落在规则的 scope 里（示例规则的 scope 是 /Inbox）：
+      # PIKPAK_FOLDER: "/Inbox"
+      # 自然语言指令：内置解析器总是先跑；解析不了的交给模型（见 .env.example 的 NL_*）
+      # NL_BACKEND: "ollama"
+      # OLLAMA_URL: "http://<NAS 地址>:11434"
+      # 直连媒体线路 v2（独立 auth key，docs/wms/M7.1 §B）：off（默认）| v2
+      # 打开前先做 README.md「直连媒体线路 v2」里的检查。
+      # TG_DIRECT_MEDIA: "v2"
+      # 经代理拿到的配置里没有 NAS 能直连的端点，所以手动指定（M7.2 C）：
+      # TG_DIRECT_ENDPOINTS: "4=149.154.166.111:443,4=149.154.166.110:443,4=149.154.166.120:443"
+      # 缓存频道里发的链接和视频也会被处理；每次顺带私聊第一个 admin 一句（M7.2 B），false 关掉：
+      # CHANNEL_REPLY_DM: "true"
+    volumes:
+      - ./data:/data
+      # - <NAS 上的媒体共享目录>:/media
+
+# IPv6（只有 TG_DIRECT_MEDIA=v2 要连 IPv6 媒体端点时才需要，见 README.md「IPv6」）：
+# 取消下面这段的注释，然后 docker compose down && docker compose up -d
+# （网络要重建，restart 不会生效）。bot 共享 proxy 的网络栈，所以只有 proxy
+# 所在的这个 default 网络需要开。子网是随手取的 ULA，和局域网不冲突就行；
+# Docker 27 起默认 ip6tables=true，容器发出的 IPv6 会被 NAT 成宿主机的公网 IPv6。
+# networks:
+#   default:
+#     enable_ipv6: true
+#     ipam:
+#       config:
+#         - subnet: fd00:7467:6d64::/64
+
+# 注意：bot 挂在 proxy 的网络栈上，重启 proxy 会掐断 bot 的连接。
+#       改完 mihomo 配置后要两个一起重启：
+#         docker compose restart proxy && docker compose restart bot
+
+# 可选：本地 Ollama（NL_BACKEND=ollama 时用）。NAS 是纯 CPU 推理，给它设内存上限，
+# 免得挤掉 bot 和 mihomo。用法：取消注释后 docker compose up -d ollama，
+# 再 docker compose exec ollama ollama pull qwen2.5:3b
+#  ollama:
+#    image: ollama/ollama:latest
+#    restart: unless-stopped
+#    mem_limit: 4g
+#    cpus: 2
+#    ports: ["11434:11434"]
+#    volumes:
+#      - ./data/ollama:/root/.ollama

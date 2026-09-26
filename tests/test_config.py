@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tgmd.config import ConfigError, load_config
+from tgmd.config import ConfigError, detect_platform_base_url, load_config
 
 MINIMAL_YAML = """
 telegram:
@@ -128,18 +128,44 @@ class TestValidation:
         with pytest.raises(ConfigError, match="at least 1"):
             config.validate()
 
-    def test_http_without_a_public_url_is_fatal(self, tmp_path):
+    def test_http_without_a_public_url_is_a_warning_not_a_crash(self, tmp_path):
+        # It used to raise, and the container restarted forever. No public
+        # address yet is a normal state for a NAS, so only the one capability
+        # that needs it is switched off.
         config = load_config(
             write_config(tmp_path, MINIMAL_YAML + "\nhttp:\n  enabled: true\n")
         )
-        with pytest.raises(ConfigError, match="public_base_url"):
-            config.validate()
+        warnings = config.validate()
+        assert any("Telegram-to-PikPak transfers are off" in w for w in warnings)
+        assert not config.http.usable
 
-    def test_no_allowed_users_is_a_warning(self, tmp_path):
+    def test_the_http_problem_is_reported_once(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PIKPAK_USERNAME", "a@b.c")
+        monkeypatch.setenv("PIKPAK_PASSWORD", "secret")
+        config = load_config(
+            write_config(tmp_path, MINIMAL_YAML + "\nhttp:\n  enabled: true\n")
+        )
+        about_http = [w for w in config.validate() if "Telegram-to-PikPak" in w]
+        assert len(about_http) == 1
+
+    def test_runtime_state_is_not_reported_here(self, tmp_path):
+        # Whether there is an admin or a reading account is decided by /claim
+        # and /setup telegram, which store it in the database. validate() runs
+        # before that is read, so a warning from it would be wrong every time
+        # after either was done.
         body = MINIMAL_YAML.replace("admin_user_ids: [42]", "admin_user_ids: []")
         config = load_config(write_config(tmp_path, body))
-        warnings = config.validate()
-        assert any("refuse every request" in warning for warning in warnings)
+        assert not config.telegram.user_session
+        warnings = " ".join(config.validate())
+        assert "admin" not in warnings
+        assert "user session" not in warnings
+
+    def test_the_retired_login_link_ttl_still_parses(self, tmp_path, monkeypatch):
+        # The link it timed is gone; an old compose that sets it must still start.
+        monkeypatch.setenv("PIKPAK_LOGIN_LINK_TTL", "300")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        config.validate()
+        assert config.pikpak.login_link_ttl == 300
 
     def test_open_access_is_a_warning(self, tmp_path):
         config = load_config(
@@ -187,3 +213,185 @@ class TestDerivedValues:
         assert (tmp_path / "downloads").is_dir()
         assert (tmp_path / "data").is_dir()
         assert (tmp_path / "sessions").is_dir()
+
+
+class TestPlatformDetection:
+    """One-click deploys rely on reading the host's own environment."""
+
+    def test_nothing_detected_by_default(self):
+        assert detect_platform_base_url({}) is None
+
+    def test_render_exports_a_full_url(self):
+        assert (
+            detect_platform_base_url({"RENDER_EXTERNAL_URL": "https://a.onrender.com"})
+            == "https://a.onrender.com"
+        )
+
+    def test_a_trailing_slash_is_trimmed(self):
+        assert (
+            detect_platform_base_url({"RENDER_EXTERNAL_URL": "https://a.onrender.com/"})
+            == "https://a.onrender.com"
+        )
+
+    @pytest.mark.parametrize(
+        "name", ["KOYEB_PUBLIC_DOMAIN", "RAILWAY_PUBLIC_DOMAIN", "SPACE_HOST"]
+    )
+    def test_bare_domains_get_an_https_scheme(self, name):
+        assert detect_platform_base_url({name: "app.example.com"}) == (
+            "https://app.example.com"
+        )
+
+    def test_a_domain_that_already_has_a_scheme_is_not_doubled(self):
+        assert (
+            detect_platform_base_url({"KOYEB_PUBLIC_DOMAIN": "https://app.example.com"})
+            == "https://app.example.com"
+        )
+
+    def test_fly_builds_its_conventional_hostname(self):
+        assert detect_platform_base_url({"FLY_APP_NAME": "mybot"}) == (
+            "https://mybot.fly.dev"
+        )
+
+    def test_render_wins_over_the_others(self):
+        assert detect_platform_base_url(
+            {
+                "RENDER_EXTERNAL_URL": "https://render.example",
+                "KOYEB_PUBLIC_DOMAIN": "koyeb.example",
+                "FLY_APP_NAME": "fly",
+            }
+        ) == "https://render.example"
+
+    def test_blank_values_are_ignored(self):
+        assert detect_platform_base_url({"RENDER_EXTERNAL_URL": "  "}) is None
+
+
+class TestPlatformConfiguration:
+    def test_a_platform_url_becomes_the_public_base_url(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bot.onrender.com")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.http.base_url == "https://bot.onrender.com"
+
+    def test_a_platform_url_enables_the_http_server(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bot.onrender.com")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.http.enabled
+        assert config.http.usable
+
+    def test_an_explicit_public_url_wins(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bot.onrender.com")
+        monkeypatch.setenv("PUBLIC_BASE_URL", "https://media.example.com")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.http.base_url == "https://media.example.com"
+
+    def test_an_explicit_off_switch_wins(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bot.onrender.com")
+        monkeypatch.setenv("HTTP_ENABLED", "false")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert not config.http.enabled
+
+    def test_a_yaml_off_switch_wins(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://bot.onrender.com")
+        config = load_config(
+            write_config(tmp_path, MINIMAL_YAML + "\nhttp:\n  enabled: false\n")
+        )
+        assert not config.http.enabled
+
+    def test_the_platform_port_is_used(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PORT", "10000")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.http.port == 10000
+
+    def test_an_explicit_port_wins_over_the_platform(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PORT", "10000")
+        monkeypatch.setenv("HTTP_PORT", "9999")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.http.port == 9999
+
+    def test_no_platform_means_the_default_port(self, tmp_path):
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.http.port == 8080
+        assert not config.http.enabled
+
+
+class TestMediaDirectory:
+    def test_it_defaults_to_the_download_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path / "dl"))
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.download.media_root == tmp_path / "dl"
+
+    def test_it_can_point_at_a_nas_share(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MEDIA_DIR", "/media/nas")
+        monkeypatch.setenv("LOCAL_URL_PREFIX", "smb://10.10.10.2/media/")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.download.media_root == Path("/media/nas")
+        assert config.download.local_url_prefix == "smb://10.10.10.2/media/"
+
+    def test_the_default_layout_keeps_the_original_name(self, tmp_path):
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.download.media_template == "{chat}/{name}"
+
+    def test_an_unknown_field_in_the_media_template_is_fatal(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MEDIA_TEMPLATE", "{chat}/{nope}")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        with pytest.raises(ConfigError, match="media_template"):
+            config.validate()
+
+    def test_auto_is_a_valid_default_mode(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEFAULT_MODE", "auto")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        config.validate()
+        assert config.delivery.default_mode == "auto"
+
+
+class TestDownloadTuning:
+    def test_four_connections_by_default(self, tmp_path):
+        assert load_config(write_config(tmp_path, MINIMAL_YAML)).download.connections == 4
+
+    def test_more_than_eight_is_capped_with_a_warning(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DOWNLOAD_CONNECTIONS", "32")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert any("using 8" in w for w in config.validate())
+
+    def test_zero_connections_is_fatal(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DOWNLOAD_CONNECTIONS", "0")
+        with pytest.raises(ConfigError, match="connections"):
+            load_config(write_config(tmp_path, MINIMAL_YAML)).validate()
+
+    def test_direct_media_is_off_by_default(self, tmp_path):
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert config.telegram.direct_media == "off"
+
+    def test_direct_media_v2(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TG_DIRECT_MEDIA", "v2")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        config.validate()
+        assert config.telegram.direct_media == "v2"
+
+    def test_direct_endpoints(self, tmp_path, monkeypatch):
+        from tgmd.config import parse_direct_endpoints
+
+        monkeypatch.setenv(
+            "TG_DIRECT_ENDPOINTS",
+            "4=149.154.166.111:443, 4=149.154.166.110:443,2=[2001:67c:4e8:f002::b]:443",
+        )
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert not [w for w in config.validate() if "TG_DIRECT_ENDPOINTS" in w]
+        found, bad = parse_direct_endpoints(config.telegram.direct_endpoints)
+        assert found == {4: [("149.154.166.111", 443), ("149.154.166.110", 443)],
+                         2: [("2001:67c:4e8:f002::b", 443)]}
+        assert bad == []
+
+    def test_a_bad_direct_endpoint_is_a_warning_and_left_out(self, tmp_path, monkeypatch):
+        from tgmd.config import parse_direct_endpoints
+
+        monkeypatch.setenv("TG_DIRECT_ENDPOINTS", "4=149.154.166.111:443,x=1.2.3.4:443,4=1.2.3.4")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        warnings = [w for w in config.validate() if "TG_DIRECT_ENDPOINTS" in w]
+        assert len(warnings) == 2
+        assert parse_direct_endpoints(config.telegram.direct_endpoints)[0] == {
+            4: [("149.154.166.111", 443)]}
+
+    def test_direct_media_rejects_a_typo(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TG_DIRECT_MEDIA", "yes")
+        with pytest.raises(ConfigError, match="TG_DIRECT_MEDIA"):
+            load_config(write_config(tmp_path, MINIMAL_YAML)).validate()

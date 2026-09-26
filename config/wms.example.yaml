@@ -1,0 +1,115 @@
+# pikpak-wms 主配置。复制为 config/wms.yaml 后修改。
+# 注意：此文件不包含任何凭据，凭据在 .env 里。
+version: 1
+
+# ---- 运行时 ----
+runtime:
+  # 铁律 1：写操作默认只出计划不落盘。命令行 --apply 可覆盖。
+  dry_run: true
+  # 铁律 2：永久删除总开关。打开后仍需单条命令显式传 --forever。
+  allow_permanent_delete: false
+  # 单次任务最多执行多少个动作，超出分批
+  max_actions_per_run: 500
+
+# ---- 限流（避免风控）----
+ratelimit:
+  requests_per_second: 4
+  burst: 8
+  max_retries: 3
+  initial_backoff_seconds: 3.0
+
+# ---- 本地状态 ----
+# 默认放在 $DATA_DIR 下（容器里是 /data/db，与 bot 的数据库同一个卷，重建不丢）：
+#   索引与审计 $DATA_DIR/wms.sqlite3，token $DATA_DIR/wms-token.json。
+# 一般不要改；改成相对路径会落到容器的临时层，重建即丢。
+store: {}
+#  database: /data/db/wms.sqlite3
+#  token_file: /data/db/wms-token.json
+
+# 规则文件：默认 WMS_RULES，否则 config/rules.yaml
+# rules_file: /data/db/rules.yaml
+
+# ---- 仓位模板（layout 会确保这些目录存在）----
+layout:
+  inbox: /Inbox            # 新入库落点
+  temp: /Temp              # 临时区，会被清退规则扫到
+  archive: /Media          # 上架目标根
+  ensure:                  # 启动时自动创建
+    - /Inbox
+    - /Temp
+    - /Media
+
+# ---- 盘点 ----
+stocktake:
+  roots: ["/"]
+  incremental: true        # 只重扫 modified_time 变化的子树
+  page_size: 100
+
+# ---- 出库 ----
+outbound:
+  # none：只给直链 | aria2：交给 aria2 | local：bot 自己下载到 local_dir
+  downloader: none
+  aria2:
+    rpc_url: http://127.0.0.1:6800/jsonrpc
+    # secret 请放环境变量 ARIA2_SECRET
+    dir: /downloads          # aria2 那边的保存目录
+  # local 模式的目标目录；不填则用 bot 的 MEDIA_DIR（再不行用 DOWNLOAD_DIR）
+  # local_dir: /data/media
+
+# ---- 白名单（docs/wms/M7 §1）：任何操作都不碰 ----
+# 路径等于、或在这些目录之下的，一律豁免；移动一个包含受保护内容的目录也会被拦下。
+# shared: true 时，每次生成计划前实时读取 PikPak 的分享列表（过期的也算），
+# 分享过的文件或目录整棵子树受保护。bot 里也可以 /wms protect add|rm|ls。
+protect:
+  paths: ["/收藏", "/Cosplaytales Nako EP#1-24", "/小千"]
+  shared: true
+
+# ---- 去重（docs/wms/M7 §4）：受保护的副本一律保留 ----
+dedupe:
+  scope: /
+  keep_under: []            # 同组里优先保留这些目录下的那一份
+
+# ---- 定时任务（cron 表达式，按 timezone）----
+# 可用任务：stocktake / stocktake-full / inbound-poll / layout / organize / cleanup
+#           organize-tree / organize-inbox / dedupe / big-report（M7）
+# builtin: true（默认）时，下面没列出的 M7 任务按默认时间自动加上：
+#   organize-inbox 每小时、organize-tree 每天 04:30、dedupe 每周一 05:00（apply: true）、
+#   big-report 每周一 10:00。要关掉某个，就在 jobs 里列出它并写 enabled: false。
+# apply: false 只把计划存为「待确认」（wms plans 查看，wms apply <id> 执行）。
+# 任何定时任务都不会永久删除（铁律 2）。
+schedule:
+  timezone: Asia/Shanghai
+  builtin: true
+  jobs:
+    - name: stocktake
+      cron: "*/30 * * * *"
+      enabled: true
+    - name: stocktake-full        # 增量盘点的兜底（docs/wms/EXTRAS.md §5）
+      cron: "0 5 * * *"
+      enabled: true
+    - name: inbound-poll      # 轮询离线任务完成情况
+      cron: "*/5 * * * *"
+      enabled: true
+    - name: organize
+      cron: "15 * * * *"
+      enabled: true
+      apply: false            # 先只出计划，观察几天再改 true
+    - name: cleanup
+      cron: "30 4 * * *"
+      enabled: false          # 确认规则无误再开
+      apply: false
+
+# 日志跟随 bot 的 LOG_LEVEL，输出到标准输出（docker logs 可见）。
+
+# ---- 自然语言指令（docs/wms/M6-natural-language.md）----
+# 「按类型分类」「归档」「下载」分别指什么
+nl:
+  classify:
+    video: /Media/视频
+    image: /Media/图片
+    audio: /Media/音频
+    document: /Media/文档
+    archive: /Media/压缩包
+    subtitle: /Media/字幕
+  archive_root: /Archive     # 归档到 /Archive/<进网盘的年-月>
+  download_to: PikPak        # 下载到 NAS 媒体目录下的这个子目录

@@ -1,0 +1,381 @@
+# M6 自然语言指令评测集（docs/wms/M6-natural-language.md §7）。
+#
+# 每条三选一：
+#   expect:  期望的 Query（只写设置了的字段，同 Query.canonical()）
+#   clarify: true   这句话有歧义，正确做法是反问
+#   reject:  true   不是网盘指令，或做不到：反问或不接都算对，给出 Query 算错
+#
+# 判分：rules 后端返回「不接」（None）不算错，算「未覆盖」，交给模型后端；
+# 覆盖率 = 接了的 / 总数（要求 ≥ 70%），接了的必须全对（要求零错误）。
+# 约定：1GB = 1024³ 字节；「最近 N 个月」= N×30 天；日期是整天，按下面的时区。
+now: "2026-09-24T12:00:00+08:00"
+timezone: Asia/Shanghai
+
+cases:
+  # ---------------- 用户原话 ----------------
+  - text: 下载今天转存到网盘的所有大于1GB的视频
+    expect:
+      intent: download
+      filters: {created_after: "2026-09-24T00:00:00+08:00", min_size: 1073741824, kinds: [video]}
+
+  # ---------------- 定向下载 ----------------
+  - text: 把昨天入库的mkv下载到NAS
+    expect:
+      intent: download
+      filters: {created_after: "2026-09-23T00:00:00+08:00", created_before: "2026-09-24T00:00:00+08:00", extensions: [mkv]}
+  - text: 下载最近三天转存的图片
+    expect:
+      intent: download
+      filters: {created_after: "3d", kinds: [image]}
+  - text: 下载9月1日到9月10日入库的mp4
+    expect:
+      intent: download
+      filters: {created_after: "2026-09-01T00:00:00+08:00", created_before: "2026-09-11T00:00:00+08:00", extensions: [mp4]}
+  - text: 上个月入库的电子书下载到NAS
+    expect:
+      intent: download
+      filters: {created_after: "2026-08-01T00:00:00+08:00", created_before: "2026-09-01T00:00:00+08:00", kinds: [document]}
+  - text: 把/Media/电影里大于10GB的视频下载到本地
+    expect:
+      intent: download
+      scope: {path: /Media/电影}
+      filters: {min_size: 10737418240, kinds: [video]}
+  - text: 帮我下载本周转存的音乐
+    expect:
+      intent: download
+      filters: {created_after: "2026-09-21T00:00:00+08:00", kinds: [audio]}
+  - text: 下载名字包含「权力的游戏」的视频
+    expect:
+      intent: download
+      filters: {kinds: [video], name_contains: [权力的游戏]}
+  - text: 下载2026年9月20日之后转存的字幕
+    expect:
+      intent: download
+      filters: {created_after: "2026-09-20T00:00:00+08:00", kinds: [subtitle]}
+  - text: 把今天的压缩包都下载下来
+    expect:
+      intent: download
+      filters: {created_after: "2026-09-24T00:00:00+08:00", kinds: [archive]}
+
+  # ---------------- 移动 ----------------
+  - text: 把最近7天的mkv文件移到/Media/电影
+    expect:
+      intent: move
+      filters: {created_after: "7d", extensions: [mkv]}
+      action_args: {dest: /Media/电影}
+  - text: 把/Inbox里名字包含「速度与激情」的视频移到/Media/电影
+    expect:
+      intent: move
+      scope: {path: /Inbox}
+      filters: {kinds: [video], name_contains: [速度与激情]}
+      action_args: {dest: /Media/电影}
+  - text: 把本周转存的音乐移到/Media/音乐
+    expect:
+      intent: move
+      filters: {created_after: "2026-09-21T00:00:00+08:00", kinds: [audio]}
+      action_args: {dest: /Media/音乐}
+  - text: 把/Inbox里的字幕挪到/Media/字幕
+    expect:
+      intent: move
+      scope: {path: /Inbox}
+      filters: {kinds: [subtitle]}
+      action_args: {dest: /Media/字幕}
+  - text: 把小于500MB的视频移动到/Temp
+    expect:
+      intent: move
+      filters: {max_size: 524288000, kinds: [video]}
+      action_args: {dest: /Temp}
+  - text: 把以sample开头的视频移到/Temp
+    expect:
+      intent: move
+      filters: {kinds: [video], name_regex: "^sample"}
+      action_args: {dest: /Temp}
+
+  # ---------------- 分类 ----------------
+  - text: 把/Inbox里的文件按类型分类
+    expect:
+      intent: classify
+      scope: {path: /Inbox}
+  - text: 按类型整理今天转存的文件
+    expect:
+      intent: classify
+      filters: {created_after: "2026-09-24T00:00:00+08:00"}
+  - text: 把最近一周的图片和视频分类
+    expect:
+      intent: classify
+      filters: {created_after: "1w", kinds: [video, image]}
+
+  # ---------------- 归档 ----------------
+  - text: 把三个月前的视频归档
+    expect:
+      intent: archive
+      filters: {created_before: "90d", kinds: [video]}
+  - text: 把/Media里超过半年的文件归档
+    expect:        # 「半年」rules 不解析，交给模型
+      intent: archive
+      scope: {path: /Media}
+      filters: {created_before: "180d"}
+  - text: 归档/Media/视频下30天以前的文件
+    expect:
+      intent: archive
+      scope: {path: /Media/视频}
+      filters: {created_before: "30d"}
+  - text: 把去年入库的照片归档
+    expect:
+      intent: archive
+      filters: {created_after: "2025-01-01T00:00:00+08:00", created_before: "2026-01-01T00:00:00+08:00", kinds: [image]}
+  - text: 把2026年1月1日之前的文件归档
+    expect:
+      intent: archive
+      filters: {created_before: "2026-01-01T00:00:00+08:00"}
+
+  # ---------------- 清理（只进回收站） ----------------
+  - text: 删除/Temp里超过30天的文件
+    expect:
+      intent: trash
+      scope: {path: /Temp}
+      filters: {created_before: "30d"}
+  - text: 帮我把/Inbox下的压缩包删掉
+    expect:
+      intent: trash
+      scope: {path: /Inbox}
+      filters: {kinds: [archive]}
+  - text: 把小于1MB的图片放进回收站
+    expect:
+      intent: trash
+      filters: {max_size: 1048576, kinds: [image]}
+  - text: 把以.nfo结尾的文件删掉
+    expect:
+      intent: trash
+      filters: {name_regex: "\\.nfo$"}
+  - text: 清理/Inbox里名字包含广告的文件
+    expect:
+      intent: trash
+      scope: {path: /Inbox}
+      filters: {name_contains: [广告]}
+  - text: 把两周前转存的txt删了
+    expect:
+      intent: trash
+      filters: {created_before: "2w", extensions: [txt]}
+
+  # ---------------- 列出 ----------------
+  - text: 列出昨天下载的图片
+    expect:
+      intent: list
+      filters: {created_after: "2026-09-23T00:00:00+08:00", created_before: "2026-09-24T00:00:00+08:00", kinds: [image]}
+  - text: 找出大于5GB的文件
+    expect:
+      intent: list
+      filters: {min_size: 5368709120}
+  - text: 今天离线下载的视频有哪些
+    expect:
+      intent: list
+      filters: {created_after: "2026-09-24T00:00:00+08:00", kinds: [video]}
+  - text: 在1GB到4GB之间的视频有哪些
+    expect:
+      intent: list
+      filters: {min_size: 1073741824, max_size: 4294967296, kinds: [video]}
+  - text: 2026年9月1日之后转存的字幕文件有哪些
+    expect:
+      intent: list
+      filters: {created_after: "2026-09-01T00:00:00+08:00", kinds: [subtitle]}
+  - text: 看看/Inbox里有哪些mp4
+    expect:
+      intent: list
+      scope: {path: /Inbox}
+      filters: {extensions: [mp4]}
+  - text: 统计一下本月入库的视频
+    expect:
+      intent: list
+      filters: {created_after: "2026-09-01T00:00:00+08:00", kinds: [video]}
+
+  # ---------------- 重命名 ----------------
+  - text: 把/Inbox里的视频重命名为「{stem|title}.{ext}」
+    expect:
+      intent: rename
+      scope: {path: /Inbox}
+      filters: {kinds: [video]}
+      action_args: {template: "{stem|title}.{ext}"}
+
+  # ---------------- 定时 ----------------
+  - text: 每天凌晨把新文件按类型归档
+    expect:
+      intent: classify
+      filters: {created_after: "1d"}
+      schedule: {cron: "0 3 * * *"}
+  - text: 每周一早上8点把/Inbox里的视频移到/Media/视频
+    expect:
+      intent: move
+      scope: {path: /Inbox}
+      filters: {kinds: [video]}
+      action_args: {dest: /Media/视频}
+      schedule: {cron: "0 8 * * 1"}
+  - text: 每小时把/Inbox里的字幕移到/Media/字幕
+    expect:
+      intent: move
+      scope: {path: /Inbox}
+      filters: {kinds: [subtitle]}
+      action_args: {dest: /Media/字幕}
+      schedule: {cron: "0 * * * *"}
+  - text: 每天晚上11点删除/Temp里超过7天的文件
+    expect:
+      intent: trash
+      scope: {path: /Temp}
+      filters: {created_before: "7d"}
+      schedule: {cron: "0 23 * * *"}
+  - text: 每月1号把60天前的视频归档
+    expect:
+      intent: archive
+      filters: {created_before: "60d", kinds: [video]}
+      schedule: {cron: "0 3 1 * *"}
+
+  # ---------------- 有歧义：应当反问 ----------------
+  - text: 移动视频
+    clarify: true     # 移到哪？
+  - text: 把旧文件归档
+    clarify: true     # 多旧算旧？
+  - text: 把网盘里的大文件都删了
+    clarify: true     # 多大算大？
+  - text: 下载所有文件
+    clarify: true     # 整个网盘？
+  - text: 下载新文件
+    clarify: true     # 「新」是多久以内？
+  - text: 整理一下网盘
+    clarify: true     # 按类型分类，还是按现有规则？
+  - text: 彻底删除/Temp
+    clarify: true     # 永久删除不能一句话完成
+  - text: 删除所有文件
+    clarify: true
+  - text: 重命名视频
+    clarify: true     # 按什么格式？
+  - text: 把视频归档
+    clarify: true     # 归档多久以前的？
+  - text: 把所有文件移到/Temp
+    clarify: true     # 范围太大
+  - text: 每天把文件列出来
+    clarify: true     # 定时只能执行动作，不能「列出」
+  - text: 清空回收站
+    clarify: true
+
+  # ---------------- 不是指令 / rules 不接 ----------------
+  - text: 今天天气怎么样
+    reject: true
+  - text: 把这张图片发给我
+    reject: true
+  - text: 你好
+    reject: true
+  - text: 网盘还剩多少空间
+    reject: true
+  - text: 把速度与激情8下载下来
+    expect:           # 名字没有「包含」等标记，rules 不猜，交给模型
+      intent: download
+      filters: {name_contains: [速度与激情8]}
+  - text: 把我上次看的那部电影移到收藏
+    reject: true
+  - text: 找一下周杰伦的歌
+    expect:
+      intent: list
+      filters: {kinds: [audio], name_contains: [周杰伦]}
+  - text: 把高清的视频下载下来
+    clarify: true     # 「高清」没有对应的字段
+  - text: 帮我把重复的文件去掉
+    expect:           # M7 起去重是一个意图（M6 时这里是 reject）
+      intent: dedupe
+
+  # ---------------- 容易解析错的句子（回归用） ----------------
+  - text: 不要删除/Inbox里的视频
+    reject: true      # 否定句：绝不能变成删除
+  - text: 把视频移到/Media并删除图片
+    reject: true      # 两个动作；路径不能吞掉后半句
+  - text: 删除今天和昨天的视频
+    expect:           # rules 不接（两个时间）；模型可合并为「昨天零点以来」
+      intent: trash
+      filters: {created_after: "2026-09-23T00:00:00+08:00", kinds: [video]}
+  - text: 把视频从/Inbox移到/Media
+    expect:
+      intent: move
+      scope: {path: /Inbox}
+      filters: {kinds: [video]}
+      action_args: {dest: /Media}
+  - text: 把2个G以上的视频下载下来
+    expect:
+      intent: download
+      filters: {min_size: 2147483648, kinds: [video]}
+
+  # ---------------- M7：整理、上架、去重、大文件（docs/wms/M7 §6） ----------------
+  - text: 整理一下 Pack From Shared
+    expect:
+      intent: organize_inbox
+      scope: {path: /Pack From Shared}
+  - text: 整理一下Telegram
+    expect:
+      intent: organize_inbox
+      scope: {path: /Telegram}
+  - text: Pack From Shared整理一下
+    expect:
+      intent: organize_inbox
+      scope: {path: /Pack From Shared}
+  - text: 整理入口目录
+    expect:
+      intent: organize_inbox
+  - text: 把入口目录上架
+    expect:
+      intent: organize_inbox
+  - text: 把大文件单独放一起
+    expect:
+      intent: organize_tree
+      action_args: {part: big}
+  - text: 大文件和大目录集中起来
+    expect:
+      intent: organize_tree
+      action_args: {part: big}
+  - text: 整理整个网盘
+    expect:
+      intent: organize_tree
+  - text: 帮我整理一下所有一级目录
+    expect:
+      intent: organize_tree
+  - text: 把散落的文件归集一下
+    expect:
+      intent: organize_tree
+  - text: 整理一下 /Cosplay
+    expect:
+      intent: organize_tree
+      scope: {path: /Cosplay}
+  - text: 去重
+    expect:
+      intent: dedupe
+  - text: 删除重复文件
+    expect:
+      intent: dedupe
+  - text: 查重
+    expect:
+      intent: dedupe
+  - text: 把/Media去重
+    expect:
+      intent: dedupe
+      scope: {path: /Media}
+  - text: 看看最大的文件
+    expect:
+      intent: big_report
+  - text: 列出最大的文件和目录
+    expect:
+      intent: big_report
+  - text: 看看/Media里最大的文件
+    expect:
+      intent: big_report
+      scope: {path: /Media}
+  - text: 哪些文件最占空间
+    expect:
+      intent: big_report
+  - text: 每周去重
+    clarify: true     # 去重已经每周自动跑；定时和筛选条件都不接
+  - text: 去重今天的视频
+    clarify: true
+  - text: 整理一下 /Cosplay/合集
+    clarify: true     # 整理以一级目录为单位
+  - text: 把重复的视频删掉
+    reject: true      # 只删视频的重复？rules 不接，交给模型或反问
+  - text: 删除大文件
+    clarify: true     # 多大算大？不是「大文件单独放」
+

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from telethon import TelegramClient
@@ -16,12 +17,15 @@ from .db import Database, cache_key
 from .delivery import Delivery, DeliveryError, TooLargeToUpload
 from .downloader import (
     DownloadCancelled,
-    DownloadError,
     Downloader,
+    DownloadError,
     RateTracker,
+    can_stream,
     describe_media,
     has_downloadable_media,
 )
+from .forwarder import Forwarder, Outcome, forwardable
+from .i18n import Explained, describe, t
 from .links import MessageRef
 from .pikpak import PikPakError, PikPakService
 from .reporter import Reporter
@@ -40,7 +44,7 @@ from .utils import (
 log = logging.getLogger(__name__)
 
 
-class JobKind(str, Enum):
+class JobKind(StrEnum):
     MESSAGE = "message"
     """A Telegram message link: download, then deliver."""
 
@@ -54,7 +58,7 @@ class JobKind(str, Enum):
     """Media sent or forwarded directly to the bot, downloaded by the bot."""
 
 
-class JobState(str, Enum):
+class JobState(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     DONE = "done"
@@ -81,13 +85,25 @@ class Job:
     state: JobState = JobState.QUEUED
     detail: str = ""
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
+    cache_hint: bool = False
+    """Something could have been forwarded, had a cache channel been set."""
+    forward_to: int | None = None
+    """Inbound media that can be forwarded goes here as is, nothing downloaded
+    (a video posted in the cache channel, M7.2 B). None: it is downloaded."""
 
     @property
     def active(self) -> bool:
         return self.state in (JobState.QUEUED, JobState.RUNNING)
 
 
-class QueueFull(RuntimeError):
+def saved_to_pikpak(job: Job) -> bool:
+    """True when the job finished with at least one file put into PikPak."""
+    if job.state not in (JobState.DONE, JobState.PARTIAL):
+        return False
+    return job.kind in (JobKind.URL, JobKind.SHARE) or job.mode == "pikpak"
+
+
+class QueueFull(Explained, RuntimeError):
     """The user already has as many jobs pending as they are allowed."""
 
 
@@ -104,6 +120,8 @@ class JobQueue:
         bot_downloader: Downloader,
         delivery: Delivery,
         pikpak: PikPakService,
+        forwarder: Forwarder | None = None,
+        after_pikpak: Callable[[Job], Awaitable[None]] | None = None,
     ) -> None:
         self._config = config
         self._db = db
@@ -113,6 +131,9 @@ class JobQueue:
         self._bot_downloader = bot_downloader
         self._delivery = delivery
         self._pikpak = pikpak
+        self._forwarder = forwarder
+        # Told about every job that put files into PikPak (WMS shelving).
+        self._after_pikpak = after_pikpak
         self._queue: asyncio.Queue[Job] = asyncio.Queue()
         self._jobs: dict[int, Job] = {}
         self._workers: list[asyncio.Task] = []
@@ -126,14 +147,23 @@ class JobQueue:
             )
         log.info("started %d download worker(s)", len(self._workers))
 
+    def rebind_reader(self, resolver: Resolver, downloader: Downloader) -> None:
+        """Swap in a new reading client, after an in-chat login adds one.
+
+        Jobs already running keep the client they started with, which is what
+        you want: replacing it mid-download would abort the transfer. Anything
+        queued from here on uses the new one.
+        """
+        self._resolver = resolver
+        self._downloader = downloader
+        log.info("job queue rebound to a new reading client")
+
     async def stop(self) -> None:
         for worker in self._workers:
             worker.cancel()
-        for worker in self._workers:
-            try:
-                await worker
-            except asyncio.CancelledError:
-                pass
+        # gather collects the workers' own cancellations as results, while a
+        # cancellation aimed at whoever called stop() still propagates.
+        await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
 
     # ------------------------------------------------------------ submission
@@ -145,9 +175,7 @@ class JobQueue:
         """Queue a job, returning its position in line."""
         limit = self._config.download.max_queue_per_user
         if len(self.pending_for(job.user_id)) >= limit:
-            raise QueueFull(
-                f"you already have {limit} items queued; wait for them or use /cancel"
-            )
+            raise QueueFull(key="job.queue_full", limit=limit)
         self._jobs[job.id] = job
         await self._queue.put(job)
         return self._queue.qsize()
@@ -206,38 +234,53 @@ class JobQueue:
             interval=self._config.download.progress_interval,
             reply_to=job.reply_to,
         )
-        if job.kind is JobKind.MESSAGE:
-            await self._run_message_job(job, reporter)
-        elif job.kind is JobKind.INBOUND:
-            await self._run_inbound_job(job, reporter)
-        elif job.kind is JobKind.URL:
-            await self._run_url_job(job, reporter)
-        else:
-            await self._run_share_job(job, reporter)
+        runner = {
+            JobKind.MESSAGE: self._run_message_job,
+            JobKind.INBOUND: self._run_inbound_job,
+            JobKind.URL: self._run_url_job,
+            JobKind.SHARE: self._run_share_job,
+        }[job.kind]
+        try:
+            await runner(job, reporter)
+        except Exception as exc:
+            # Each runner reports the failures it expects. Anything else would
+            # leave the status message frozen mid-way, so close it here and
+            # let the worker record the failure.
+            await reporter.close(t("error.generic", error=escape_html(describe(exc))))
+            raise
+        if self._after_pikpak is not None and saved_to_pikpak(job):
+            try:
+                await self._after_pikpak(job)
+            except Exception:
+                # Shelving is a courtesy; the transfer itself already succeeded.
+                log.exception("after-PikPak hook failed for job %d", job.id)
 
     # -------------------------------------------------------- PikPak-only jobs
 
     async def _run_url_job(self, job: Job, reporter: Reporter) -> None:
         """Hand a magnet link or direct URL straight to PikPak."""
-        await reporter.open(f"⏳ Sending to PikPak: <code>{escape_html(job.label)}</code>")
-        if not self._pikpak.configured:
+        await reporter.open(
+            t("job.pikpak.sending", label=escape_html(job.label))
+        )
+        if not await self._pikpak.available_for(job.user_id):
             job.state = JobState.FAILED
-            job.detail = "PikPak is not configured"
+            job.detail = "no PikPak account connected"
             await reporter.close(
-                "❌ PikPak is not configured, and a magnet link or URL has "
-                "nowhere else to go. Set PIKPAK_USERNAME and PIKPAK_PASSWORD."
+                t("job.pikpak.no_account")
             )
             await self._db.finish_job(job.id, "failed", error=job.detail)
             return
 
         try:
             result = await self._delivery.url_to_pikpak(
-                job.url or "", folder=job.pikpak_folder
+                job.url or "", folder=job.pikpak_folder, user_id=job.user_id
             )
         except (DeliveryError, PikPakError) as exc:
             job.state = JobState.FAILED
             job.detail = str(exc)
-            await reporter.close(f"❌ {escape_html(str(exc))}")
+            await reporter.close(
+                t("error.generic", error=escape_html(describe(exc)))
+            )
             await self._db.finish_job(job.id, "failed", error=str(exc))
             return
 
@@ -247,21 +290,27 @@ class JobQueue:
 
     async def _run_share_job(self, job: Job, reporter: Reporter) -> None:
         """Save a PikPak share link into the account."""
-        await reporter.open("⏳ Saving the PikPak share…")
+        await reporter.open(t("job.share.saving"))
         try:
-            names = await self._pikpak.restore_share(job.url or "")
+            names = await self._pikpak.restore_share(
+                job.url or "", user_id=job.user_id
+            )
         except PikPakError as exc:
             job.state = JobState.FAILED
             job.detail = str(exc)
-            await reporter.close(f"❌ {escape_html(str(exc))}")
+            await reporter.close(
+                t("error.generic", error=escape_html(describe(exc)))
+            )
             await self._db.finish_job(job.id, "failed", error=str(exc))
             return
 
         listing = "\n".join(f"• <code>{escape_html(name)}</code>" for name in names[:20])
         if len(names) > 20:
-            listing += f"\n… and {len(names) - 20} more"
+            listing += t("job.share.more", count=len(names) - 20)
         job.state = JobState.DONE
-        await reporter.close(f"✅ Saved {len(names)} item(s) to PikPak:\n{listing}")
+        await reporter.close(
+            t("job.share.saved", count=len(names), listing=listing)
+        )
         await self._db.finish_job(job.id, "done", file_name=", ".join(names[:5]))
 
     # ----------------------------------------------------- directly sent media
@@ -276,14 +325,33 @@ class JobQueue:
         message = job.message
         if message is None or not has_downloadable_media(message):
             job.state = JobState.FAILED
-            await reporter.open("❌ That message has no media to download.")
+            await reporter.open(t("job.message.no_media"))
             await self._db.finish_job(job.id, "failed", error="no media")
             return
 
         info = describe_media(message)
+        if job.forward_to is not None:
+            # Forwardable, so Telegram copies it server-side: the "instant"
+            # half of auto mode. Only what cannot be forwarded is downloaded.
+            try:
+                await self._bot.send_file(job.forward_to, message.media)
+            except Exception as exc:  # noqa: BLE001 - a failed copy falls back to a download
+                log.info("job %d: forwarding the posted media failed: %s", job.id, exc)
+            else:
+                job.state = JobState.DONE
+                await reporter.open(
+                    t("job.forwarded", prefix="", name=escape_html(info.file_name))
+                )
+                await self._db.finish_job(
+                    job.id, "done", file_name=info.file_name, file_size=info.size
+                )
+                return
         await reporter.open(
-            f"⬇️ <code>{escape_html(truncate(info.file_name, 48))}</code> "
-            f"({human_size(info.size)})"
+            t(
+                "job.inbound.downloading",
+                name=escape_html(truncate(info.file_name, 48)),
+                size=human_size(info.size),
+            )
         )
 
         try:
@@ -295,16 +363,19 @@ class JobQueue:
                 peer_id=job.chat_id,
                 prefix="",
                 downloader=self._bot_downloader,
+                source=None,
             )
         except DownloadCancelled:
             job.state = JobState.CANCELLED
-            await reporter.close("🚫 Cancelled.")
+            await reporter.close(t("job.cancelled"))
             await self._db.finish_job(job.id, "cancelled")
             return
         except (DownloadError, DeliveryError) as exc:
             job.state = JobState.FAILED
             job.detail = str(exc)
-            await reporter.close(f"❌ {escape_html(str(exc))}")
+            await reporter.close(
+                t("error.generic", error=escape_html(describe(exc)))
+            )
             await self._db.finish_job(job.id, "failed", error=str(exc))
             return
 
@@ -318,14 +389,16 @@ class JobQueue:
     async def _run_message_job(self, job: Job, reporter: Reporter) -> None:
         ref = job.ref
         assert ref is not None  # guaranteed by JobKind.MESSAGE
-        await reporter.open(f"🔍 Looking up <code>{escape_html(ref.describe())}</code>…")
+        await reporter.open(t("job.lookup", ref=escape_html(ref.describe())))
 
         try:
             entity, messages = await self._resolver.resolve(ref)
         except ResolveError as exc:
             job.state = JobState.FAILED
             job.detail = str(exc)
-            await reporter.close(f"❌ {escape_html(str(exc))}")
+            await reporter.close(
+                t("error.generic", error=escape_html(describe(exc)))
+            )
             await self._db.finish_job(job.id, "failed", error=str(exc))
             return
 
@@ -339,7 +412,7 @@ class JobQueue:
 
         succeeded = 0
         skipped = 0
-        failures: list[str] = []
+        failures: list[tuple[int, BaseException]] = []
 
         for index, message in enumerate(messages, start=1):
             if job.cancel.is_set():
@@ -361,15 +434,16 @@ class JobQueue:
                     peer_id=peer_id,
                     prefix=prefix,
                     downloader=self._downloader,
+                    source=entity,
                 )
                 succeeded += 1
             except DownloadCancelled:
                 break
             except (DownloadError, DeliveryError, ResolveError) as exc:
-                failures.append(f"{message.id}: {exc}")
+                failures.append((message.id, exc))
                 log.info("job %d message %s failed: %s", job.id, message.id, exc)
             except Exception as exc:  # unexpected, but one message must not kill the job
-                failures.append(f"{message.id}: {exc}")
+                failures.append((message.id, exc))
                 log.exception("job %d message %s crashed", job.id, message.id)
 
         await self._finalize(
@@ -386,32 +460,107 @@ class JobQueue:
         peer_id: int,
         prefix: str,
         downloader: Downloader,
+        source,
     ) -> None:
-        """Download and deliver a single message's media."""
+        """Deliver a single message's media, downloading only if nothing cheaper works.
+
+        ``source`` is the chat the message was read from, or None for media
+        sent straight to the bot, which is never forwarded back.
+        """
         info = describe_media(message)
         key = cache_key(peer_id, message.id)
         caption = _build_caption(message, chat_title)
+        # auto starts out as telegram and becomes local for what cannot be
+        # forwarded; every other mode is what it says.
+        to_telegram = job.mode in ("telegram", "auto")
+        mode = job.mode
 
-        # The cheapest path: a file we have already uploaded once.
-        if job.mode == "telegram":
-            if await self._delivery.send_from_cache(job.chat_id, key, caption):
+        # The cheapest path: a file we have already uploaded once. Only when
+        # it is going back through Telegram; `and` short-circuits the await.
+        if to_telegram and await self._delivery.send_from_cache(
+            job.chat_id, key, caption
+        ):
+            await reporter.update(
+                t(
+                    "job.cached",
+                    prefix=prefix,
+                    name=escape_html(info.file_name),
+                ),
+                force=True,
+            )
+            return
+
+        # Next cheapest: let Telegram copy it server-side. Only a restricted
+        # source, or no way to forward, falls through to the download.
+        hint = ""
+        restricted = source is not None and not forwardable(message, source)
+        if to_telegram and self._forwarder is not None and source is not None:
+            attempt = await self._forwarder.deliver(
+                chat_id=job.chat_id,
+                message=message,
+                source=source,
+                caption=caption,
+                key=key,
+                info=info,
+            )
+            if attempt.delivered:
+                log.info("job %d message %s forwarded, nothing downloaded", job.id, message.id)
                 await reporter.update(
-                    f"♻️ {prefix}<code>{escape_html(info.file_name)}</code> "
-                    "served from cache",
+                    t("job.forwarded", prefix=prefix, name=escape_html(info.file_name)),
                     force=True,
                 )
                 return
+            restricted = attempt.outcome is Outcome.RESTRICTED
+            if attempt.outcome is Outcome.NO_CACHE and not job.cache_hint:
+                job.cache_hint = True
+                hint = t("job.hint_cache")
+        if job.mode == "auto":
+            # Restricted content can only be had by downloading it, and then
+            # it is watched on the NAS rather than pushed anywhere else.
+            mode = "local" if restricted or source is None else "telegram"
 
-        relative = build_relative_path(
-            self._config.download.filename_template,
-            chat=chat_title,
-            chat_id=peer_id,
-            message_id=message.id,
-            name=info.file_name,
-            topic_id=job.ref.topic_id if job.ref else None,
-            when=getattr(message, "date", None),
+        if mode == "pikpak" and self._config.pikpak.stream and can_stream(message):
+            # PIKPAK_STREAM: PikPak reads the bytes from Telegram through the
+            # file server as it asks for them. No download, nothing on disk.
+            await reporter.update(
+                t("job.handing_to_pikpak", prefix=prefix, name=escape_html(info.file_name)),
+                force=True,
+            )
+            result = await self._delivery.stream_to_pikpak(
+                lambda start, end: downloader.stream(message, start, end),
+                info,
+                size=message.document.size,
+                folder=job.pikpak_folder,
+                user_id=job.user_id,
+            )
+            await reporter.update(
+                t(
+                    "job.delivered",
+                    prefix=prefix,
+                    label=escape_html(truncate(info.file_name, 48)),
+                    summary=result.summary,
+                ),
+                force=True,
+            )
+            return
+
+        def place(template: str, root: Path) -> Path:
+            return root / build_relative_path(
+                template,
+                chat=chat_title,
+                chat_id=peer_id,
+                message_id=message.id,
+                name=info.file_name,
+                topic_id=job.ref.topic_id if job.ref else None,
+                when=getattr(message, "date", None),
+            )
+
+        download = self._config.download
+        keep_at = place(download.media_template, download.media_root)
+        # A file that is to be kept is downloaded straight to where it stays.
+        destination = unique_path(
+            keep_at if mode == "local" else place(download.filename_template, download.dir)
         )
-        destination = unique_path(self._config.download.dir / relative)
 
         tracker = RateTracker()
         label = truncate(info.file_name, 48)
@@ -419,59 +568,103 @@ class JobQueue:
         async def on_download(received: int, total: int) -> None:
             fraction = received / total if total else 0.0
             await reporter.update(
-                f"⬇️ {prefix}<code>{escape_html(label)}</code>\n"
-                f"{progress_bar(fraction)} {fraction * 100:.0f}% "
-                f"({human_size(received)} / {human_size(total)})\n"
-                f"{human_rate(tracker.rate(received))} · "
-                f"ETA {human_duration(tracker.eta(received, total))}"
+                t(
+                    "job.downloading_progress",
+                    prefix=prefix,
+                    label=escape_html(label),
+                    bar=progress_bar(fraction),
+                    percent=f"{fraction * 100:.0f}",
+                    received=human_size(received),
+                    total=human_size(total),
+                    rate=human_rate(tracker.rate(received)),
+                    eta=human_duration(tracker.eta(received, total)),
+                )
             )
 
         await reporter.update(
-            f"⬇️ {prefix}<code>{escape_html(label)}</code> "
-            f"({human_size(info.size)})",
+            t(
+                "job.downloading",
+                prefix=prefix,
+                label=escape_html(label),
+                size=human_size(info.size),
+            ),
             force=True,
         )
         path = await downloader.download(
             message, destination, progress=on_download, cancel=job.cancel
         )
 
-        result = await self._deliver(job, reporter, path, info, caption, key, prefix)
-
-        if self._config.download.delete_after_delivery and not result.kept_local:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError as exc:
-                log.debug("could not remove %s: %s", path, exc)
+        try:
+            result = await self._deliver(
+                job, mode, reporter, path, info, caption, key, prefix, keep_at
+            )
+        except BaseException:
+            # A failed delivery has no retry, so the file would sit on disk
+            # with nobody told where. Keep it only if files are kept anyway.
+            self._discard(path)
+            raise
+        if not result.kept_local:
+            self._discard(path)
 
         await reporter.update(
-            f"✅ {prefix}<code>{escape_html(label)}</code> — {result.summary}",
+            t(
+                "job.delivered",
+                prefix=prefix,
+                label=escape_html(label),
+                summary=result.summary,
+            )
+            + hint,
             force=True,
         )
 
-    async def _deliver(self, job, reporter, path: Path, info, caption, key, prefix):
-        """Send the downloaded file to wherever the job's mode points."""
+    def _discard(self, path: Path) -> None:
+        """Remove a downloaded file, unless the operator keeps them all."""
+        if not self._config.download.delete_after_delivery:
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            log.debug("could not remove %s: %s", path, exc)
+
+    async def _deliver(
+        self, job, mode: str, reporter, path: Path, info, caption, key, prefix, keep_at: Path
+    ):
+        """Send the downloaded file to wherever ``mode`` points."""
         upload_tracker = RateTracker()
 
         async def on_upload(sent: int, total: int) -> None:
             fraction = sent / total if total else 0.0
             await reporter.update(
-                f"⬆️ {prefix}<code>{escape_html(truncate(info.file_name, 48))}</code>\n"
-                f"{progress_bar(fraction)} {fraction * 100:.0f}% "
-                f"({human_size(sent)} / {human_size(total)})\n"
-                f"{human_rate(upload_tracker.rate(sent))}"
+                t(
+                    "job.uploading",
+                    prefix=prefix,
+                    name=escape_html(truncate(info.file_name, 48)),
+                    bar=progress_bar(fraction),
+                    percent=f"{fraction * 100:.0f}",
+                    sent=human_size(sent),
+                    total=human_size(total),
+                    rate=human_rate(upload_tracker.rate(sent)),
+                )
             )
 
-        if job.mode == "local":
+        if mode == "local":
             return await self._delivery.to_local(path, info)
 
-        if job.mode == "pikpak":
+        if mode == "pikpak":
             await reporter.update(
-                f"☁️ {prefix}handing <code>{escape_html(info.file_name)}</code> "
-                "to PikPak…",
+                t(
+                    "job.handing_to_pikpak",
+                    prefix=prefix,
+                    name=escape_html(info.file_name),
+                ),
                 force=True,
             )
             return await self._delivery.to_pikpak(
-                path, info, folder=job.pikpak_folder
+                path,
+                info,
+                folder=job.pikpak_folder,
+                user_id=job.user_id,
+                delete_when_done=self._config.download.delete_after_delivery,
             )
 
         try:
@@ -487,8 +680,8 @@ class JobQueue:
             # Falling back is better than losing a download that already cost
             # bandwidth, so the file stays on disk and the user is told why.
             log.info("job %d falling back to local: %s", job.id, exc)
-            result = await self._delivery.to_local(path, info)
-            result.summary = f"{exc}; {result.summary}"
+            result = await self._delivery.to_local(path, info, keep_at=unique_path(keep_at))
+            result.summary = f"{escape_html(describe(exc))}; {result.summary}"
             return result
 
     async def _finalize(
@@ -497,7 +690,7 @@ class JobQueue:
         reporter: Reporter,
         succeeded: int,
         skipped: int,
-        failures: list[str],
+        failures: list[tuple[int, BaseException]],
         total: int,
         truncated: bool,
         cap: int,
@@ -505,23 +698,26 @@ class JobQueue:
         """Set the job's final state and post a summary when it is worth one."""
         if job.cancel.is_set():
             job.state = JobState.CANCELLED
-            await reporter.close(f"🚫 Cancelled after {succeeded} file(s).")
+            await reporter.close(t("job.cancelled_after", count=succeeded))
             await self._db.finish_job(job.id, "cancelled")
             return
 
         notes: list[str] = []
         if skipped:
-            notes.append(f"{skipped} message(s) had no media")
+            notes.append(t("job.note_skipped", count=skipped))
         if truncated:
-            notes.append(
-                f"only the first {cap} message(s) were processed "
-                "(download.max_batch)"
-            )
+            notes.append(t("job.note_truncated", cap=cap))
+        # A single file already carried the hint on its own line; a batch's
+        # summary replaces those lines, so it repeats it once here.
+        if job.cache_hint and total > 1:
+            notes.append(t("job.hint_cache").strip())
         if failures:
-            shown = "\n".join(f"• {escape_html(item)}" for item in failures[:5])
+            shown = "\n".join(
+                f"• {message_id}: {escape_html(describe(exc))}" for message_id, exc in failures[:5]
+            )
             if len(failures) > 5:
-                shown += f"\n… and {len(failures) - 5} more"
-            notes.append(f"{len(failures)} failed:\n{shown}")
+                shown += t("job.note_more", count=len(failures) - 5)
+            notes.append(t("job.note_failed", count=len(failures), shown=shown))
 
         if succeeded and not failures:
             job.state = JobState.DONE
@@ -534,15 +730,21 @@ class JobQueue:
             status = "failed"
 
         if total > 1 or notes:
-            summary = f"{'✅' if succeeded else '❌'} {succeeded}/{total} delivered"
+            summary = t(
+                "job.summary",
+                icon="✅" if succeeded else "❌",
+                succeeded=succeeded,
+                total=total,
+            )
             if notes:
                 summary += "\n" + "\n".join(notes)
             await reporter.close(summary)
         elif not succeeded:
-            await reporter.close("❌ Nothing was delivered.")
+            await reporter.close(t("job.nothing_delivered"))
 
         await self._db.finish_job(
-            job.id, status, error="; ".join(failures[:3]) or None
+            job.id, status,
+            error="; ".join(f"{message_id}: {exc}" for message_id, exc in failures[:3]) or None,
         )
 
 

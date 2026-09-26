@@ -12,8 +12,9 @@ import json
 import secrets
 import sqlite3
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -51,6 +52,17 @@ CREATE INDEX IF NOT EXISTS jobs_user_created
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+-- TG_DIRECT_MEDIA=v2 (tgmd/direct.py): one key per account, DC and kind of
+-- address, used only on direct connections. A credential, like the session.
+CREATE TABLE IF NOT EXISTS direct_keys (
+    account_id  INTEGER NOT NULL,
+    dc_id       INTEGER NOT NULL,
+    egress      TEXT NOT NULL,
+    auth_key    BLOB NOT NULL,
+    created_at  REAL NOT NULL,
+    PRIMARY KEY (account_id, dc_id, egress)
 );
 """
 
@@ -245,6 +257,35 @@ class Database:
 
     async def kv_set_json(self, key: str, value: Any) -> None:
         await self.kv_set(key, json.dumps(value))
+
+    # ------------------------------------------------------------ direct keys
+
+    async def direct_key_get(self, account_id: int, dc_id: int, egress: str) -> bytes | None:
+        rows = await self._query(
+            "SELECT auth_key FROM direct_keys WHERE account_id = ? AND dc_id = ? AND egress = ?",
+            (account_id, dc_id, egress),
+        )
+        return bytes(rows[0]["auth_key"]) if rows else None
+
+    async def direct_key_store(
+        self, account_id: int, dc_id: int, egress: str, auth_key: bytes
+    ) -> None:
+        await self._write(
+            """
+            INSERT INTO direct_keys (account_id, dc_id, egress, auth_key, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(account_id, dc_id, egress) DO UPDATE SET
+                auth_key   = excluded.auth_key,
+                created_at = excluded.created_at
+            """,
+            (account_id, dc_id, egress, auth_key, time.time()),
+        )
+
+    async def direct_key_forget(self, account_id: int, dc_id: int, egress: str) -> None:
+        await self._write(
+            "DELETE FROM direct_keys WHERE account_id = ? AND dc_id = ? AND egress = ?",
+            (account_id, dc_id, egress),
+        )
 
     async def get_or_create_secret(self, key: str = "url_signing_secret") -> str:
         """Return the persisted signing secret, generating one on first use."""

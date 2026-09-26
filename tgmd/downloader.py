@@ -7,9 +7,9 @@ import logging
 import mimetypes
 import shutil
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
@@ -22,7 +22,22 @@ from telethon.tl.types import (
     MessageMediaWebPage,
 )
 
-from .utils import sanitize_component
+from .direct import ROUTE as DIRECT_ROUTE
+from .direct import DirectFlood, DirectRouteV2
+from .i18n import Explained
+from .parallel import (
+    MAX_CONNECTIONS,
+    MIN_PARALLEL_SIZE,
+    EndpointChooser,
+    MediaRoute,
+    ParallelUnavailable,
+    default_endpoints,
+    document_location,
+    download_parts,
+    media_endpoints,
+    telethon_sources,
+)
+from .utils import human_rate, human_size, sanitize_component
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +47,10 @@ ProgressCallback = Callable[[int, int], Awaitable[None] | None]
 _DISK_HEADROOM = 256 * 1024 * 1024
 
 _MAX_ATTEMPTS = 3
+
+# Streaming reads in requests of this size, at offsets that are multiples of
+# it. Telethon's largest request, and it satisfies every upload.getFile rule.
+STREAM_CHUNK = 512 * 1024
 _FLOOD_WAIT_CEILING = 300
 
 
@@ -39,7 +58,7 @@ class DownloadCancelled(Exception):
     """The user cancelled the job while it was downloading."""
 
 
-class DownloadError(RuntimeError):
+class DownloadError(Explained, RuntimeError):
     """The download failed, with a message meant for the user."""
 
 
@@ -58,7 +77,6 @@ class MediaInfo:
     is_photo: bool = False
     is_round: bool = False
     is_voice: bool = False
-    supports_streaming: bool = False
 
 
 def has_downloadable_media(message) -> bool:
@@ -75,6 +93,16 @@ def has_downloadable_media(message) -> bool:
     return isinstance(media, (MessageMediaDocument, MessageMediaPhoto)) or bool(
         getattr(message, "file", None)
     )
+
+
+def can_stream(message) -> bool:
+    """True when a byte range of this message's file can be read on demand.
+
+    Documents, whose size is known up front. Photos come in several sizes
+    and are small anyway; they go through the disk.
+    """
+    document = getattr(message, "document", None)
+    return document is not None and bool(getattr(document, "size", 0))
 
 
 def _guessed_extension(mime_type: str | None, fallback: str = ".bin") -> str:
@@ -103,7 +131,6 @@ def describe_media(message) -> MediaInfo:
     is_audio = False
     is_round = False
     is_voice = False
-    supports_streaming = False
 
     if document is not None:
         for attribute in document.attributes:
@@ -112,9 +139,6 @@ def describe_media(message) -> MediaInfo:
             elif isinstance(attribute, DocumentAttributeVideo):
                 is_video = True
                 is_round = bool(getattr(attribute, "round_message", False))
-                supports_streaming = bool(
-                    getattr(attribute, "supports_streaming", False)
-                )
                 duration = duration or attribute.duration
                 width = width or attribute.w
                 height = height or attribute.h
@@ -143,7 +167,6 @@ def describe_media(message) -> MediaInfo:
         is_photo=is_photo,
         is_round=is_round,
         is_voice=is_voice,
-        supports_streaming=supports_streaming,
     )
 
 
@@ -155,16 +178,49 @@ def ensure_disk_space(target_dir: Path, needed: int | None) -> None:
     usage = shutil.disk_usage(target_dir)
     if usage.free < needed + _DISK_HEADROOM:
         raise DownloadError(
-            f"not enough free disk space: {needed / 1024 / 1024:.0f} MiB needed, "
-            f"{usage.free / 1024 / 1024:.0f} MiB free"
+            key="err.download.disk", needed=needed / 1024 / 1024, free=usage.free / 1024 / 1024
         )
+
+
+@dataclass
+class Transfer:
+    """How the last download went, for the log line and for the benchmark."""
+
+    size: int
+    seconds: float
+    connections: int
+    dc_id: int | None
+    endpoint: str | None = None
+    route: str = "proxy"
+    """``direct-v2`` or ``proxy`` (the ordinary route, whatever it goes through)."""
+
+    @property
+    def rate(self) -> float:
+        return self.size / self.seconds if self.seconds > 0 else 0.0
 
 
 class Downloader:
     """Downloads message media to disk, reporting progress as it goes."""
 
-    def __init__(self, client: TelegramClient) -> None:
+    def __init__(
+        self,
+        client: TelegramClient,
+        *,
+        connections: int = 1,
+        endpoints: EndpointChooser = default_endpoints,
+        route: MediaRoute | None = None,
+        direct: DirectRouteV2 | None = None,
+    ) -> None:
         self._client = client
+        self._connections = max(1, min(connections, MAX_CONNECTIONS))
+        self._endpoints = endpoints
+        # TG_DIRECT_MEDIA=auto: prefer media endpoints, which on the NAS are
+        # reachable without the proxy. Overrides ``endpoints``.
+        self._route = route
+        # TG_DIRECT_MEDIA=v2: direct connections on keys of their own, for
+        # files outside the home DC; the ordinary route when it cannot.
+        self._direct = direct
+        self.last: Transfer | None = None
 
     async def download(
         self,
@@ -176,14 +232,178 @@ class Downloader:
     ) -> Path:
         """Download ``message``'s media to ``destination``.
 
-        Retries transient failures and honours Telegram's flood waits. A
-        partially written file is always removed, so the download directory
-        never accumulates truncated media.
+        Large documents go over several connections at once when that is
+        configured; anything that cannot, falls back to one. Retries transient
+        failures and honours Telegram's flood waits. A partially written file
+        is always removed, so the download directory never accumulates
+        truncated media.
         """
         info = describe_media(message)
         destination.parent.mkdir(parents=True, exist_ok=True)
         ensure_disk_space(destination.parent, info.size)
 
+        started = time.monotonic()
+        transfer = await self._parallel(message, info, destination, progress, cancel)
+        if transfer is None:
+            path = await self._sequential(message, destination, progress, cancel)
+            transfer = Transfer(
+                size=path.stat().st_size if path.exists() else (info.size or 0),
+                seconds=0.0,
+                connections=1,
+                dc_id=_dc_of(message),
+            )
+        else:
+            path = destination
+        transfer.seconds = time.monotonic() - started
+        self.last = transfer
+        # One line per file, so the operator can see where their files live
+        # (which DC) and what a connection count actually buys.
+        log.info(
+            "downloaded %s: %s in %.1fs (%s) from DC %s over %d connection(s)%s, route %s",
+            info.file_name,
+            human_size(transfer.size),
+            transfer.seconds,
+            human_rate(transfer.rate),
+            transfer.dc_id if transfer.dc_id is not None else "?",
+            transfer.connections,
+            f" via {transfer.endpoint}" if transfer.endpoint else "",
+            transfer.route,
+        )
+        return path
+
+    async def _parallel(self, message, info: MediaInfo, destination: Path, progress, cancel):
+        """Try our own connections. Returns None when they do not apply.
+
+        Large documents use several. With a direct media route, smaller
+        documents use one of ours too, because Telethon's own download would
+        go over its main connection, through the proxy.
+        """
+        document = getattr(message, "document", None)
+        size = info.size or 0
+        if document is None or not size:
+            return None
+        dc_id = document.dc_id
+        direct = self._direct is not None and await self._direct.available(
+            self._client, dc_id
+        )
+        if self._connections >= 2 and size >= MIN_PARALLEL_SIZE:
+            count = self._connections
+        elif direct or await self._direct_route_to(dc_id):
+            count = 1
+        else:
+            return None
+
+        async def refresh():
+            # A file reference expires; the message, fetched again, carries a
+            # fresh one.
+            fresh = await self._client.get_messages(
+                await message.get_input_chat(), ids=message.id
+            )
+            if fresh is None or getattr(fresh, "document", None) is None:
+                raise ParallelUnavailable("the message is gone")
+            return document_location(fresh.document)
+
+        if direct:
+            transfer = await self._via_direct(document, size, count, destination, progress,
+                                              cancel, refresh)
+            if transfer is not None:
+                return transfer
+
+        route = self._route
+        chooser = route.endpoints if route is not None else self._endpoints
+        attempts = [chooser] if route is None else [chooser, default_endpoints]
+        for index, endpoints in enumerate(attempts):
+            used = None
+            try:
+                async with telethon_sources(
+                    self._client,
+                    dc_id,
+                    count,
+                    endpoints=endpoints,
+                    on_refused=route.refused if route is not None else None,
+                ) as (sources, endpoint):
+                    used = endpoint
+                    await download_parts(
+                        sources,
+                        location=document_location(document),
+                        size=size,
+                        path=destination,
+                        progress=progress,
+                        cancel=cancel,
+                        refresh=refresh,
+                        flood_ceiling=_FLOOD_WAIT_CEILING,
+                    )
+                    return Transfer(
+                        size=size,
+                        seconds=0.0,
+                        connections=len(sources),
+                        dc_id=dc_id,
+                        endpoint=_endpoint_label(endpoint),
+                    )
+            except ParallelUnavailable as exc:
+                self._cleanup(destination)
+                direct = getattr(used, "media_only", False)
+                if direct and route is not None and index + 1 < len(attempts):
+                    # Connected directly, then broke: a firewall that lets the
+                    # handshake through and resets the transfer. Try the
+                    # proxied endpoint before giving up on parallel.
+                    route.failed(dc_id)
+                    log.info("direct media download broke (%s); retrying via the proxy", exc)
+                    continue
+                log.info("parallel download not possible (%s); using one connection", exc)
+                return None
+            except BaseException:
+                self._cleanup(destination)
+                raise
+        return None
+
+    async def _via_direct(self, document, size, count, destination, progress, cancel,
+                          refresh) -> Transfer | None:
+        """The v2 direct route. None sends the file to the ordinary route."""
+        assert self._direct is not None
+        dc_id = document.dc_id
+        try:
+            async with self._direct.sources(self._client, dc_id, count) as (sources, label):
+                await download_parts(
+                    sources,
+                    location=document_location(document),
+                    size=size,
+                    path=destination,
+                    progress=progress,
+                    cancel=cancel,
+                    refresh=refresh,
+                    flood_ceiling=_FLOOD_WAIT_CEILING,
+                )
+                return Transfer(size=size, seconds=0.0, connections=len(sources),
+                                dc_id=dc_id, endpoint=label, route=DIRECT_ROUTE)
+        except DirectFlood as exc:
+            self._cleanup(destination)
+            # The limit is the account's: the ordinary route waits it out too.
+            if exc.seconds > _FLOOD_WAIT_CEILING:
+                raise DownloadError(key="err.download.flood", seconds=exc.seconds) from exc
+            log.info("%s; the proxy route after it", exc)
+            await asyncio.sleep(exc.seconds + 1)
+        except ParallelUnavailable as exc:
+            self._cleanup(destination)
+            log.info("%s not used for DC %s (%s); using the proxy route", DIRECT_ROUTE,
+                     dc_id, exc)
+        except BaseException:
+            self._cleanup(destination)
+            raise
+        return None
+
+    async def _direct_route_to(self, dc_id: int) -> bool:
+        """True when a direct media route to this DC is on and exists."""
+        if self._route is None or not self._route.usable(dc_id):
+            return False
+        try:
+            return bool(await media_endpoints(self._client, dc_id))
+        except Exception:  # an optimisation must never fail a download
+            log.debug("could not list media endpoints for DC %s", dc_id, exc_info=True)
+            return False
+
+    async def _sequential(self, message, destination: Path, progress, cancel) -> Path:
+        """Telethon's own download, over one connection, with retries."""
         last_error: Exception | None = None
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             if cancel is not None and cancel.is_set():
@@ -194,45 +414,59 @@ class Downloader:
                     file=str(destination),
                     progress_callback=self._wrap_progress(progress, cancel),
                 )
-            except DownloadCancelled:
+            except BaseException as exc:
+                # Every way out of a failed attempt, retried or not, starts by
+                # removing what it half wrote.
                 self._cleanup(destination)
-                raise
-            except FloodWaitError as exc:
-                self._cleanup(destination)
-                if exc.seconds > _FLOOD_WAIT_CEILING:
-                    raise DownloadError(
-                        f"Telegram asked us to wait {exc.seconds}s; try again later"
-                    ) from exc
-                log.info("flood wait for %ss on attempt %d", exc.seconds, attempt)
-                await asyncio.sleep(exc.seconds + 1)
-                last_error = exc
-                continue
-            except (ConnectionError, asyncio.TimeoutError, OSError) as exc:
-                self._cleanup(destination)
-                last_error = exc
-                log.info("download attempt %d failed: %s", attempt, exc)
+                if not isinstance(
+                    exc, (FloodWaitError, TimeoutError, ConnectionError, OSError)
+                ):
+                    raise
+                error: Exception = exc
+            else:
+                if result is None:
+                    raise DownloadError(key="err.download.no_file")
+                return Path(result)
+
+            if isinstance(error, FloodWaitError):
+                if error.seconds > _FLOOD_WAIT_CEILING:
+                    raise DownloadError(key="err.download.flood", seconds=error.seconds) from error
+                log.info("flood wait for %ss on attempt %d", error.seconds, attempt)
+                await asyncio.sleep(error.seconds + 1)
+            else:
+                log.info("download attempt %d failed: %s", attempt, error)
                 if attempt < _MAX_ATTEMPTS:
                     await asyncio.sleep(2**attempt)
-                continue
+            last_error = error
 
-            if result is None:
-                raise DownloadError("Telegram returned no file for that message")
-            return Path(result)
+        raise DownloadError(key="err.download.attempts", attempts=_MAX_ATTEMPTS, error=last_error)
 
-        raise DownloadError(
-            f"download failed after {_MAX_ATTEMPTS} attempts: {last_error}"
-        )
+    async def stream(self, message, start: int, end: int) -> AsyncIterator[bytes]:
+        """Yield bytes ``start`` to ``end`` (inclusive) of the message's file.
 
-    async def download_thumbnail(self, message, destination: Path) -> Path | None:
-        """Fetch the largest available thumbnail, used when re-uploading video."""
-        try:
-            result = await self._client.download_media(
-                message, file=str(destination), thumb=-1
-            )
-        except Exception as exc:  # a missing thumbnail must never fail a job
-            log.debug("no thumbnail for message %s: %s", message.id, exc)
-            return None
-        return Path(result) if result else None
+        Nothing touches the disk. Telegram serves aligned requests only, so
+        this reads from the aligned offset below ``start`` and trims.
+        """
+        document = message.document
+        aligned = start - start % STREAM_CHUNK
+        skip = start - aligned
+        remaining = end - start + 1
+        chunks = -(-(skip + remaining) // STREAM_CHUNK)  # ceiling division
+        async for chunk in self._client.iter_download(
+            document,
+            offset=aligned,
+            request_size=STREAM_CHUNK,
+            limit=chunks,
+            file_size=document.size,
+        ):
+            if skip:
+                chunk = chunk[skip:]
+                skip = 0
+            if len(chunk) > remaining:
+                chunk = chunk[:remaining]
+            if chunk:
+                remaining -= len(chunk)
+                yield chunk
 
     @staticmethod
     def _wrap_progress(
@@ -287,3 +521,19 @@ class RateTracker:
         if rate <= 0:
             return None
         return max((total - received) / rate, 0.0)
+
+
+def _dc_of(message) -> int | None:
+    """The data centre a message's file lives in, when there is one."""
+    for attribute in ("document", "photo"):
+        media = getattr(message, attribute, None)
+        if media is not None and getattr(media, "dc_id", None) is not None:
+            return int(media.dc_id)
+    return None
+
+
+def _endpoint_label(endpoint) -> str | None:
+    if endpoint is None:
+        return None
+    kind = " media" if getattr(endpoint, "media_only", False) else ""
+    return f"{getattr(endpoint, 'ip_address', '?')}:{getattr(endpoint, 'port', '?')}{kind}"

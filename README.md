@@ -7,6 +7,11 @@ the server, or transfers it into PikPak.
 It also takes magnet links, direct URLs and PikPak share links, which go
 straight into PikPak without passing through this machine.
 
+**Deploying it?** [DEPLOY.md](DEPLOY.md) is the guided path: the four values
+you need and where each comes from, one-click deploy for a few hosts, and then
+`/setup` inside Telegram for everything else. No link can create a running
+bot, but that is the only part that happens outside the Telegram app.
+
 ## What it does
 
 | You send | It does |
@@ -49,27 +54,114 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Fill in `.env`:
+### 1. Create the bot
+
+Open [@BotFather](https://t.me/BotFather) and send `/newbot`. It asks for a
+display name, then a username ending in `bot`. It replies with a token that
+looks like `123456789:AAHfiqks…`. Put that in `TG_BOT_TOKEN`.
+
+The digits before the colon are the bot's own Telegram user id. The setup
+check below uses that: it compares them against the account that actually
+answers, so a token pasted from the wrong bot is caught rather than quietly
+producing a bot that talks to the wrong chats.
+
+While you are in BotFather, `/setprivacy` → Disable is worth doing if you
+plan to use the bot inside a group, otherwise it only sees commands.
+
+### 2. Fill in the credentials
 
 1. `TG_API_ID` and `TG_API_HASH` from <https://my.telegram.org/apps>.
-2. `TG_BOT_TOKEN` from [@BotFather](https://t.me/BotFather).
-3. `ADMIN_USER_IDS` — your numeric id. Send `/id` to the bot if you do not
-   know it; it answers that command to anyone.
-4. `TG_USER_SESSION` — generate it once:
+2. `TG_BOT_TOKEN` from the step above.
+
+That is everything the process needs to start. Who the admin is, the reading
+account, PikPak and the upload cache are all established afterwards from
+inside Telegram, so none of them is an environment variable unless you want
+it to be.
+
+On first start with no admin the bot writes a claim code to its log; sending
+`/claim <code>` makes you the admin, stored in the database. Setting
+`ADMIN_USER_IDS` skips that step if you prefer.
+
+If you would rather pin the reading account in the environment, generate a
+session string once:
 
 ```bash
 python -m tgmd.login
 ```
 
-That signs in the reading account and prints a session string. It is a
-credential equivalent to the account password, so keep it out of version
-control; revoke it under Telegram → Settings → Devices if it leaks.
+Put it in `TG_USER_SESSION`. It is a credential equivalent to the account
+password, so keep it out of version control; revoke it under Telegram →
+Settings → Devices if it leaks. Setting it also disables the in-chat login,
+and `/setup` says so rather than appearing to work.
 
-Then start the bot:
+### 3. Verify before starting
+
+```bash
+python -m tgmd.verify
+```
+
+This is the confirmation step. It does not guess from the configuration file;
+it connects and checks:
+
+```
+✓ configuration        loaded and internally consistent
+✓ access control       1 admin(s), 0 additional user(s)
+✓ bot token            well-formed, names bot id 123456789
+✓ directories          downloads=downloads, data=data, sessions=sessions
+✓ database             opened data/tgmd.sqlite3
+✓ bot created          @my_media_bot (id 123456789) — https://t.me/my_media_bot
+✓ bot identity         id 123456789 matches the token, and is a bot
+✓ user session         @myaccount (id 987654321) from TG_USER_SESSION, authorised
+✓ account separation   bot 123456789 reads through account 987654321
+✓ history access       the account can list its chats
+✓ cache chat           the bot administrates chat -1001234567890
+✓ pikpak account       you@example.com signed in, 4.7 GiB of 10.0 TiB used
+✓ pikpak login         /pikpak login opens https://media.example.com/pikpak/app in Telegram
+✓ http server          bound 0.0.0.0:8080
+✓ public reachability  https://media.example.com/healthz answers
+
+everything passed
+```
+
+It exits non-zero if anything failed, so it drops straight into a deployment
+script. Warnings do not fail the run. Run it while the bot is stopped, so the
+two processes do not contend for a session file.
+
+Admins can run the same identity checks in chat at any time with `/verify`.
+
+Note that MTProto is not plain HTTPS. The host needs to open a direct TCP
+connection to Telegram; an HTTPS-only egress proxy will block the bot even
+though the token is fine, and the check says so when that happens.
+
+### 4. Start it
 
 ```bash
 python -m tgmd
 ```
+
+### 5. Finish inside Telegram
+
+Open the bot and send `/setup`. It shows what is done and what is left:
+
+```
+✅ Bot account      — connected, you are talking to it
+⬜ Reading account  — /setup telegram to sign in here
+⬜ PikPak           — /setup pikpak to sign in here
+⬜ Upload cache     — optional
+```
+
+`/setup telegram` signs a normal account in to the bot, which is what lets it
+read private channels and channels that block saving. It asks for the phone
+number, then the login code Telegram sends, then the two-step password if the
+account has one. Each message is deleted as it is read, and the session is
+brought into service immediately with no restart.
+
+It is admin-only, and the prompt says why it is safe here and nowhere else: a
+bot asking for a Telegram login code is the shape of the commonest
+account-theft scam on the platform, and this is legitimate only because you
+own both the bot and the account.
+
+`/setup pikpak` does the same for PikPak, and needs no web server at all.
 
 ### Docker
 
@@ -87,10 +179,17 @@ rebuilding the image loses nothing.
 
 - **`telegram`** (default) — the bot uploads the file back to you. It uses
   MTProto rather than the HTTP Bot API, so the ceiling is 2 GiB rather than
-  50 MiB. Anything larger stays on disk instead, and the bot says so.
-- **`local`** — the file stays on the server under `DOWNLOAD_DIR` and the bot
-  replies with the path. Useful when the server is also your media host.
+  50 MiB. Anything larger is kept in the media directory instead, and the
+  bot says so.
+- **`local`** — the file is kept on the server, under `MEDIA_DIR` with its
+  original name (`{chat}/{name}` by default, `MEDIA_TEMPLATE` to change it),
+  and the bot replies with where to find it. Kept files are never deleted.
+  Set `LOCAL_URL_PREFIX` (say `smb://10.10.10.2/media/`) and the reply is a
+  path you can paste straight into a file manager.
 - **`pikpak`** — the file is transferred into PikPak. See below.
+- **`auto`** — whatever can be forwarded comes back through Telegram, in
+  seconds (see *Upload cache*); whatever is restricted is downloaded and kept
+  in the media directory, to be watched on the NAS rather than pushed on.
 
 ## PikPak
 
@@ -98,14 +197,7 @@ PikPak's API has **no upload endpoint**. The only way to put a file into it is
 to give it a URL to fetch. That splits PikPak support in two:
 
 **Magnet links, direct URLs and share links need nothing extra.** They are
-handed to PikPak, which downloads them on its own infrastructure. Set the
-credentials and it works:
-
-```
-PIKPAK_USERNAME=you@example.com
-PIKPAK_PASSWORD=...
-PIKPAK_FOLDER=/TelegramMedia
-```
+handed to PikPak, which downloads them on its own infrastructure.
 
 **Telegram media needs the built-in HTTP server.** The bot downloads the file,
 serves it at a signed, expiring URL, and asks PikPak to pull it from there. So
@@ -117,27 +209,177 @@ HTTP_PORT=8080
 PUBLIC_BASE_URL=https://media.example.com
 ```
 
-Put a TLS reverse proxy in front of it. URLs carry an HMAC over the file id
-and an expiry, so only the exact link the bot generated works, and only until
-it expires (`http.url_ttl`, one hour by default).
+Put a TLS reverse proxy in front of it. File URLs carry an HMAC over the file
+id and an expiry, so only the exact link the bot generated works, and only
+until it expires (`http.url_ttl`, one hour by default).
+
+With `PIKPAK_STREAM=true` the file is never downloaded at all: the URL PikPak
+gets is answered by reading the bytes it asks for straight from Telegram, with
+exact `Content-Length`, `HEAD` and `Range` support for PikPak's parallel
+fetches. Nothing is written to disk. It is off by default until measured on a
+real deployment; photos, whose size is not known up front, always go through
+the disk.
 
 Without this, `/mode pikpak` still works for magnets and URLs and says clearly
 why a Telegram file cannot be transferred.
 
-`/pikpak` shows quota and the target folder; `/pikpak dir /Movies/Anime`
-changes where your transfers land.
+### Connecting an account
+
+Two ways, and they coexist. `/pikpak login` offers whichever this deployment
+supports.
+
+**A Mini App, inside Telegram.** With the HTTP server on HTTPS,
+`/pikpak login` shows a button that opens the form inside the Telegram app.
+There is no link at all: Telegram signs who is opening the page, so identity
+comes from Telegram rather than from a secret in a URL. The form still checks
+that the person is allowed to use the bot, and throttles repeated attempts.
+This is the path a one-click deploy gets automatically, because the public
+address is read from the platform.
+
+**In chat.** `/setup pikpak` asks for the email and password as ordinary
+messages in a private chat, deletes each one as it reads it, and keeps only
+the token. It needs no web server, no public address and no TLS, so it works
+on any deployment including a worker with no inbound networking.
+
+Either way, only the access token is stored, never the password, and
+`/pikpak logout` disconnects the account and deletes the token. The form says
+on its face that it belongs to your bot and not to PikPak, because a page
+that asks for someone's credentials should never look like it came from the
+service it is asking about. Set `PIKPAK_ALLOW_USER_LOGIN=false` to turn both
+off.
+
+A third path, a one-time login link, was removed: it needed the same HTTPS
+address as the Mini App, so on a real deployment it was never the one offered.
+See `docs/AUDIT.md` (A5).
+
+**Or configure one shared account** for everyone who has not connected their
+own:
+
+```
+PIKPAK_USERNAME=you@example.com
+PIKPAK_PASSWORD=...
+PIKPAK_FOLDER=/TelegramMedia
+```
+
+Stored sessions never contain a password in either case. The token is kept and
+the credentials are discarded as soon as they have been exchanged for one.
+
+`/pikpak` shows which account is in use, the quota and the target folder;
+`/pikpak dir /Movies/Anime` changes where your transfers land.
+
+## PikPak warehouse
+
+The image also carries `pikpak_wms`, a rules-driven organiser for the PikPak
+drive (design and rules in [docs/wms/](docs/wms/)). It works on the account
+the bot already has, so it never asks for a password:
+
+```bash
+docker compose run --rm bot wms stocktake      # copy the folder tree into a local index
+docker compose run --rm bot wms organize       # plan what the rules would change
+docker compose run --rm bot wms apply 1        # carry the plan out
+docker compose run --rm bot wms audit          # every change, with what it was before
+docker compose run --rm bot wms undo 7 --apply # put one back
+```
+
+Every write is a dry run until you say `--apply`; deleting only ever moves to
+the trash (permanent deletion needs a config switch *and* a flag, and no
+scheduled job can do it). Rules and settings go in `/data/db/rules.yaml` and
+`/data/db/wms.yaml`, copied from `config/*.example.yaml`; the index is
+`/data/db/wms.sqlite3`, on the same volume as everything else.
+`WMS_ENABLED=true` runs the jobs listed in `wms.yaml` inside the bot, and
+turns on two things in Telegram, both for admins only:
+
+* `/wms` — status, `stocktake`, `plan`, `apply <id>`, `undo <id>`, `rules`,
+  with confirm buttons; and, when the bot has a public HTTPS address, a Mini
+  App panel listing the plans waiting and the audit trail.
+* Shelving: after something lands in PikPak (a magnet, a share link, media in
+  `pikpak` mode), the organize rules run on it and you get the plan with an
+  *Apply* button (`WMS_AUTO_SHELVE=plan`, the default), or it is shelved
+  straight away (`apply`). Rules only see folders in their `scope`, so point
+  `PIKPAK_FOLDER` inside one, such as `/Inbox`; the bot says so if it is not.
+
+### Tidying the whole drive
+
+Beyond the rules file, the warehouse knows three whole-drive jobs of its own
+(docs/wms/M7). Each one only plans; you confirm with a button.
+
+* **Whitelist.** `/收藏`, `/Cosplaytales Nako EP#1-24` and `/小千` by default
+  (`protect.paths` in `wms.yaml`, or `/wms protect add|rm|ls`), plus
+  everything you ever shared, read live from PikPak before each plan. No plan
+  touches them, whatever made it.
+* **organize-tree** (daily, one plan per top-level folder): files lying
+  directly in a top-level folder are grouped by name (`/A/<group>/`, never a
+  group named like `/A` itself), other videos go to `/A/杂/`, images to
+  `/写真/杂/`, the rest to the one drive-wide `/其他/`; ad-like files (QR codes,
+  small videos named after a site…) go to a plan of their own that no job ever
+  carries out; inside the second-level folders empty folders and junk (`.url`,
+  `.txt`, 「最新地址」…) go to the trash and single-folder chains are lifted; a
+  second-level folder of 50 GiB or more in all moves whole to
+  `/大文件/<A>/` (never split up; a big file inside does not count), and so
+  does a file of 4 GiB or more lying directly in `/A`. `wms organize-tree --sample 20 --json` prints
+  a machine-readable spot check and stores nothing.
+* **organize-inbox** (hourly): what lands in `/Telegram` and
+  `/Pack From Shared` and names a top-level folder moves there; the rest is
+  grouped where it is.
+* **dedupe** (weekly, carried out on its own) and a weekly **big-files
+  report** with a 🗑 button per item. Nothing is ever deleted without a press.
+
+Thresholds, word lists and folder aliases live under `tidy:` in the rules
+file; see `config/rules.example.yaml`.
+
+### Natural-language commands
+
+Admins can also just say what they want, in a private chat or with `/do`:
+
+> 下载今天转存到网盘的所有大于1GB的视频
+
+The bot replies with a plan before anything happens: how it read the
+sentence (the time zone, that 转存 means *when the file arrived in the
+drive*, the size and type filters), how many files match and their total
+size, the first few names, and where they would go, with *Apply*, *Edit*
+and *Cancel* buttons. Sentences starting with 每天 / 每周 become a rule in the
+rules file instead, which then makes a plan on schedule for you to confirm.
+Permanent deletion is never reachable this way.
+
+A built-in parser handles the common phrasings on its own (`NL_BACKEND=rules`,
+the default). Set `NL_BACKEND=claude` (with `ANTHROPIC_API_KEY`) or
+`NL_BACKEND=ollama` (with `OLLAMA_URL`) to hand the sentences it does not
+understand to a model; `NL_FALLBACK` names a second one. `NL_BACKEND=openai`
+takes any OpenAI-compatible endpoint (LM Studio, llama.cpp, Ollama's `/v1`,
+vLLM, DeepSeek, DashScope) through `NL_OPENAI_BASE_URL`, `NL_OPENAI_MODEL`
+and `NL_OPENAI_API_KEY`. 「整理一下 Pack From Shared」「把大文件单独放一起」
+「去重」「看看最大的文件」 start the jobs above.
+
+**Privacy.** The parser runs on your machine. When a model is used, it is sent
+exactly three things: the sentence you typed, the schema of the answer, and the
+current date, time and time zone. No file names, folder listings or anything
+else from your drive leave the machine; the model only translates, and the bot
+does the rest locally. With the default `NL_BACKEND=rules`, nothing is sent
+anywhere.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
 | `/help` | what the bot understands |
-| `/mode [telegram\|local\|pikpak]` | show or set your destination |
+| `/mode [telegram\|local\|pikpak\|auto]` | show or set your destination |
 | `/status` | jobs currently queued or running |
 | `/cancel [id]` | cancel one job, or all of yours |
 | `/stats` | your recent jobs and total transferred |
-| `/pikpak [dir <path>]` | PikPak quota and target folder |
+| `/pikpak` | which account is in use, quota, target folder |
+| `/pikpak login` | connect your own account (Mini App, or `/setup pikpak` in chat) |
+| `/pikpak logout` | disconnect your account and delete the stored token |
+| `/pikpak dir <path>` | change where your transfers land |
 | `/id` | your user id and the current chat id |
+| `/claim <code>` | become the admin of a freshly deployed bot |
+| `/setup` | the setup checklist; `/setup pikpak` for anyone, `/setup telegram` for admins |
+| `/cache` | admins only: use a channel as the upload cache |
+| `/verify` | admins only: identity and configuration report |
+| `/wms` | admins only: the PikPak warehouse (`/wms help` lists the rest) |
+| `/wms organize tree\|inbox` | admins only: plan tidying the top-level folders, or shelving the entry folders |
+| `/wms dedupe`, `/wms big` | admins only: plan removing duplicates; the biggest files with 🗑 buttons |
+| `/wms protect ls\|add\|rm <path>` | admins only: the whitelist no plan ever touches |
+| `/do <sentence>` | admins only: a natural-language command, planned first |
 
 Progress is reported in a single message that is edited as the transfer runs,
 throttled to one edit every `progress_interval` seconds so Telegram does not
@@ -153,14 +395,28 @@ The settings worth knowing about:
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `download.concurrent` | 2 | parallel downloads across all users |
+| `download.media_dir` | `DOWNLOAD_DIR` | where kept files go (`MEDIA_DIR`), e.g. a NAS share |
+| `download.media_template` | `{chat}/{name}` | layout under the media directory (`MEDIA_TEMPLATE`) |
+| `download.local_url_prefix` | none | prefix for kept files' paths in replies (`LOCAL_URL_PREFIX`) |
+| `download.connections` | 4 | connections per large file (`DOWNLOAD_CONNECTIONS`, at most 8); 1 turns parallel download off |
+| `telegram.direct_endpoints` | none | `v2` only: media endpoints to try first, like `4=149.154.166.111:443,4=149.154.166.110:443` (`TG_DIRECT_ENDPOINTS`) |
+| `telegram.direct_media` | off | `v2`: files outside the home DC come from directly reachable media endpoints, on a key used only there (`TG_DIRECT_MEDIA`, see deploy/restricted-network). `auto` is refused and runs as `off`: it got the reading session revoked |
 | `download.max_batch` | 50 | cap on messages expanded from one range link |
 | `download.max_queue_per_user` | 20 | per-user queue limit |
 | `download.filename_template` | `{chat}/{message_id}_{name}` | layout under `DOWNLOAD_DIR` |
 | `download.delete_after_delivery` | true | remove the local copy once delivered |
 | `download.auto_join_invites` | false | join `t.me/+hash` links automatically |
 | `delivery.max_upload_size_mb` | 2000 | above this, keep the file locally |
-| `delivery.cache_chat_id` | none | channel used to avoid re-uploading |
+| `delivery.cache_chat_id` | none | channel used to avoid re-uploading; it takes requests too |
+| `delivery.channel_reply_dm` | true | a request in the cache channel also gets a note in the first admin's private chat (`CHANNEL_REPLY_DM`) |
 | `access.allow_all_users` | false | open the bot to everyone |
+| `pikpak.allow_user_login` | true | users may connect their own account |
+| `pikpak.login_link_ttl` | 900 | no longer used; still accepted so old configs start |
+| `language` | `en` | which message catalogue replies come from: `en` or `zh` |
+| `wms.enabled` | false | run the PikPak warehouse's scheduled jobs in the bot (`WMS_ENABLED`) |
+| `wms.account` | first admin with an account | whose PikPak drive the warehouse manages (`WMS_ACCOUNT`) |
+| `wms.auto_shelve` | `plan` | after a transfer into PikPak: `plan`, `apply` or `off` (`WMS_AUTO_SHELVE`) |
+| `NL_BACKEND` / `NL_FALLBACK` | `rules` / `none` | who reads sentences the parser does not: `claude`, `ollama` or `openai` |
 
 Template fields: `chat`, `chat_id`, `message_id`, `topic_id`, `name`, `stem`,
 `ext`, `date`. An unknown field is rejected at startup rather than at the
@@ -168,10 +424,36 @@ moment a download finishes.
 
 ### Upload cache
 
-Set `CACHE_CHAT_ID` to a channel the bot is an administrator of. Each file the
-bot uploads is also stored there, keyed by its source message, so the same
-link requested twice is re-sent from Telegram's own servers instead of being
-downloaded and uploaded again.
+Create a private channel, add the bot as an administrator, then post `/cache`
+in that channel. The bot verifies it can post there, takes the id from the
+message, and remembers it. Each file it uploads is also stored there, keyed by
+its source message, so the same link requested twice is re-sent from
+Telegram's own servers instead of being downloaded and uploaded again.
+
+`CACHE_CHAT_ID` does the same thing from the environment and outranks the
+runtime choice, for anyone who prefers declaring it.
+
+The same channel is what makes the **forward fast path** work. When the
+source allows forwarding, the reading account forwards the message into the
+cache channel, the bot re-sends it from there with its own file reference,
+and nothing is downloaded at all: a large video arrives in seconds. For that
+the reading account has to be able to post in the channel (as its owner, or
+an admin with permission to post); `/verify` has a line saying whether it
+can. Sources that restrict saving content, and deployments without a cache
+channel, fall back to downloading and re-uploading, as tdl does. Without a
+reading account, the bot reads public chats itself and re-sends their media
+directly, no channel needed.
+
+The cache channel also takes requests (docs/wms/M7.2 B). Post a Telegram link
+or a magnet link there, and it is queued as if the first admin had sent it:
+their mode, their PikPak account, their quota. Progress and the result are
+posted under that message, and the admin gets a one-line note in private
+(`CHANNEL_REPLY_DM=false` turns the note off). A video posted there directly
+is handled in auto mode: copied to the admin as is when it can be forwarded,
+downloaded and kept on the NAS when the channel restricts saving. Forwarded
+posts, posts via a bot and the bot's own posts are never requests, so the
+channel's own traffic cannot feed back into itself. Requests are taken only
+while one of the bot's admins runs the channel; otherwise the bot says so.
 
 ## Limitations
 
@@ -183,7 +465,12 @@ downloaded and uploaded again.
   pushing through them, so a large batch is deliberately not fast.
 - `download.max_batch` caps range links. A wider range is truncated and the
   bot reports it.
-- Bot messages are in English.
+- Bot messages are English by default. `TGMD_LANG=zh` (or `language: zh`)
+  switches the catalogue in `tgmd/i18n.py`. Everything a person reads is
+  translated: replies, progress, the command menu, `/setup`, `/verify` (and
+  `python -m tgmd.verify`), the PikPak login page and error messages. Command
+  names and their keywords stay English, and so do the log and the error
+  text stored in the database.
 
 ## Development
 
@@ -192,12 +479,22 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-The suite covers link parsing, filename and path building, URL signing,
-configuration precedence and validation, the database layer, media
-inspection, and the HTTP file server over a real socket, including its
-rejection paths. It also asserts that the `pikpakapi` methods this project
-calls still take the arguments it passes, so a dependency upgrade fails in
-tests rather than in production. No Telegram credentials are needed.
+The suite covers link parsing, bot-token parsing, filename and path building,
+URL signing, configuration precedence and validation, platform detection for
+one-click deploys, the database layer, media inspection, per-user PikPak
+session selection, the setup conversations, Mini App signature validation, and
+both HTTP surfaces over a real socket: the file server and the Mini App
+endpoint, including expiry, forged tokens, forged user ids, the access list
+and attempt limits. The job queue, delivery, the download loop, the progress
+reporter and the verification checks run end to end against fake clients.
+
+Three of those exist to catch dependency drift rather than our own bugs:
+the `pikpakapi` methods this project calls are asserted to still take the
+arguments it passes; the inline keyboards are serialised, which fails if
+Telegram's schema layer moves them again; and a test that accidentally reaches
+PikPak over the network fails immediately instead of hanging.
+
+No credentials are needed.
 
 ### Layout
 
@@ -209,18 +506,29 @@ tests rather than in production. No Telegram credentials are needed.
 | `delivery.py` | sending to Telegram, disk or PikPak |
 | `tasks.py` | the job queue and per-job orchestration |
 | `handlers.py` | bot commands and dispatch |
-| `pikpak.py` | PikPak session, offline downloads, share restore |
+| `identity.py` | bot-token parsing and the check-report model |
+| `verify.py` | the preflight and in-chat verification checks |
+| `setup.py` | the in-Telegram setup conversations |
+| `miniapp.py` | Telegram Mini App initData validation |
+| `buttons.py` | inline keyboards, isolated because they are layer-specific |
+| `pikpak.py` | per-user PikPak sessions, transfers, share restore |
+| `portal.py` | the PikPak login Mini App and its endpoint |
 | `webserver.py` | signed URLs so PikPak can fetch local files |
 | `config.py` | YAML + environment configuration |
-| `db.py` | SQLite: preferences, upload cache, job history |
+| `db.py` | SQLite: preferences, upload cache, job history, tokens |
+| `wms.py` | the PikPak warehouse on the bot's account; `wms` in the image |
+| `wms_panel.py` | the warehouse Mini App panel (admins) |
 
 ## Prior art
 
-The feature set follows
-[tangyoha/telegram_media_downloader](https://github.com/tangyoha/telegram_media_downloader)
-and [Dineshkarthik/telegram_media_downloader](https://github.com/Dineshkarthik/telegram_media_downloader),
-with the bot-first interface of
-[CodeXBotz/File-Sharing-Bot](https://github.com/CodeXBotz/File-Sharing-Bot)
-and the cloud-transfer idea from
-[anasty17/mirror-leech-telegram-bot](https://github.com/anasty17/mirror-leech-telegram-bot).
-This is an independent implementation on Telethon rather than a fork.
+[REFERENCES.md](REFERENCES.md) covers this properly: what is reused as code,
+the closest prior art and what to take from each, and what PikPak's own
+[@PikPak_Bot](https://t.me/PikPak_Bot) already does so you can decide whether
+you need this at all.
+
+The short version: an independent implementation on Telethon, not a fork.
+The feature set follows the two `telegram_media_downloader` projects, the
+cache-channel trick comes from `File-Sharing-Bot`, and the queue and progress
+behaviour from `mirror-leech-telegram-bot`. Browse the fields at
+[topics/pikpak](https://github.com/topics/pikpak) and
+[topics/telegram](https://github.com/topics/telegram).

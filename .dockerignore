@@ -7,7 +7,9 @@ __pycache__
 .pytest_cache
 .mypy_cache
 .ruff_cache
-tests
+tests/*
+# ...except the natural-language eval set, which the image runs.
+!tests/nl
 data
 downloads
 sessions
