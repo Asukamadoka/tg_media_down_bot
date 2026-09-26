@@ -408,6 +408,16 @@ CATALOG: dict[str, dict[str, str]] = {
         'inbound.queued': 'Queued <code>#{job_id}</code>{note}.',
         'bundle.queued': 'Queued {count} job(s): <code>{ids}</code> → <b>{mode}</b>',
         'bundle.needs_user_session': '{ref} needs a user session; none is configured',
+        'channel.not_admin': (
+            'This channel is the upload cache, but none of this bot\'s admins runs it, so I do'
+            ' not take requests here. Make the admin\'s own account an admin of the channel.'
+        ),
+        'channel.dm': (
+            'A request in the cache channel: {what}. Progress and the result are posted under'
+            ' that message there.'
+        ),
+        'channel.what_links': '{count} link(s), job(s) <code>{ids}</code>',
+        'channel.what_media': 'a posted file, job <code>#{job_id}</code>',
         'menu.help': 'What I take and what I can do',
         'menu.claim': 'Become the admin of a freshly deployed bot',
         'menu.setup': 'Finish setup: sign in an account or PikPak',
@@ -1281,6 +1291,13 @@ CATALOG: dict[str, dict[str, str]] = {
         'inbound.queued': '已加入队列 <code>#{job_id}</code>{note}。',
         'bundle.queued': '已加入队列 {count} 个任务：<code>{ids}</code> → <b>{mode}</b>',
         'bundle.needs_user_session': '{ref} 需要用户会话，但还没有配置',
+        'channel.not_admin': (
+            '这个频道是上传缓存，但本机器人的管理员都不管理它，所以这里的请求我不接。请把管理员本人的账号设为'
+            '频道管理员。'
+        ),
+        'channel.dm': '缓存频道里收到请求：{what}。进度和结果回复在频道里那条消息下面。',
+        'channel.what_links': '{count} 个链接，任务 <code>{ids}</code>',
+        'channel.what_media': '一个直接发的文件，任务 <code>#{job_id}</code>',
         'menu.help': '我能接什么、能做什么',
         'menu.claim': '认领一个刚部署好的机器人',
         'menu.setup': '完成配置：登录账号或 PikPak',

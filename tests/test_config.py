@@ -367,6 +367,30 @@ class TestDownloadTuning:
         config.validate()
         assert config.telegram.direct_media == "v2"
 
+    def test_direct_endpoints(self, tmp_path, monkeypatch):
+        from tgmd.config import parse_direct_endpoints
+
+        monkeypatch.setenv(
+            "TG_DIRECT_ENDPOINTS",
+            "4=149.154.166.111:443, 4=149.154.166.110:443,2=[2001:67c:4e8:f002::b]:443",
+        )
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        assert not [w for w in config.validate() if "TG_DIRECT_ENDPOINTS" in w]
+        found, bad = parse_direct_endpoints(config.telegram.direct_endpoints)
+        assert found == {4: [("149.154.166.111", 443), ("149.154.166.110", 443)],
+                         2: [("2001:67c:4e8:f002::b", 443)]}
+        assert bad == []
+
+    def test_a_bad_direct_endpoint_is_a_warning_and_left_out(self, tmp_path, monkeypatch):
+        from tgmd.config import parse_direct_endpoints
+
+        monkeypatch.setenv("TG_DIRECT_ENDPOINTS", "4=149.154.166.111:443,x=1.2.3.4:443,4=1.2.3.4")
+        config = load_config(write_config(tmp_path, MINIMAL_YAML))
+        warnings = [w for w in config.validate() if "TG_DIRECT_ENDPOINTS" in w]
+        assert len(warnings) == 2
+        assert parse_direct_endpoints(config.telegram.direct_endpoints)[0] == {
+            4: [("149.154.166.111", 443)]}
+
     def test_direct_media_rejects_a_typo(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TG_DIRECT_MEDIA", "yes")
         with pytest.raises(ConfigError, match="TG_DIRECT_MEDIA"):

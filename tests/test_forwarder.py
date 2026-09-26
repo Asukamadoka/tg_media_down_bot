@@ -217,3 +217,17 @@ class TestResolvingTheCacheChannel:
         clock[0] += 601
         assert (await deliver(forwarder)).outcome is Outcome.FORWARDED
         assert reader.listings == 2
+
+
+class TestIntoTheCacheChannelItself:
+    """M7.2 B: a request made in the cache channel is answered there."""
+
+    async def test_the_forward_is_the_delivery(self, db):
+        forwarder, bot = make(db, reader=FakeReader())
+        attempt = await forwarder.deliver(
+            chat_id=CACHE_CHAT, message=message(), source=chat(), caption="c",
+            key="1234:42", info=INFO,
+        )
+        assert attempt.outcome is Outcome.FORWARDED
+        assert bot.sent == []  # no second post of the same file
+        assert (await db.cache_lookup("1234:42"))["cache_msg_id"] == 9001

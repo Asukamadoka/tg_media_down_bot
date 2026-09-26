@@ -332,12 +332,12 @@ class SlimSpec(_Strict):
 
 
 class BigSpec(_Strict):
-    """Big folders and files get a place of their own (docs/wms/M7 §3.2, M7.1 A1).
+    """Big folders and files get a place of their own (docs/wms/M7 §3.2, M7.2 A).
 
     The unit is the second-level folder, which is never split up: it moves
-    whole to ``<to>/<top>/<name>`` when it is ``folder`` or bigger, or holds
-    any file of ``file`` or more. A file of ``file`` or more lying directly
-    in a top-level folder moves to ``<to>/<top>/``.
+    whole to ``<to>/<top>/<name>`` when its total is ``folder`` or more. A
+    big file inside does not make it big. A file of ``file`` or more lying
+    directly in a top-level folder moves to ``<to>/<top>/``.
     """
 
     folder: int = 50 * 1024**3

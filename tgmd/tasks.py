@@ -87,6 +87,9 @@ class Job:
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     cache_hint: bool = False
     """Something could have been forwarded, had a cache channel been set."""
+    forward_to: int | None = None
+    """Inbound media that can be forwarded goes here as is, nothing downloaded
+    (a video posted in the cache channel, M7.2 B). None: it is downloaded."""
 
     @property
     def active(self) -> bool:
@@ -327,6 +330,22 @@ class JobQueue:
             return
 
         info = describe_media(message)
+        if job.forward_to is not None:
+            # Forwardable, so Telegram copies it server-side: the "instant"
+            # half of auto mode. Only what cannot be forwarded is downloaded.
+            try:
+                await self._bot.send_file(job.forward_to, message.media)
+            except Exception as exc:  # noqa: BLE001 - a failed copy falls back to a download
+                log.info("job %d: forwarding the posted media failed: %s", job.id, exc)
+            else:
+                job.state = JobState.DONE
+                await reporter.open(
+                    t("job.forwarded", prefix="", name=escape_html(info.file_name))
+                )
+                await self._db.finish_job(
+                    job.id, "done", file_name=info.file_name, file_size=info.size
+                )
+                return
         await reporter.open(
             t(
                 "job.inbound.downloading",

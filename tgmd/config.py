@@ -30,6 +30,31 @@ class ConfigError(RuntimeError):
     """Configuration is missing or inconsistent."""
 
 
+def parse_direct_endpoints(raw: str) -> tuple[dict[int, list[tuple[str, int]]], list[str]]:
+    """``TG_DIRECT_ENDPOINTS``: ``4=149.154.166.111:443,2=[2001:db8::1]:443``.
+
+    Returns the endpoints by DC, in the order given, and the entries that
+    could not be read (reported as startup warnings and left out).
+    """
+    found: dict[int, list[tuple[str, int]]] = {}
+    bad: list[str] = []
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        dc, _, address = item.partition("=")
+        host, _, port = address.strip().rpartition(":")
+        host = host.strip()
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+        if not (dc.strip().isdigit() and port.isdigit() and host
+                and 0 < int(port) < 65536 and 0 < int(dc) < 100):
+            bad.append(item)
+            continue
+        found.setdefault(int(dc), []).append((host, int(port)))
+    return found, bad
+
+
 @dataclass
 class TelegramConfig:
     api_id: int = 0
@@ -38,6 +63,8 @@ class TelegramConfig:
     user_session: str = ""
     session_dir: Path = Path("sessions")
     direct_media: str = "off"
+    direct_endpoints: str = ""
+    """``TG_DIRECT_ENDPOINTS``: media endpoints v2 tries first, by DC (M7.2 C)."""
     """``v2`` downloads from Telegram's media-only endpoints of other DCs,
     on keys only those direct connections use (tgmd.direct). ``off`` never."""
 
@@ -102,6 +129,9 @@ class DeliveryConfig:
     default_mode: str = "telegram"
     max_upload_size_mb: int = 2000
     cache_chat_id: int | None = None
+    channel_reply_dm: bool = True
+    """A request posted in the cache channel also gets a short note in the
+    first admin's private chat (M7.2 B; ``CHANNEL_REPLY_DM``)."""
 
     @property
     def max_upload_bytes(self) -> int:
@@ -253,6 +283,11 @@ class Config:
         # /setup telegram store both in the database, which is not open yet,
         # so the app reports them after reading it instead.
         warnings: list[str] = []
+        _endpoints, bad = parse_direct_endpoints(self.telegram.direct_endpoints)
+        for item in bad:
+            warnings.append(
+                f"TG_DIRECT_ENDPOINTS: {item!r} is not <dc>=<ip>:<port>; left out."
+            )
         if self.download.connections > MAX_DOWNLOAD_CONNECTIONS:
             # Capped rather than refused: more connections from the user's own
             # account buy little speed and invite rate limits.
@@ -403,6 +438,9 @@ def load_config(path: Path | None = None) -> Config:
         direct_media=_env_str(
             "TG_DIRECT_MEDIA", str(_get(data, "telegram", "direct_media", default="off"))
         ).lower(),
+        direct_endpoints=_env_str(
+            "TG_DIRECT_ENDPOINTS", str(_get(data, "telegram", "direct_endpoints", default=""))
+        ),
     )
 
     access = AccessConfig(
@@ -474,6 +512,10 @@ def load_config(path: Path | None = None) -> Config:
             "MAX_UPLOAD_SIZE_MB", int(_get(data, "delivery", "max_upload_size_mb", default=2000))
         ),
         cache_chat_id=cache_chat_ids[0] if cache_chat_ids else None,
+        channel_reply_dm=parse_bool(
+            os.environ.get("CHANNEL_REPLY_DM"),
+            parse_bool(_get(data, "delivery", "channel_reply_dm", default=True), True),
+        ),
     )
 
     pikpak = PikPakConfig(

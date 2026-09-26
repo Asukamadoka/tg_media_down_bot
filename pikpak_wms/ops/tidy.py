@@ -7,12 +7,14 @@ confirmed on its own (§3.2 asks for batches):
 
 1. **slim** inside the second-level folders: trash empty folders and junk
    files, and lift the contents of single-folder chains up one level;
-2. **big**: a second-level folder of ``big.folder`` or more moves whole to
-   ``<big.to>/<A>/``; a file of ``big.file`` or more (depth 3 and deeper,
-   in a folder that stays) moves to ``<big.to>/<A>/``;
+2. **big**: a second-level folder whose total is ``big.folder`` or more
+   moves whole to ``<big.to>/<A>/``; second-level folders are never split
+   up, whatever their biggest file (M7.2 A). A file of ``big.file`` or more
+   lying directly in ``/<A>`` moves to ``<big.to>/<A>/``;
 3. **loose files** directly in ``/<A>``: grouped by name into
    ``/<A>/<group>/``, other videos to ``/<A>/杂/``, images to ``/写真/杂/``,
-   everything else to ``/<A>/其他/``.
+   everything else to the drive-wide ``/其他/`` (M7.1 A2); ad-like files to
+   a plan of their own.
 
 ``organize-inbox``: whatever lands in the entry folders (``/Telegram``,
 ``/Pack From Shared``) and names a top-level folder moves into it, then
@@ -369,17 +371,18 @@ def _weight(td: Tidier, tree: Tree, folder: str) -> tuple[int, int]:
 
 
 async def _big(td: Tidier, tree: Tree, top: str, plan: Plan, counts: dict[str, int]) -> None:
-    """Second-level folders move whole, never split up (M7.1 A1): one that is
-    ``big.folder`` or bigger, or holds any file of ``big.file`` or more, goes
-    to ``<big.to>/<A>/`` with everything in it. Only files lying directly in
-    the top-level folder move on their own."""
+    """Second-level folders move whole, never split up: one whose total is
+    ``big.folder`` or more goes to ``<big.to>/<A>/`` with everything in it.
+    A big file inside does not make its folder big (M7.2 A, the owner's
+    correction of M7.1 A1). Only files lying directly in the top-level
+    folder and of ``big.file`` or more move on their own."""
     big = td.spec.big
     home = join_path(big.to, top.strip("/"))
     for second in tree.folders(top):
         if td.is_gone(second.path):
             continue
-        total, biggest = _weight(td, tree, second.path)
-        if total < big.folder and biggest < big.file:
+        total, _biggest = _weight(td, tree, second.path)
+        if total < big.folder:
             continue
         if await td.attempt(plan, "tidy:big-folder", second,
                             lambda s=second: td.move(s, home, "tidy:big-folder")):

@@ -150,6 +150,15 @@ class Forwarder:
             return Attempt(Outcome.FAILED, str(exc))
 
         forwarded_id = getattr(forwarded, "id", None)
+        if chat_id == cache_chat_id:
+            # A request made in the cache channel itself (docs/wms/M7.2 B):
+            # the forward already is the delivery; a copy would be a second
+            # post of the same file.
+            await self._db.cache_store(
+                key, cache_chat_id, forwarded_id, info.file_name, info.size
+            )
+            log.info("delivered media into the cache channel itself, nothing downloaded")
+            return Attempt(Outcome.FORWARDED)
         try:
             # Channel message ids are shared by every account, so the bot can
             # look up the same id with references of its own.

@@ -48,7 +48,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 
 from .clients import user_session_source
-from .config import ConfigError, load_config
+from .config import ConfigError, load_config, parse_direct_endpoints
 from .db import Database
 from .direct import DirectRouteV2
 from .downloader import Downloader, has_downloadable_media
@@ -163,7 +163,9 @@ async def run(args: argparse.Namespace) -> int:
     # neither negotiates a key the bot already has nor leaves one behind.
     db = Database(config.download.db_path)
     await db.connect()
-    direct = DirectRouteV2(db)
+    direct = DirectRouteV2(
+        db, manual=parse_direct_endpoints(config.telegram.direct_endpoints)[0]
+    )
     try:
         await client.connect()
         if not await client.is_user_authorized():

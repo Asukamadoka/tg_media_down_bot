@@ -15,7 +15,7 @@ from telethon.sessions import StringSession
 
 from . import bootstrap, botconfig, i18n
 from .clients import start_clients
-from .config import Config, ConfigError, load_config
+from .config import Config, ConfigError, load_config, parse_direct_endpoints
 from .db import Database
 from .delivery import Delivery
 from .direct import DirectRouteV2
@@ -132,7 +132,13 @@ class Application:
         self.route = None
         # TG_DIRECT_MEDIA=v2 (docs/wms/M7.1 §B): keys of its own, stored in
         # the database, for DCs other than the reading account's home DC.
-        self.direct = DirectRouteV2(self.db) if config.telegram.direct_media == "v2" else None
+        self.direct = (
+            DirectRouteV2(
+                self.db, manual=parse_direct_endpoints(config.telegram.direct_endpoints)[0]
+            )
+            if config.telegram.direct_media == "v2"
+            else None
+        )
 
         self.queue = JobQueue(
             config=config,

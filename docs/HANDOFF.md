@@ -1367,3 +1367,112 @@ docker compose logs bot | grep -E 'direct-v2|route (direct-v2|proxy)'
 4. **v2 的速度没有实测**：DC4 直连到底比经代理（4 条约 1.0 MiB/s）快多少，等 Cowork 的数字。
 5. **A4.2 的词表**：按简报给的例子起步（`二维码`、`QR`、`发布器`、`最新地址`、`防屏蔽`、`扫码`、`加群`、`福利群`……，全部在规则文件里）。真实索引上误判的，直接改 `tidy.ads.words`。
 6. **分组误判率**：还是等 `--sample --json` 的抽查结果，§8 的要求是不超过 5%。
+
+## 阶段 3 · WMS M7.2：大目录判定更正、缓存频道作为投递入口、直连 v2 手动端点
+
+规格：`docs/wms/M7.2-big-folder-and-channel.md`（基线 `cb65da6`）。
+
+### 这一阶段做了什么
+
+- **A. 大目录只按总大小判定（用户的更正）**：
+  - 用户原话：「所有的二级目录都是一个整体。」
+  - M7.1 A1 里「二级目录里有一个 ≥ 4 GiB 的文件，这个目录就算大目录」这一条是我对用户规则的误读，这次删掉了。
+  - 现在的规则：
+    - 二级目录**总大小 ≥ 50 GiB** 才整个移到 `/大文件/<A>/`，里面有大文件不算；
+    - 一级目录里直接放着的 ≥ 4 GiB 的文件，照旧移到 `/大文件/<A>/`；
+    - 二级目录永远不拆。
+  - 模块和 `BigSpec` 的文档字符串、`config/rules.example.yaml` 的注释同步改了。
+- **B. 缓存频道也能投递**（`tgmd/handlers.py` 的 `_on_channel_post`）：
+  - **只认缓存频道**：`chat_id == delivery.cache_chat_id`，并且 bot 的某个管理员管理这个频道（`_channel_run_by_admin`，结果缓存 10 分钟）。
+    - `/cache` 自己仍然每次现问 Telegram，免得刚把管理员加进频道，还被缓存里的旧结果挡住。
+    - 别的频道一律不响应。
+    - 是缓存频道但不是管理员管理的，回复一句拒绝原因。
+  - **不当作请求的**：
+    - 带 `fwd_from` 的转发（包括读取账号转发进来的）；
+    - `via_bot`；
+    - `out=True`；
+    - `post_author` 是 bot 自己（署名）；
+    - 只有文字、但没有链接的；
+    - 视频以外、又没有文字的媒体（照片、贴纸等）。
+  - **请求**：
+    - 文字里的 Telegram 链接和磁力链接。普通网址和 PikPak 分享链接在频道里**不算**，免得随手贴的网页被当成离线下载。
+    - 直接发的视频文件（不是转发的）。
+    - 发起人算作第一个 admin，用他的模式、PikPak 账号和配额。
+  - **视频按 auto 模式**：
+    - 频道没有「限制保存内容」：bot 在服务器端把它复制给第一个 admin 的私聊，不下载；
+    - 频道限制了：下载后存到 NAS；
+    - 复制失败时也改为下载。
+  - **反馈**：
+    - 进度和结果回复在频道里那条消息下面；
+    - 同时私聊第一个 admin 一句（`CHANNEL_REPLY_DM=false` 关掉）；
+    - 频道里的请求消息处理完不删。
+  - **防止重复发帖**：链接请求在频道里被转发器处理时，读取账号转发进缓存频道的那一条就是交付，bot 不再发第二份，缓存照常记下。缓存条目仍由 `media_cache` 表管理。
+- **C. 直连 v2 手动端点**：
+  - 新增 `TG_DIRECT_ENDPOINTS`，格式 `4=149.154.166.111:443,4=149.154.166.110:443`，IPv6 写成 `2=[2001:…]:443`。
+  - 手动端点排在 Telegram 下发的端点前面，按写的顺序，重复的去掉；只对 v2 生效。
+  - 本 DC 的条目被忽略，并打一条警告。
+  - 格式错误的条目在启动时警告并跳过。
+  - 某个 DC 只有手动端点也能用。
+  - 端点其实不属于这个 DC 时 `importAuthorization` 会失败：按原逻辑冷却 24 小时，日志写明是哪个端点，并提示它来自 `TG_DIRECT_ENDPOINTS`。
+  - 独立 key、只用于非本 DC、冷却和回落这些规则都不变。
+
+### 验收证据
+
+- **测试**：1191 → 1219（+28）。3.11 与 3.12 全绿，ruff 零告警。
+  - 新增：
+    - `test_channel_requests.py` 18 个：链接和磁力进队列；发起人是第一个 admin；回复在原消息下面；私聊通知及开关；视频的复制和下载两种情况；转发、`via_bot`、自己发的、署名是 bot 的都不触发；照片和无链接文字不触发；非缓存频道不响应；非 admin 管理时说明原因；10 分钟缓存。
+    - `test_direct.py` +5：手动端点在最前面、本 DC 的被忽略、只有手动端点也可用、端点不属于该 DC 时冷却并写明端点、其余规则不变。
+    - `test_config.py` +2：解析和格式错误警告。
+    - `test_tasks.py` +2：频道视频复制，以及复制失败改为下载。
+    - `test_forwarder.py` +1：请求来自缓存频道时不发第二份。
+  - **改了预期值的旧测试**（用户更正了规则，按红线 7 写明；没有删除任何测试）：
+    - `test_wms_m7.py::test_big_folders_move_whole`：`/A/Mid`（共 9 GiB，里面有一个 5 GiB 文件）不再移动；执行后断言 `/大文件/A/Huge/part1.mkv`、`part2.mkv` 存在，`/A/Mid` 下的文件都在原处。
+    - `test_one_folder_or_one_part`、`test_applying_then_planning_again_finds_nothing`、`TestCommandLine` 的夹具：原来用 5 GiB 单文件构造「大目录」的地方，改成 55 GiB。
+    - `test_wms_m7_fixture.py` 的不变量改成 `total >= 50 GiB and not protection.holds(path)`。
+- **快照** `tree-big.json` 重新生成，和 Cowork 本地的结果一致：
+  - 总动作 120 → 54；
+  - big-folder 移动 82 → 27；
+  - 计划 38 → 27；
+  - 第一份计划里 `/Cosplay/Yuki 合集` 不再移动。
+- 夹具上完整 organize-tree 用时 2.2 秒（41 份计划，734 个动作）。
+
+### NAS 上要改什么
+
+- **不改也能跑**：新配置都有默认值，数据库没有结构变化。
+- **缓存频道**：升级后就能在频道里发链接了，前提是频道由 bot 的管理员管理（`/cache` 时已经检查过）。不想收私聊通知就设 `CHANNEL_REPLY_DM=false`。
+- **直连 v2**：
+  - `.env` 加上 `TG_DIRECT_ENDPOINTS=4=149.154.166.111:443,4=149.154.166.110:443,4=149.154.166.120:443`；
+  - mihomo 规则里也给 `.110` 和 `.120` 加 DIRECT，写在 Telegram 段之前（示例配置已更新）；
+  - `TG_DIRECT_MEDIA=v2` 保持或打开，然后 `docker compose up -d bot`。
+
+### 用户需要在 Telegram 里做什么
+
+1. 在缓存频道里发一个受限频道的消息链接：频道里那条消息下面应当出现进度和结果，私聊里收到一句通知。
+2. 在缓存频道里直接发一个视频：频道没开「限制保存内容」时，私聊里会秒收到这个视频。
+3. `/wms organize tree`：大目录计划应当只剩总大小 ≥ 50 GiB 的二级目录。
+
+### 给 Cowork 的核验手段
+
+```bash
+docker compose run --rm bot wms organize-tree --part big            # 只有总大小 ≥ 50 GiB 的二级目录和一级目录里的大文件
+docker compose run --rm bot wms organize-tree --sample 20 --json
+# 直连 v2 带手动端点：挑一个 DC4 文件，盯着 /verify 的用户会话一行
+docker compose exec bot python -m tgmd.bench '<DC4 文件链接>' --route v2 --connections 1,4
+docker compose logs bot | grep -E 'direct-v2|TG_DIRECT_ENDPOINTS'
+```
+
+- `via` 列显示 `direct-v2`、`endpoint` 列显示 `149.154.166.110:443` 或 `.111`，才是真的直连了。
+- 如果日志出现 `refused at 149.154.166.x:443 (from TG_DIRECT_ENDPOINTS …)`，说明那个地址不属于 DC4。把它从列表里删掉，再等冷却结束，或者清掉 kv 表里的 `direct_v2_cooldown`。
+
+### 怎么回滚
+
+- 镜像回滚到 `sha-cb65da6`（M7.1）。旧版本会忽略 `TG_DIRECT_ENDPOINTS` 和 `CHANNEL_REPLY_DM`，频道里的请求又会没有反应。
+- 只关频道入口：目前没有单独的开关，只能 `/cache off`（上传缓存会一起关掉），见下面待决问题 1。
+
+### 待决问题
+
+1. **频道入口没有单独的总开关**：频道只要是缓存频道、并且由 admin 管理，就接请求。要不要加一个 `CHANNEL_REQUESTS=false`？
+2. **「纯媒体、没有文字的消息不算请求」和「直接发的视频也算请求」两条的取舍**：我的理解是视频算请求，其他没有文字的媒体（照片、贴纸、文档）不算。要是也想让文档或压缩包算请求，告诉我。
+3. **视频「能转发的秒传」发到哪里**：频道里的视频已经在 Telegram 上了，再发回同一个频道只会多一份，所以我把它复制到第一个 admin 的私聊。你们如果想要的是别的去处（比如转存 PikPak），告诉我。
+4. **频道里的普通网址和 PikPak 分享链接不处理**：简报只点名了 Telegram 链接和磁力链接。要处理的话是一行改动。
+5. **缓存命中时会在频道里再发一份**：如果频道里请求的文件之前已经缓存过，bot 会从缓存把它复制到频道，也就是频道里出现第二份。一般是同一个链接发了两次才会这样，暂时没处理。

@@ -162,8 +162,8 @@ class TestPlansOverTheFixture:
         sources = {plan.source.partition(":")[2] for plan in stored}
         assert not sources & {f"/{name}" for name in PROTECTED + INBOXES}
 
-        # M7.1 A1: a second-level folder of 50 GiB or more, or holding any file
-        # of 4 GiB or more, moves whole; nothing leaves one on its own.
+        # M7.2 A: a second-level folder of 50 GiB or more in all moves whole,
+        # whatever its biggest file; nothing leaves one on its own.
         heavy: dict[str, tuple[int, int]] = {}
         for node in fixture.nodes:
             parts = node.path.split("/")
@@ -172,8 +172,8 @@ class TestPlansOverTheFixture:
             key = "/".join(parts[:3])
             total, biggest = heavy.get(key, (0, 0))
             heavy[key] = (total + node.size, max(biggest, node.size))
-        expected = {path for path, (total, biggest) in heavy.items()
-                    if (total >= 50 * GiB or biggest >= 4 * GiB) and not protection.holds(path)}
+        expected = {path for path, (total, _biggest) in heavy.items()
+                    if total >= 50 * GiB and not protection.holds(path)}
         big_moves = [a for a in actions if a.rule_name == "tidy:big-folder"
                      and a.type is ActionType.MOVE]
         assert {a.before["path"] for a in big_moves} == expected

@@ -380,10 +380,11 @@ class TestTree:
         assert trashed(plan) == ["/A/S/inner/Z"]
 
     async def test_big_folders_move_whole(self, world):
-        """M7.1 A1: the second-level folder is the unit and is never split up."""
+        """M7.2 A: the second-level folder is the unit, never split up, and
+        only its total makes it big (the owner's correction of M7.1 A1)."""
         world.drive.add("/A/Huge/part1.mkv", size=30 * GB)     # 60 GiB in all
         world.drive.add("/A/Huge/part2.mkv", size=30 * GB)
-        world.drive.add("/A/Mid/big.mkv", size=5 * GB)         # one file ≥ 4 GiB
+        world.drive.add("/A/Mid/big.mkv", size=5 * GB)         # 9 GiB: stays whole
         world.drive.add("/A/Mid/small.mkv", size=1)
         world.drive.add("/A/Mid/deep/deeper/also-big.mkv", size=4 * GB)
         world.drive.add("/A/Small/a.mkv", size=GB)
@@ -393,7 +394,6 @@ class TestTree:
         (plan,) = await world.tree(parts={"big"})
         assert sorted(moves(plan)) == [
             ("/A/Huge", "/大文件/A/Huge"),
-            ("/A/Mid", "/大文件/A/Mid"),
             ("/A/loose-big.mkv", "/大文件/A/loose-big.mkv"),
         ]
         # Nothing ever leaves a second-level folder for /大文件 on its own.
@@ -402,8 +402,10 @@ class TestTree:
                     and a.after["path"].startswith("/大文件")]
         plan_id = await plans.save(world.ctx, plan)
         await plans.apply(world.ctx, plan_id)
+        for relative in ["part1.mkv", "part2.mkv"]:
+            assert world.exists(f"/大文件/A/Huge/{relative}")  # the same relative path
         for relative in ["big.mkv", "small.mkv", "deep/deeper/also-big.mkv"]:
-            assert world.exists(f"/大文件/A/Mid/{relative}")  # the same relative path
+            assert world.exists(f"/A/Mid/{relative}")  # a big file does not pull it along
         assert world.exists("/A/Small/a.mkv")
 
     async def test_slimming_comes_first_and_stays_inside(self, world):
@@ -427,7 +429,7 @@ class TestTree:
     async def test_one_folder_or_one_part(self, world):
         world.drive.add("/A/a.mp4", size=1)
         world.drive.add("/B/b.mp4", size=1)
-        world.drive.add("/B/X/big.mkv", size=5 * GB)
+        world.drive.add("/B/X/big.mkv", size=55 * GB)
         await world.sync()
         assert [p.source for p in await world.tree(scope="/B/whatever")] == ["organize-tree:/B"]
         (plan,) = await world.tree(scope="/B", parts={"big"})
@@ -437,7 +439,7 @@ class TestTree:
         for name in ["Nako EP01.mp4", "Nako EP02.mp4", "x.mov", "y.jpg", "z.zip"]:
             world.drive.add(f"/Cos/{name}", size=10, hash=name)
         world.drive.add("/Cos/S/in/a.mp4", size=10)
-        world.drive.add("/Cos/Big/b.mkv", size=5 * GB)
+        world.drive.add("/Cos/Big/b.mkv", size=55 * GB)
         await world.sync()
         for plan in await world.tree():
             plan_id = await plans.save(world.ctx, plan)
@@ -591,7 +593,7 @@ class TestCommandLine:
         drive = FakeDrive()
         for n in range(3):
             drive.add(f"/Cos/Nako EP0{n}.mp4", size=1)
-        drive.add("/Cos/F/big.mkv", size=5 * GB)
+        drive.add("/Cos/F/big.mkv", size=55 * GB)
         drive.add("/Telegram/Cos extra.mp4", size=1)
         monkeypatch.setattr(cli.state, "provider_factory", lambda _config: provider_for(drive))
         return drive
