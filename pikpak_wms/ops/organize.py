@@ -150,9 +150,19 @@ async def dedupe(
 
 
 async def layout(ctx: Context) -> Plan:
-    """create_folder for every folder of ``layout.ensure`` the index lacks."""
+    """create_folder for every folder of ``layout.ensure`` the index lacks.
+
+    The drive-wide 其他 of organize-tree (``tidy.loose.other``, M7.1 A2) is
+    always part of it, when it is a path rather than a per-folder name.
+    """
+    from . import tidy  # tidy imports this module; only needed here
+
     plan = Plan(source="layout", generated_at=now().isoformat(timespec="seconds"))
-    for path in ctx.config.layout.ensure:
+    ensure = list(ctx.config.layout.ensure)
+    other = tidy.load_spec(ctx).loose.other
+    if other.startswith("/") and other not in ensure:
+        ensure.append(other)
+    for path in ensure:
         node = await ctx.store.node_at(path)
         if node is None or not node.is_folder:
             plan.actions.append(
