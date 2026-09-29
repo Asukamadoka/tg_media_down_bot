@@ -347,7 +347,16 @@ the default). Set `NL_BACKEND=claude` (with `ANTHROPIC_API_KEY`) or
 understand to a model; `NL_FALLBACK` names a second one. `NL_BACKEND=openai`
 takes any OpenAI-compatible endpoint (LM Studio, llama.cpp, Ollama's `/v1`,
 vLLM, DeepSeek, DashScope) through `NL_OPENAI_BASE_URL`, `NL_OPENAI_MODEL`
-and `NL_OPENAI_API_KEY`. 「整理一下 Pack From Shared」「把大文件单独放一起」
+and `NL_OPENAI_API_KEY`. `NL_OPENAI_BASE_URL` may list several hosts, best
+first, for machines that are not always on (a Mac and a PC on the LAN): each
+is asked `GET /models` with a 1.5 s limit and the verdict is remembered for
+a minute, the first one that is up gets the sentence, and when none is, the
+rules parser answers what it can and the rest gets an immediate "model hosts
+offline" instead of a wait (`NL_OPENAI_TIMEOUT`, default 60 s, bounds a
+generation). `/verify` and `wms doctor` show each host, its model and the
+last answer's latency. Small models' habits are forgiven before the answer is
+checked: the string `"null"` means null, and a Quartz cron becomes five-field
+cron. 「整理一下 Pack From Shared」「把大文件单独放一起」
 「去重」「看看最大的文件」 start the jobs above.
 
 **Privacy.** The parser runs on your machine. When a model is used, it is sent
@@ -408,6 +417,7 @@ The settings worth knowing about:
 | `download.auto_join_invites` | false | join `t.me/+hash` links automatically |
 | `delivery.max_upload_size_mb` | 2000 | above this, keep the file locally |
 | `delivery.cache_chat_id` | none | channel used to avoid re-uploading; it takes requests too |
+| `delivery.channel_requests` | true | links and videos posted in the cache channel are requests (`CHANNEL_REQUESTS`) |
 | `delivery.channel_reply_dm` | true | a request in the cache channel also gets a note in the first admin's private chat (`CHANNEL_REPLY_DM`) |
 | `access.allow_all_users` | false | open the bot to everyone |
 | `pikpak.allow_user_login` | true | users may connect their own account |
@@ -448,7 +458,8 @@ The cache channel also takes requests (docs/wms/M7.2 B). Post a Telegram link
 or a magnet link there, and it is queued as if the first admin had sent it:
 their mode, their PikPak account, their quota. Progress and the result are
 posted under that message, and the admin gets a one-line note in private
-(`CHANNEL_REPLY_DM=false` turns the note off). A video posted there directly
+(`CHANNEL_REPLY_DM=false` turns the note off; `CHANNEL_REQUESTS=false` stops
+the channel taking requests at all). A video posted there directly
 is handled in auto mode: copied to the admin as is when it can be forwarded,
 downloaded and kept on the NAS when the channel restricts saving. Forwarded
 posts, posts via a bot and the bot's own posts are never requests, so the

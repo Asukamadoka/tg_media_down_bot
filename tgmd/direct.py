@@ -43,7 +43,7 @@ from collections import defaultdict
 from collections.abc import AsyncIterator, Callable
 
 from telethon.crypto import AuthKey
-from telethon.errors import AuthKeyNotFound, FloodWaitError, RPCError
+from telethon.errors import AuthKeyNotFound, FloodWaitError, RPCError, SecurityError
 from telethon.errors.rpcbaseerrors import AuthKeyError, UnauthorizedError
 from telethon.network import MTProtoSender
 from telethon.tl.functions.auth import ExportAuthorizationRequest, ImportAuthorizationRequest
@@ -77,6 +77,13 @@ _COOLDOWN_KEY = "direct_v2_cooldown"
 # transport error Telethon raises as AuthKeyNotFound), unregistered, revoked
 # (the 401 family), or duplicated (406).
 KEY_ERRORS = (AuthKeyNotFound, UnauthorizedError, AuthKeyError)
+
+# An endpoint that does not work: refused, silent, cut off mid-handshake
+# (asyncio.IncompleteReadError is an EOFError), or answering with something
+# that is not MTProto at all, as the NAS saw: an HTTP 404 and a web
+# certificate (Telethon's InvalidBufferError is a BufferError). The next
+# endpoint is tried, then the ordinary route (docs/wms/M8 §C1).
+ENDPOINT_ERRORS = (ConnectionError, OSError, TimeoutError, EOFError, BufferError, SecurityError)
 
 
 class DirectFlood(ParallelUnavailable):
@@ -224,14 +231,14 @@ class DirectRouteV2:
             egress = egress_of(endpoint)
             try:
                 first, key = await self._first(client, account, dc_id, endpoint, egress)
-            except (ConnectionError, OSError, TimeoutError) as exc:
+            except ENDPOINT_ERRORS as exc:
                 log.info("direct-v2: %s did not answer: %s", _describe(endpoint), exc)
                 continue
             senders.append(first)
             for _ in range(count - 1):
                 try:
                     senders.append(await self._timed(self._open(client, key, endpoint, dc_id)))
-                except (ConnectionError, OSError, TimeoutError) as exc:
+                except ENDPOINT_ERRORS as exc:
                     log.info("direct-v2: opened %d of %d connections: %s",
                              len(senders), count, exc)
                     break

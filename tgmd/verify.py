@@ -698,7 +698,29 @@ async def run_live_checks(
             )
         )
 
+    await check_model_hosts(report)
     return report
+
+
+async def check_model_hosts(report: Report) -> None:
+    """One line per NL_OPENAI_BASE_URL host (docs/wms/M8 §A5): up or not,
+    its model, and how long its last answer took. Nothing when none is set."""
+    from pikpak_wms.ops.nl import model_hosts
+
+    try:
+        hosts = await model_hosts()
+    except Exception as exc:  # a bad setting is a line, not a crash
+        report.add(Check.warn("model host", t("verify.model.bad", error=exc)))
+        return
+    for host in hosts:
+        latency = (t("verify.model.latency", ms=f"{host.latency_ms:.0f}")
+                   if host.latency_ms is not None else "")
+        if host.online:
+            report.add(Check.ok("model host", t("verify.model.online", url=host.url,
+                                                model=host.model, latency=latency)))
+        else:
+            report.add(Check.warn("model host", t("verify.model.offline", url=host.url,
+                                                  model=host.model, latency=latency)))
 
 
 async def _main(config_path: Path | None) -> int:

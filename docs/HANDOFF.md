@@ -1476,3 +1476,111 @@ docker compose logs bot | grep -E 'direct-v2|TG_DIRECT_ENDPOINTS'
 3. **视频「能转发的秒传」发到哪里**：频道里的视频已经在 Telegram 上了，再发回同一个频道只会多一份，所以我把它复制到第一个 admin 的私聊。你们如果想要的是别的去处（比如转存 PikPak），告诉我。
 4. **频道里的普通网址和 PikPak 分享链接不处理**：简报只点名了 Telegram 链接和磁力链接。要处理的话是一行改动。
 5. **缓存命中时会在频道里再发一份**：如果频道里请求的文件之前已经缓存过，bot 会从缓存把它复制到频道，也就是频道里出现第二份。一般是同一个链接发了两次才会这样，暂时没处理。
+
+## 阶段 3 · WMS M8：局域网模型主机、小模型输出规范化、M7.2 遗留
+
+规格：`docs/wms/M8-lan-model-hosts.md`（基线 `52b697e`）。
+
+### 这一阶段做了什么
+
+- **A. openai 后端支持多个主机**（`pikpak_wms/nl/hosts.py`、`translator.py`）：
+  - `NL_OPENAI_BASE_URL` 可以写多个地址，逗号分隔，按顺序优先。`NL_OPENAI_MODEL` 写一个表示所有主机共用，写多个就要和主机一一对应；数量对不上是配置错误，翻译时会明确报出来。
+  - **判断在线**：请求 `GET <base>/models`，超时 1.5 秒。任何 HTTP 回应都算在线，连不上或没有回应算离线。在线和离线的结论都记 60 秒，所以离线的主机一分钟内不会再拖慢句子。
+  - **记忆在进程级**（`hosts.BOARD`）：bot 每处理一句话都会新建翻译器，所以结论不能放在翻译器里。
+  - **顺序**：第一个在线的接活；翻译过程中主机掉线（连接被断、超时），按离线处理，改试下一个，不会让用户等两遍。
+  - **全部离线**：抛出 `nl.error.offline`，中文是「模型主机离线（Mac/PC 未开机），这句我没听懂，换个说法或稍后再试。」此时 rules 解析器照常先答，答得了的句子不受影响；没人等生成。
+  - **超时分开设**：连接 1.5 秒；生成由 `NL_OPENAI_TIMEOUT` 控制，默认 60 秒。
+  - `json_schema` 被拒后改用 `json_object`，现在按主机分别记，一台不支持不影响另一台。
+  - **`/verify` 和 `wms doctor` 各加了一行**：每个主机在线与否、模型名、上次响应的延迟。`wms doctor` 说明里原来写的「不联网」现在有一个例外，就是这一行，每个主机最多 1.5 秒。
+  - **`eval --backend openai --base-url <地址>`** 一次只测一台，模型取 `NL_OPENAI_MODEL` 里和这个地址对应的那个。
+- **B. 小模型输出的鲁棒性**（`nl/query.py` 的 `normalize_wire`）：
+  - 在 schema 校验之前做一次宽松规范化：
+    - 字符串 `"null"`、`""`、`"none"`（不分大小写）当作 null，对顶层字段和 `scope`、`filters`、`action_args`、`schedule` 里的字段都生效；
+    - `schedule.cron` 是 6 位或 7 位的 Quartz 表达式，去掉秒位和年位，`?` 换成 `*`（`'0 0 * * ? *'` → `'0 * * * *'`）；`cron` 是 `"null"` 则整个 `schedule` 当作没有；
+    - 规范化之后仍然不合法，才报错。
+  - 系统提示里加了 3 条正确示例、2 条错误示例（Quartz、字符串 `"null"`），并写明「不确定就填 needs_clarification」。示例里只用 ASCII 标点，因为 ruff 不让提示词里出现全角标点。
+  - **评测同时统计两项**：`schema_invalid_as_answered`（模型原样给出、不规范化就通不过的答案数）和 `schema_invalid_after_normalizing`（规范化后仍失败、这句话真的失败了的答案数）。
+- **C1. 直连 v2 的 bench 崩溃**：
+  - 按简报，**v2 保持 `off`，不再投入**。
+  - 握手中途被断（`asyncio.IncompleteReadError`）、对方回的不是 MTProto（`InvalidBufferError`，也就是 NAS 上看到的 `HTTP/1.1 404`），以及 `SecurityError`，现在都当作「这个端点不行」：换下一个端点，都不行就冷却 24 小时，回落到代理路线。
+  - 已经确认这个测试在旧代码上会失败（两种错误都会冒泡），新代码上通过。
+- **C2. M7.2 的待决问题，按简报都做了**：
+  - **`CHANNEL_REQUESTS=true|false`**（默认 true）：false 时缓存频道又只是缓存，里面发的东西都不算请求，也不会去查管理员。
+  - **频道里的普通网址和 PikPak 分享链接**也处理了，和私聊里一样：网址走 URL 转存，分享链接走 restore_share。M7.2 里我只放行了 Telegram 链接和磁力链接。
+  - **缓存命中时不再往频道里发第二份**，改为直接复制到发起人（第一个 admin）的私聊。
+
+### 验收证据
+
+- **测试**：1219 → 1248（+29）。3.11 与 3.12 全绿，ruff 零告警。
+  - 新增：
+    - `test_wms_m8.py` 24 个：
+      - 多个主机按顺序选在线的、都在线时用第一个；
+      - 离线主机的 60 秒冷却和恢复；
+      - 全部离线时立刻回答、没有发起生成，中文提示文字正确；
+      - 全部离线时 rules 照常回答，rules 答不了的才报离线；
+      - 主机翻译到一半掉线时改用下一个；
+      - 超时的两个设置；
+      - 模型数量对不上；
+      - 翻译器重新创建后离线记录仍在；
+      - `/verify` 和 `wms doctor` 的主机行；
+      - cron 规范化（真实出现过的 `'0 0 * * ? *'`，另外 Quartz 六位和七位的写法）、`"null"` 字符串；
+      - 规范化前后的两项统计；
+      - 系统提示的示例；
+      - 评测的两项统计和 `--base-url`。
+    - `test_direct.py` +2：`IncompleteReadError` 和 `InvalidBufferError` 都回落到代理并冷却。
+    - `test_channel_requests.py` +2：网址和分享链接进队列，`CHANNEL_REQUESTS=false` 时无反应。
+    - `test_tasks.py` +1：缓存命中时，请求来自缓存频道的复制给发起人，频道里不发第二份。
+  - **改了预期值的旧测试**（按红线 7 写明；没有删除任何测试）：
+    - `test_channel_requests.py::test_a_web_address_is_not_a_request` 改成 `test_a_web_address_goes_to_pikpak`：简报要求频道里的网址也要处理。
+    - `test_wms_m7_bot.py` 里 openai 翻译器的辅助函数补上了「主机在线」的桩，因为现在每次翻译前都要先问一次主机是否在线。
+  - `tests/conftest.py` 加了一个自动生效的夹具：测试里的在线探测一律失败、每个测试开始时在线记录清空，保证没有测试会联网问真实的模型主机（红线 1）。
+- **没法在沙箱里验证的**：准确率和延迟。目标是准确率 ≥ 80%、平均每句 ≤ 5 秒，要 Cowork 在装好模型的 Mac 上测。
+
+### NAS 上要改什么
+
+- **不改也能跑**：新配置都有默认值。数据库没有结构变化。
+- **要用局域网模型**：`.env` 里
+  ```
+  NL_BACKEND=openai
+  NL_OPENAI_BASE_URL=http://10.10.10.1:11434/v1,http://192.168.0.50:11434/v1
+  NL_OPENAI_MODEL=qwen2.5:7b-instruct
+  ```
+  模型名换成 Mac 上实际装的。Mac 上的 Ollama 要监听局域网（`OLLAMA_HOST=0.0.0.0`），并且防火墙放行；Windows PC 一样。
+- **NAS 上原来的 Ollama**（Qwen2.5-3B，已停用）可以删掉，`NL_BACKEND=ollama` 也不用了。
+- **频道入口**：不想让缓存频道收请求就设 `CHANNEL_REQUESTS=false`。频道里的网址和分享链接现在也会被处理，如果频道里有人随手贴网页地址，会被当成离线下载去 PikPak。
+- **直连 v2**：`TG_DIRECT_MEDIA` 保持 `off`（结论是这台 NAS 做不通）。mihomo 里给 `.110`、`.120` 加的 DIRECT 规则可以不加；已经加了的也无害。
+
+### 用户需要在 Telegram 里做什么
+
+1. `/verify`：看「模型主机」那几行。Mac 开机时应当显示在线；关机后再发一次 `/verify`，应当变成离线。
+2. 用一句 rules 解析不了的话试一下：Mac 开机时应当由模型回答；Mac 和 PC 都关着时，应当马上收到「模型主机离线」。
+3. 在缓存频道里发一个之前已经缓存过的链接：应当收到私聊里的文件，频道里不会再多一份。
+
+### 给 Cowork 的核验手段
+
+```bash
+docker compose run --rm bot wms doctor                                   # 「模型主机」行，每个最多 1.5 秒
+# Mac 上装好模型后，一次测一台：
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
+    --base-url http://10.10.10.1:11434/v1 --json
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
+    --base-url http://192.168.0.50:11434/v1 --json
+```
+
+- 目标：准确率 ≥ 80%，平均每句 ≤ 5 秒。
+- 输出里 `schema_invalid_as_answered` 和 `schema_invalid_after_normalizing` 两项，分别是规范化前后不合格的答案数。差得越多，说明规范化帮的忙越大；后一项不为零的，看 `errors`。
+- 这个模型如果 `json_schema` 被拒（日志里有 `refused json_schema`），会自动改用 `json_object`，不用管。
+
+### 怎么回滚
+
+- 镜像回滚到 `sha-52b697e`（M7.2）。旧版本不认识逗号分隔的多个地址（会把整串当成一个地址），回滚前先把 `NL_OPENAI_BASE_URL` 改成只留一个。旧版本会忽略 `CHANNEL_REQUESTS`。
+- 只关模型：`NL_BACKEND=rules`。
+
+### 待决问题
+
+1. **在线判断按「有任何 HTTP 回应」算**：`GET /models` 返回 401 或 404 也算在线，因为这说明主机开着。真正的问题（模型没装）会在翻译时暴露，表现为一次失败的翻译，而不是离线。
+2. **主机掉线的判断比较宽**：翻译时的任何网络异常（包括生成超时）都会把这台标成离线 60 秒。好处是一台卡住的机器不会让每句话都等 60 秒；代价是慢但没坏的机器偶尔会被误判，60 秒后自动恢复。
+3. **`wms doctor` 不再完全不联网**：现在会去问每个模型主机。没配 `NL_OPENAI_BASE_URL` 时和以前一样。
+4. **`NL_OPENAI_MODEL` 数量对不上时整个 openai 后端不可用**，而不是猜着用。这是刻意的：把 A 模型请求发给只装了 B 模型的主机比直接报错更难排查。
+5. **频道里的网址现在都当离线下载**：包括随手贴的网页链接。如果不想要，改回只认 Telegram 链接和磁力链接是一行改动，或者用 `CHANNEL_REQUESTS=false` 整个关掉。
+6. **C1 的 EOFError、BufferError 是按类型整体捕获的**：这两类异常在下载连接里也可能出现，但都发生在建连阶段，进了 `ENDPOINT_ERRORS` 也只是换端点，不影响已经在传的下载。

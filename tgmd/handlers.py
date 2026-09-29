@@ -30,13 +30,6 @@ log = logging.getLogger(__name__)
 CHANNEL_CHECK_TTL = 600.0
 
 
-def _channel_bundle(text: str) -> LinkBundle:
-    """The links a cache-channel post may ask for: Telegram links and magnets
-    only (M7.2 B3). A web address posted there is not a download request."""
-    found = extract_links(text)
-    return LinkBundle(messages=found.messages, magnets=found.magnets, errors=found.errors)
-
-
 def _posted_video(message) -> bool:
     """A video file somebody posted in the channel themselves."""
     if not has_downloadable_media(message):
@@ -993,12 +986,14 @@ class BotHandlers:
         The first admin stands in as the requester (mode, PikPak, quota).
         """
         cache = self._config.delivery.cache_chat_id
-        if cache is None or event.chat_id != cache:
+        if cache is None or event.chat_id != cache or not self._config.delivery.channel_requests:
             return
         message = event.message
         if await self._posted_by_machine(message):
             return
-        bundle = _channel_bundle(event.raw_text or "")
+        # Every kind of link, as in a private chat (M8 §C2): Telegram links,
+        # magnets, web addresses and PikPak share links.
+        bundle = extract_links(event.raw_text or "")
         video = not bundle.actionable and _posted_video(message)
         if not bundle.actionable and not video:
             return  # a note, a photo, a sticker: not a request

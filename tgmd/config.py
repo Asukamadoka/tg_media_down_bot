@@ -129,6 +129,9 @@ class DeliveryConfig:
     default_mode: str = "telegram"
     max_upload_size_mb: int = 2000
     cache_chat_id: int | None = None
+    channel_requests: bool = True
+    """Links and videos posted in the cache channel are requests (M7.2 B;
+    ``CHANNEL_REQUESTS``). False: the channel is only a cache again."""
     channel_reply_dm: bool = True
     """A request posted in the cache channel also gets a short note in the
     first admin's private chat (M7.2 B; ``CHANNEL_REPLY_DM``)."""
@@ -512,6 +515,10 @@ def load_config(path: Path | None = None) -> Config:
             "MAX_UPLOAD_SIZE_MB", int(_get(data, "delivery", "max_upload_size_mb", default=2000))
         ),
         cache_chat_id=cache_chat_ids[0] if cache_chat_ids else None,
+        channel_requests=parse_bool(
+            os.environ.get("CHANNEL_REQUESTS"),
+            parse_bool(_get(data, "delivery", "channel_requests", default=True), True),
+        ),
         channel_reply_dm=parse_bool(
             os.environ.get("CHANNEL_REPLY_DM"),
             parse_bool(_get(data, "delivery", "channel_reply_dm", default=True), True),

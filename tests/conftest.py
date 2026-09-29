@@ -35,6 +35,7 @@ ENV_VARS = (
     "MAX_UPLOAD_SIZE_MB",
     "CACHE_CHAT_ID",
     "CHANNEL_REPLY_DM",
+    "CHANNEL_REQUESTS",
     "PIKPAK_ENABLED",
     "PIKPAK_USERNAME",
     "PIKPAK_PASSWORD",
@@ -67,6 +68,10 @@ ENV_VARS = (
     "NL_CLAUDE_MODEL",
     "NL_CLAUDE_EFFORT",
     "NL_OLLAMA_MODEL",
+    "NL_OPENAI_BASE_URL",
+    "NL_OPENAI_MODEL",
+    "NL_OPENAI_API_KEY",
+    "NL_OPENAI_TIMEOUT",
     "OLLAMA_URL",
     "ANTHROPIC_API_KEY",
     # Hosting platforms export these; they must not leak into tests.
@@ -103,3 +108,21 @@ def no_pikpak_network(monkeypatch):
 
     monkeypatch.setattr("pikpakapi.PikPakApi.login", refuse)
     monkeypatch.setattr("pikpakapi.PikPakApi._make_request", refuse)
+
+
+@pytest.fixture(autouse=True)
+def no_model_hosts(monkeypatch):
+    """No test asks a real model host whether it is up (docs/wms/M8 §A).
+
+    An unstubbed probe finds every host offline, and the shared record of
+    who is up starts empty in each test.
+    """
+    from pikpak_wms.nl import hosts
+
+    async def refuse(*_args, **_kwargs):
+        raise ConnectionError("tests do not reach model hosts")
+
+    monkeypatch.setattr(hosts, "_http_get", refuse)
+    hosts.BOARD.reset()
+    yield
+    hosts.BOARD.reset()

@@ -337,6 +337,18 @@ class TestTelegramMode:
         assert harness.downloader.downloaded == []
         assert harness.bot.uploads_to(USER) == ["cached-media"]
 
+    async def test_a_cache_hit_for_the_cache_channel_goes_to_the_requester(self, make, db):
+        # M8 §C2: the file is in the channel already; a second post is noise.
+        harness = await make(cache_chat_id=CACHE_CHAT)
+        await db.cache_store(cache_key(CHAT_ID, 1), CACHE_CHAT, 77, "clip.mp4", 64)
+        harness.bot.cached_message = SimpleNamespace(media="cached-media")
+        job = await harness.job("telegram")
+        job.chat_id = CACHE_CHAT
+        row = await harness.run(job)
+        assert row["status"] == "done"
+        assert harness.bot.uploads_to(USER) == ["cached-media"]
+        assert harness.bot.uploads_to(CACHE_CHAT) == []
+
     async def test_an_upload_is_stored_in_the_cache_for_next_time(self, make, db):
         harness = await make(cache_chat_id=CACHE_CHAT)
         await harness.run(await harness.job("telegram"))

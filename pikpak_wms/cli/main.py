@@ -98,7 +98,8 @@ def version() -> None:
 
 @app.command()
 def doctor() -> None:
-    """Check configuration and credentials without touching the network."""
+    """Check configuration and credentials. The only network touch is asking each LAN model
+    host whether it is up (M8), at most 1.5 s each."""
     cfg = state.config
     table = Table(title=t("cli.doctor.title"))
     table.add_column(t("cli.doctor.item"))
@@ -141,6 +142,20 @@ def doctor() -> None:
         t("cli.doctor.index"),
         t("cli.doctor.index_value", count=count, when=when or t("cli.doctor.never")),
     )
+    # M8 §A5: the one network touch here, 1.5 s at most per LAN model host.
+    from ..ops import nl as nl_ops
+
+    try:
+        hosts = asyncio.run(nl_ops.model_hosts())
+    except Exception as exc:  # noqa: BLE001 - a bad setting is a row, not a crash
+        table.add_row(t("cli.doctor.model_host"), str(exc))
+        hosts = []
+    for host in hosts:
+        up = t("cli.doctor.model_online") if host.online else t("cli.doctor.model_offline")
+        latency = (t("cli.doctor.model_latency", ms=f"{host.latency_ms:.0f}")
+                   if host.latency_ms is not None else "")
+        table.add_row(t("cli.doctor.model_host"),
+                      f"{host.url} ({host.model}): {up}{latency}")
     console.print(table)
 
 

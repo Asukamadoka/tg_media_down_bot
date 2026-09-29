@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from collections.abc import Sequence
 from datetime import datetime, tzinfo
 from typing import Any, Protocol
@@ -32,7 +33,8 @@ from typing import Any, Protocol
 from pydantic import ValidationError
 
 from ..core.errors import WmsError
-from .query import Clarification, Query, as_result, from_wire, wire_schema
+from .hosts import BOARD, PROBE_TIMEOUT, Host, HostBoard, HostsConfigError, parse_hosts
+from .query import Clarification, Query, as_result, from_wire, normalize_wire, wire_schema
 from .rules_parser import RulesTranslator
 
 log = logging.getLogger(__name__)
@@ -100,7 +102,24 @@ deletion). Then put one short question, in the user's language, and fill the res
 you can.
 
 Leave every field you have no evidence for at its empty value. Never invent folders, names \
-or sizes that the sentence does not state."""
+or sizes that the sentence does not state. When you are unsure, fill needs_clarification \
+rather than guess.
+
+Correct answers (only the fields that are set are shown; every other field keeps its empty \
+value):
+1. "每天凌晨3点把 /Telegram 里的视频移到 /Media" -> {"intent": "move", "scope": {"path": \
+"/Telegram", "recursive": true}, "filters": {"kinds": ["video"]}, "action_args": {"dest": \
+"/Media"}, "schedule": {"cron": "0 3 * * *"}, "needs_clarification": null}
+2. "看看最近7天转存的大于2GB的文件" -> {"intent": "list", "filters": {"created_after": "7d", \
+"min_size": 2147483648}, "schedule": null, "needs_clarification": null}
+3. "把大文件移走" -> {"intent": "move", "schedule": null, "needs_clarification": \
+"多大算大文件? 要移到哪个文件夹?"}
+
+Wrong answers, never write these:
+1. {"schedule": {"cron": "0 0 3 * * ?"}}: that is Quartz. cron has exactly five fields: \
+"0 3 * * *".
+2. {"schedule": "null", "needs_clarification": "null"}: the string "null" is not null. Write \
+JSON null."""
 
 
 def user_message(text: str, now: datetime, tz: tzinfo) -> str:
@@ -111,14 +130,44 @@ def user_message(text: str, now: datetime, tz: tzinfo) -> str:
     )
 
 
-def _parse_answer(raw: str, backend: str) -> Query | Clarification:
+class SchemaStats:
+    """How often a model's answers break the schema, before and after
+    :func:`normalize_wire` (docs/wms/M8 §B; the eval reports both)."""
+
+    def __init__(self) -> None:
+        self.answers = 0
+        self.invalid_before = 0
+        """Answers the schema would have refused as they came."""
+        self.invalid_after = 0
+        """Answers still refused after normalizing: these fail the sentence."""
+
+
+def _valid(data: Any) -> bool:
+    try:
+        from_wire(data)
+    except (ValidationError, ValueError, TypeError, AttributeError):
+        return False
+    return True
+
+
+def _parse_answer(raw: str, backend: str,
+                  stats: SchemaStats | None = None) -> Query | Clarification:
     raw = raw.strip()
     if raw.startswith("```"):
         # Some local models fence their JSON even in JSON mode.
         raw = raw.strip("`").removeprefix("json").strip()
+    if stats is not None:
+        stats.answers += 1
     try:
-        return as_result(from_wire(json.loads(raw)))
-    except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:
+        data = json.loads(raw)
+        if stats is not None and not _valid(data):
+            stats.invalid_before += 1
+        return as_result(from_wire(normalize_wire(data)))
+    except (json.JSONDecodeError, ValidationError, ValueError, TypeError, AttributeError) as exc:
+        if stats is not None:
+            if isinstance(exc, json.JSONDecodeError):
+                stats.invalid_before += 1
+            stats.invalid_after += 1
         raise TranslationError(f"{backend} answered outside the schema: {exc}",
                                key="nl.error.schema", backend=backend) from exc
 
@@ -134,6 +183,7 @@ class ClaudeTranslator:
         self.effort = (effort if effort is not None
                        else os.environ.get("NL_CLAUDE_EFFORT", "low")).strip()
         self._client = client
+        self.stats = SchemaStats()
 
     def _api(self) -> Any:
         if self._client is None:
@@ -184,7 +234,7 @@ class ClaudeTranslator:
             raise TranslationError("claude: answer cut off", key="nl.error.backend",
                                    backend=self.name, error="max_tokens")
         raw = next((block.text for block in response.content if block.type == "text"), "")
-        return _parse_answer(raw, self.name)
+        return _parse_answer(raw, self.name, self.stats)
 
 
 class OllamaTranslator:
@@ -199,6 +249,7 @@ class OllamaTranslator:
         self.model = model or os.environ.get("NL_OLLAMA_MODEL", "").strip() or DEFAULT_OLLAMA_MODEL
         self.timeout = timeout
         self._post = post or self._http_post
+        self.stats = SchemaStats()
 
     async def _http_post(  # pragma: no cover - real network
         self, url: str, body: dict[str, Any]
@@ -229,7 +280,7 @@ class OllamaTranslator:
             raise TranslationError(f"ollama: {exc}", key="nl.error.backend",
                                    backend=self.name, error=type(exc).__name__) from exc
         raw = ((answer or {}).get("message") or {}).get("content") or ""
-        return _parse_answer(raw, self.name)
+        return _parse_answer(raw, self.name, self.stats)
 
 
 class OpenAITranslator:
@@ -241,29 +292,53 @@ class OpenAITranslator:
     that (HTTP 400/404/415/422, as DeepSeek does), the request is repeated
     once with ``{"type": "json_object"}`` and the schema in the prompt, and
     the answer is validated here all the same.
+
+    Several hosts may be named, comma-separated and best first, with one
+    model for all or one per host (docs/wms/M8 §A). The first host that
+    answers ``GET /models`` gets the sentence (:mod:`pikpak_wms.nl.hosts`);
+    one that drops out mid-way counts as offline and the next is tried.
+    When none is up, the sentence fails at once with ``nl.error.offline``.
+    Connecting is bounded by 1.5 s, the answer by ``NL_OPENAI_TIMEOUT``
+    (default 60 s).
     """
 
     name = "openai"
 
     def __init__(self, *, base_url: str | None = None, model: str | None = None,
-                 api_key: str | None = None, post: Any = None, timeout: float = 120.0) -> None:
-        self.base_url = (base_url if base_url is not None
-                         else os.environ.get("NL_OPENAI_BASE_URL", "")).strip().rstrip("/")
-        self.model = (model if model is not None
-                      else os.environ.get("NL_OPENAI_MODEL", "")).strip()
+                 api_key: str | None = None, post: Any = None, get: Any = None,
+                 timeout: float | None = None, board: HostBoard | None = None) -> None:
+        urls = base_url if base_url is not None else os.environ.get("NL_OPENAI_BASE_URL", "")
+        models = model if model is not None else os.environ.get("NL_OPENAI_MODEL", "")
+        self.config_error = ""
+        try:
+            self.hosts = parse_hosts(urls, models)
+        except HostsConfigError as exc:
+            self.hosts, self.config_error = [], str(exc)
         self.api_key = (api_key if api_key is not None
                         else os.environ.get("NL_OPENAI_API_KEY", "")).strip()
-        self.timeout = timeout
+        self.timeout = timeout if timeout is not None else _env_seconds("NL_OPENAI_TIMEOUT", 60.0)
         self._post = post or self._http_post
-        self.json_mode = False
-        """Set once the server turned the schema down; later calls skip straight to it."""
+        self._get = get
+        self.board = board or BOARD
+        self._json_hosts: set[str] = set()
+        self.stats = SchemaStats()
+        """Hosts that turned the schema down; later calls skip straight to json_object."""
+
+    @property
+    def base_url(self) -> str:
+        return self.hosts[0].base_url if self.hosts else ""
+
+    @property
+    def model(self) -> str:
+        return self.hosts[0].model if self.hosts else ""
 
     async def _http_post(  # pragma: no cover - real network
         self, url: str, body: dict[str, Any], headers: dict[str, str]
     ) -> tuple[int, dict[str, Any]]:
         import aiohttp
 
-        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        timeout = aiohttp.ClientTimeout(total=self.timeout, connect=PROBE_TIMEOUT,
+                                        sock_connect=PROBE_TIMEOUT)
         async with aiohttp.ClientSession(timeout=timeout) as session, session.post(
             url, json=body, headers=headers
         ) as response:
@@ -273,7 +348,8 @@ class OpenAITranslator:
                 data = {"error": {"message": (await response.text())[:200]}}
             return response.status, data if isinstance(data, dict) else {}
 
-    def _body(self, text: str, now: datetime, tz: tzinfo, *, json_mode: bool) -> dict[str, Any]:
+    def _body(self, host: Host, text: str, now: datetime, tz: tzinfo, *,
+              json_mode: bool) -> dict[str, Any]:
         system = SYSTEM_PROMPT
         if json_mode:
             system += ("\n\nAnswer with one JSON object and nothing else, matching this JSON "
@@ -283,7 +359,7 @@ class OpenAITranslator:
             response_format = {"type": "json_schema", "json_schema": {
                 "name": "query", "strict": True, "schema": wire_schema()}}
         return {
-            "model": self.model,
+            "model": host.model,
             "temperature": 0,
             "response_format": response_format,
             "messages": [
@@ -292,27 +368,52 @@ class OpenAITranslator:
             ],
         }
 
-    async def _ask(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    async def _ask(self, host: Host, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        started = time.perf_counter()
         try:
-            return await self._post(f"{self.base_url}/chat/completions", body, headers)
+            answer = await self._post(f"{host.base_url}/chat/completions", body, self._headers())
         except Exception as exc:
-            raise TranslationError(f"openai: {exc}", key="nl.error.backend",
-                                   backend=self.name, error=type(exc).__name__) from exc
+            # Refused, reset, or no answer in time: the host went away.
+            raise _HostDown(f"{type(exc).__name__}: {exc}"[:120]) from exc
+        self.board.answered(host, time.perf_counter() - started)
+        return answer
 
     async def translate(self, text: str, now: datetime, tz: tzinfo) -> Query | Clarification:
-        if not self.base_url or not self.model:
+        if self.config_error:
+            raise TranslationError(f"openai: {self.config_error}", key="nl.error.backend",
+                                   backend=self.name, error=self.config_error)
+        if not self.hosts or not all(host.model for host in self.hosts):
             raise TranslationError("openai: NL_OPENAI_BASE_URL and NL_OPENAI_MODEL are needed",
                                    key="nl.error.backend", backend=self.name,
                                    error="NL_OPENAI_BASE_URL / NL_OPENAI_MODEL")
-        status, answer = await self._ask(self._body(text, now, tz, json_mode=self.json_mode))
-        if status in (400, 404, 415, 422) and not self.json_mode:
-            log.info("openai backend: the server refused json_schema (HTTP %s); "
-                     "using json_object", status)
-            self.json_mode = True
-            status, answer = await self._ask(self._body(text, now, tz, json_mode=True))
+        for host in self.hosts:
+            if not await self.board.online(host, self._headers(), self._get):
+                continue
+            try:
+                return await self._translate_on(host, text, now, tz)
+            except _HostDown as exc:
+                self.board.offline(host, str(exc))
+        raise TranslationError(
+            "openai: every model host is offline", key="nl.error.offline",
+            hosts=", ".join(host.label for host in self.hosts))
+
+    async def _translate_on(self, host: Host, text: str, now: datetime,
+                            tz: tzinfo) -> Query | Clarification:
+        json_mode = host.base_url in self._json_hosts
+        status, answer = await self._ask(host, self._body(host, text, now, tz,
+                                                          json_mode=json_mode))
+        if status in (400, 404, 415, 422) and not json_mode:
+            log.info("openai backend: %s refused json_schema (HTTP %s); using json_object",
+                     host.label, status)
+            self._json_hosts.add(host.base_url)
+            status, answer = await self._ask(host, self._body(host, text, now, tz,
+                                                              json_mode=True))
         if status >= 400:
             message = str(((answer or {}).get("error") or {}).get("message") or "")[:120]
             raise TranslationError(f"openai: HTTP {status}: {message}", key="nl.error.backend",
@@ -324,7 +425,20 @@ class OpenAITranslator:
         if choice.get("finish_reason") == "length":
             raise TranslationError("openai: answer cut off", key="nl.error.backend",
                                    backend=self.name, error="length")
-        return _parse_answer(str(message.get("content") or ""), self.name)
+        return _parse_answer(str(message.get("content") or ""), self.name, self.stats)
+
+
+class _HostDown(Exception):
+    """A model host stopped answering in the middle of a translation."""
+
+
+def _env_seconds(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, "") or default)
+    except ValueError:
+        log.warning("%s is not a number of seconds; using %s", name, default)
+        return default
+    return value if value > 0 else default
 
 
 class Chain:

@@ -21,6 +21,7 @@ from telethon.errors import (
     AuthKeyDuplicatedError,
     AuthKeyUnregisteredError,
     FloodWaitError,
+    InvalidBufferError,
 )
 from telethon.tl.functions.auth import ExportAuthorizationRequest, ImportAuthorizationRequest
 from telethon.tl.functions.upload import GetFileRequest
@@ -590,3 +591,28 @@ class TestManualEndpoints:
             pass
         assert all(s.connection["proxy"] is None for s in senders.opened)
         assert senders.opened[0].given_key is None
+
+
+class TestABrokenHandshake:
+    """M8 §C1: on the NAS the direct handshake was cut off or answered with
+    HTTP; asyncio.IncompleteReadError escaped and crashed the bench."""
+
+    @pytest.mark.parametrize("error", [
+        asyncio.IncompleteReadError(partial=b"HTTP/1.1 404", expected=64),
+        InvalidBufferError(b"HTTP/1.1 404 Not Found"),
+    ], ids=["incomplete-read", "not-mtproto"])
+    async def test_it_falls_back_to_the_proxy(self, tmp_path, route, senders, proxy_route,
+                                             monkeypatch, error):
+        real_connect = FakeSender.connect
+
+        async def broken(self, connection):
+            if self.auth_key is None:  # the key exchange
+                raise error
+            return await real_connect(self, connection)
+
+        monkeypatch.setattr(FakeSender, "connect", broken)
+        downloader = Downloader(FakeClient(), connections=4, direct=route)
+        path = await downloader.download(big_message(dc_id=4), tmp_path / "f.mkv")
+        assert path.read_bytes()[:1] == b"p"
+        assert downloader.last.route == "proxy" and proxy_route == [4]
+        assert await route.resting(4)  # no retry on every file
