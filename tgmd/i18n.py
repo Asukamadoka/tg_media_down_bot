@@ -954,6 +954,13 @@ CATALOG: dict[str, dict[str, str]] = {
         'verify.live.pikpak_ok': '{source}, {used} of {limit} used',
         'verify.live.pikpak_failed': '{source}: {error}',
         'verify.live.login_ok': '/pikpak login opens the Mini App',
+        'verify.model.online': 'model host {url} ({model}): online{latency}',
+        'verify.model.offline': (
+            'model host {url} ({model}): offline (the Mac or PC is off?){latency}; sentences'
+            ' the rules parser cannot read get a quick "offline" answer'
+        ),
+        'verify.model.latency': ', last answer {ms} ms',
+        'verify.model.bad': 'model hosts: {error}',
         'verify.live.login_none': 'no Mini App ({reason}); /setup pikpak works',
         'verify.live.http_ok': 'serving at {url}',
         'verify.live.no_url': 'no public URL set',
@@ -1771,6 +1778,13 @@ CATALOG: dict[str, dict[str, str]] = {
         'verify.live.pikpak_ok': '{source}，已用 {used} / {limit}',
         'verify.live.pikpak_failed': '{source}：{error}',
         'verify.live.login_ok': '/pikpak login 会打开 Mini App',
+        'verify.model.online': '模型主机 {url}（{model}）：在线{latency}',
+        'verify.model.offline': (
+            '模型主机 {url}（{model}）：离线（Mac/PC 没开机？）{latency}；'
+            '规则解析不了的句子会马上回复「离线」'
+        ),
+        'verify.model.latency': '，上次响应 {ms} 毫秒',
+        'verify.model.bad': '模型主机：{error}',
         'verify.live.login_none': '没有 Mini App（{reason}）；可以用 /setup pikpak',
         'verify.live.http_ok': '服务地址 {url}',
         'verify.live.no_url': '未设置公网地址',

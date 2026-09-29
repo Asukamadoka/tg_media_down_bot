@@ -477,8 +477,13 @@ class JobQueue:
 
         # The cheapest path: a file we have already uploaded once. Only when
         # it is going back through Telegram; `and` short-circuits the await.
+        # A request made in the cache channel gets its copy in the requester's
+        # private chat: the file is in the channel already (M8 §C2).
+        cache_hit_to = (
+            job.user_id if job.chat_id == self._config.delivery.cache_chat_id else job.chat_id
+        )
         if to_telegram and await self._delivery.send_from_cache(
-            job.chat_id, key, caption
+            cache_hit_to, key, caption
         ):
             await reporter.update(
                 t(

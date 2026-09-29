@@ -144,11 +144,23 @@ class TestRequests:
         await handlers.on_message(ChannelPost(MAGNET))
         assert [job.kind for job in queue.jobs] == [JobKind.URL]
 
-    async def test_a_web_address_is_not_a_request(self, config):
+    async def test_a_web_address_goes_to_pikpak(self, config):
+        # M8 §C2 (M7.2 kept them out): every kind of link, as in a DM.
         handlers, _bot, queue = make(config)
-        event = ChannelPost("see https://example.com/page")
+        await handlers.on_message(ChannelPost("see https://example.com/file.mkv"))
+        assert [(job.kind, job.mode) for job in queue.jobs] == [(JobKind.URL, "pikpak")]
+
+    async def test_a_pikpak_share_link_is_restored(self, config):
+        handlers, _bot, queue = make(config)
+        await handlers.on_message(ChannelPost("https://mypikpak.com/s/VOabc123"))
+        assert [job.kind for job in queue.jobs] == [JobKind.SHARE]
+
+    async def test_channel_requests_can_be_turned_off(self, config):
+        config.delivery.channel_requests = False
+        handlers, bot, queue = make(config)
+        event = ChannelPost(LINK)
         await handlers.on_message(event)
-        assert queue.jobs == [] and event.replies == []
+        assert queue.jobs == [] and event.replies == [] and bot.permission_checks == 0
 
     async def test_the_admin_gets_a_short_note(self, config):
         handlers, bot, _queue = make(config)

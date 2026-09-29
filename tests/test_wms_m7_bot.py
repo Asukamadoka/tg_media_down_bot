@@ -423,9 +423,12 @@ def ok(content, finish="stop"):
 
 class TestOpenAIBackend:
     def make(self, server, **kw):
+        async def up(_url, _headers, _timeout):
+            return 200  # M8: every host is asked first whether it is up
+
         return OpenAITranslator(base_url=kw.pop("base_url", "http://lm:1234/v1/"),
                                 model=kw.pop("model", "qwen2.5-7b"),
-                                api_key=kw.pop("api_key", ""), post=server, **kw)
+                                api_key=kw.pop("api_key", ""), post=server, get=up, **kw)
 
     async def test_the_schema_goes_in_response_format(self):
         server = FakeServer(ok(json.dumps(wire())))

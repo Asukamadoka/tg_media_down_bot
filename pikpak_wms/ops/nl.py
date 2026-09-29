@@ -11,6 +11,7 @@ drive goes through :mod:`pikpak_wms.ops.plans` after a person confirms.
 from __future__ import annotations
 
 import contextlib
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -18,13 +19,38 @@ from ..core.errors import NotFoundError
 from ..core.models import render_note
 from ..i18n import t
 from ..nl.compile import Proposal, propose
+from ..nl.hosts import BOARD
 from ..nl.query import TIDY_INTENTS, Clarification, Query
-from ..nl.translator import Translator, from_environment
+from ..nl.translator import OpenAITranslator, Translator, from_environment
 from ..rules.schema import Rule
 from ..rules.units import human_size
 from . import organize, plans, rulesfile, tidy
 from .context import Context
 from .stocktake import stocktake
+
+
+@dataclass
+class ModelHost:
+    """One NL_OPENAI_BASE_URL host, for /verify and ``wms doctor`` (M8 §A5)."""
+
+    url: str
+    model: str
+    online: bool | None
+    latency_ms: float | None
+    error: str = ""
+
+
+async def model_hosts(*, probe: bool = True) -> list[ModelHost]:
+    """Each configured model host, asked whether it is up (cached for a minute)."""
+    translator = OpenAITranslator()
+    reports = []
+    for host in translator.hosts:
+        if probe:
+            await BOARD.online(host, translator._headers())  # noqa: SLF001
+        state = BOARD.state(host)
+        reports.append(ModelHost(host.base_url, host.model, state.online, state.latency_ms,
+                                 state.error))
+    return reports
 
 
 async def understand(

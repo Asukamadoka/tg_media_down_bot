@@ -4,12 +4,17 @@
     python -m pikpak_wms.nl.eval --backend claude     # needs ANTHROPIC_API_KEY
     python -m pikpak_wms.nl.eval --backend ollama     # needs OLLAMA_URL
     python -m pikpak_wms.nl.eval --backend openai     # needs NL_OPENAI_BASE_URL, NL_OPENAI_MODEL
+    python -m pikpak_wms.nl.eval --backend openai --base-url http://<LAN_IP>:11434/v1
 
 For each case the translator either *handles* it (a Query or a question
 back) or declines (``None``: not understood, for another backend). Reported:
 coverage (handled / all), accuracy (right / handled), the wrong ones in
 full, and the mean latency. ``rules`` must reach ≥ 70 % coverage with zero
 wrong; the model backends are for Cowork to measure on the NAS.
+
+For a model it also counts answers outside the schema twice (docs/wms/M8
+§B): as they came, and after the lenient normalizing that forgives "null"
+strings and Quartz cron. ``--base-url`` measures one ``openai`` host alone.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -29,7 +35,7 @@ import yaml
 
 from ..rules.units import parse_moment
 from .query import Clarification, Query
-from .translator import Translator, build
+from .translator import Chain, OpenAITranslator, Translator, build
 
 DEFAULT_CASES = Path("tests/nl/cases.yaml")
 
@@ -72,6 +78,8 @@ class Report:
     declined: list[str] = field(default_factory=list)
     errors: list[dict[str, str]] = field(default_factory=list)
     seconds: list[float] = field(default_factory=list)
+    invalid_before: int = 0
+    invalid_after: int = 0
 
     @property
     def handled(self) -> int:
@@ -89,6 +97,8 @@ class Report:
             "errors": len(self.errors),
             "mean_latency_ms": round(1000 * sum(self.seconds) / len(self.seconds), 1)
             if self.seconds else 0,
+            "schema_invalid_as_answered": self.invalid_before,
+            "schema_invalid_after_normalizing": self.invalid_after,
         }
 
 
@@ -120,7 +130,25 @@ async def evaluate(translator: Translator, cases_file: Path = DEFAULT_CASES) -> 
             })
         else:
             report.declined.append(case["text"])
+    for inner in getattr(translator, "translators", [translator]):
+        stats = getattr(inner, "stats", None)
+        if stats is not None:
+            report.invalid_before += stats.invalid_before
+            report.invalid_after += stats.invalid_after
     return report
+
+
+def model_for(base_url: str) -> str:
+    """The model NL_OPENAI_MODEL gives this host: its own when NL_OPENAI_BASE_URL
+    lists it, otherwise the first (or only) one."""
+    urls = [u.strip().rstrip("/") for u in os.environ.get("NL_OPENAI_BASE_URL", "").split(",")]
+    models = [m.strip() for m in os.environ.get("NL_OPENAI_MODEL", "").split(",") if m.strip()]
+    if not models:
+        return ""
+    wanted = base_url.strip().rstrip("/")
+    if len(models) == len(urls) and wanted in urls:
+        return models[urls.index(wanted)]
+    return models[0]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -129,9 +157,17 @@ def main(argv: list[str] | None = None) -> int:
                         default="rules")
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES)
     parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--base-url", default=None,
+                        help="openai only: measure this one host, e.g. http://<LAN_IP>:11434/v1")
     args = parser.parse_args(argv)
 
-    translator = build(args.backend, "none", rules_first=args.backend == "rules")
+    if args.base_url and args.backend != "openai":
+        parser.error("--base-url goes with --backend openai")
+    if args.base_url:
+        translator: Translator = Chain([OpenAITranslator(
+            base_url=args.base_url, model=model_for(args.base_url))])
+    else:
+        translator = build(args.backend, "none", rules_first=args.backend == "rules")
     report = asyncio.run(evaluate(translator, args.cases))
     summary = report.summary()
     if args.json:

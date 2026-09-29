@@ -218,6 +218,48 @@ def wire_schema() -> dict[str, Any]:
     return copy.deepcopy(WIRE_SCHEMA)
 
 
+_NULLISH = frozenset({"null", "none", ""})
+
+
+def quartz_to_cron(expression: str) -> str:
+    """A Quartz expression (6 or 7 fields: seconds first, an optional year
+    last) as five-field cron; ``?`` ("no specific value") becomes ``*``."""
+    fields = expression.split()
+    if len(fields) in (6, 7):
+        fields = fields[1:6]
+    return " ".join("*" if field == "?" else field for field in fields)
+
+
+def normalize_wire(data: Any) -> Any:
+    """Forgive what small models get wrong before the schema is checked
+    (docs/wms/M8 §B): the strings "null", "none" and "" mean null, and a
+    Quartz cron becomes five-field cron. Anything still wrong after this
+    fails validation as before."""
+    if not isinstance(data, dict):
+        return data
+
+    def scalar(value: Any) -> Any:
+        if isinstance(value, str) and value.strip().lower() in _NULLISH:
+            return None
+        return value
+
+    cleaned: dict[str, Any] = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            value = {k: scalar(v) for k, v in value.items()}
+        else:
+            value = scalar(value)
+        cleaned[key] = value
+    schedule = cleaned.get("schedule")
+    if isinstance(schedule, dict):
+        cron = schedule.get("cron")
+        if cron is None:
+            cleaned["schedule"] = None
+        elif isinstance(cron, str):
+            cleaned["schedule"] = {**schedule, "cron": quartz_to_cron(cron.strip())}
+    return cleaned
+
+
 def from_wire(data: dict[str, Any]) -> Query:
     """A model's answer → Query; nulls mean "not set"."""
     cleaned = copy.deepcopy(data)
