@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import copy
 import re
+from datetime import datetime, timedelta, tzinfo
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -122,6 +124,9 @@ class Query(_Strict):
     action_args: ActionArgs = Field(default_factory=ActionArgs)
     schedule: Schedule | None = None
     needs_clarification: str | None = None
+    corrections: list[str] = Field(default_factory=list, exclude=True)
+    """Catalogue keys of what was put right after the model answered (the time
+    direction, M8.2 §C), shown in the plan. Not part of the wire format."""
 
     @model_validator(mode="after")
     def _schedule_needs_an_action(self) -> Query:
@@ -220,6 +225,78 @@ def wire_schema() -> dict[str, Any]:
 
 _NULLISH = frozenset({"null", "none", ""})
 
+DEFAULT_TZ = "Asia/Shanghai"
+
+# Words a model puts where a time belongs. Each stands for the START of the
+# period it names, in the configured time zone: 「今天」 is today 00:00,
+# 「本月」 the 1st, 「去年」 January 1st of last year. As an upper bound the same
+# value reads "before that period began".
+_PERIODS: dict[str, str] = {
+    **dict.fromkeys(("today", "今天", "今日"), "today"),
+    **dict.fromkeys(("yesterday", "昨天", "昨日"), "yesterday"),
+    **dict.fromkeys(("tomorrow", "明天", "明日"), "tomorrow"),
+    **dict.fromkeys(("this week", "本周", "这周", "这个星期", "本星期"), "week"),
+    **dict.fromkeys(("last week", "上周", "上个星期", "上星期"), "last_week"),
+    **dict.fromkeys(("this month", "本月", "这个月", "当月"), "month"),
+    **dict.fromkeys(("last month", "上个月", "上月"), "last_month"),
+    **dict.fromkeys(("this year", "今年", "本年"), "year"),
+    **dict.fromkeys(("last year", "去年"), "last_year"),
+}
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_NAIVE_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?$")
+_MONTHS_YEARS = re.compile(r"^(\d+(?:\.\d+)?)\s*([my])$", re.IGNORECASE)
+
+
+def period_start(word: str, now: datetime, tz: tzinfo) -> datetime | None:
+    """The start of the period ``word`` names (``today``, ``本周`` …), or None."""
+    name = _PERIODS.get(word.strip().lower())
+    if name is None:
+        return None
+    today = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    if name == "today":
+        return today
+    if name == "yesterday":
+        return today - timedelta(days=1)
+    if name == "tomorrow":
+        return today + timedelta(days=1)
+    if name == "week":
+        return today - timedelta(days=today.weekday())
+    if name == "last_week":
+        return today - timedelta(days=today.weekday() + 7)
+    month = today.replace(day=1)
+    if name == "month":
+        return month
+    if name == "last_month":
+        return (month - timedelta(days=1)).replace(day=1)
+    year = today.replace(month=1, day=1)
+    return year if name == "year" else year.replace(year=year.year - 1)
+
+
+def normalize_time(value: Any, now: datetime, tz: tzinfo) -> Any:
+    """One ``created_after`` / ``created_before`` value made to fit.
+
+    A period word becomes that period's start as an ISO time; a bare date,
+    or a time without an offset, is read in ``tz``; a month or year count
+    (``1m``, ``1y``, which the prompt says to write as days) becomes days.
+    Anything else is left for the schema to judge.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    moment = period_start(text, now, tz)
+    if moment is not None:
+        return moment.isoformat(timespec="seconds")
+    if _DATE_ONLY.match(text):
+        return datetime.fromisoformat(text).replace(tzinfo=tz).isoformat(timespec="seconds")
+    if _NAIVE_DATETIME.match(text):
+        return (datetime.fromisoformat(text.replace(" ", "T")).replace(tzinfo=tz)
+                .isoformat(timespec="seconds"))
+    found = _MONTHS_YEARS.match(text)
+    if found:
+        amount = float(found.group(1)) * (30 if found.group(2).lower() == "m" else 365)
+        return f"{int(amount)}d"
+    return text
+
 
 def quartz_to_cron(expression: str) -> str:
     """A Quartz expression (6 or 7 fields: seconds first, an optional year
@@ -230,13 +307,36 @@ def quartz_to_cron(expression: str) -> str:
     return " ".join("*" if field == "?" else field for field in fields)
 
 
-def normalize_wire(data: Any) -> Any:
+# Intents for which a destination means nothing: a model fills it in anyway
+# (/Trash, /Recycle Bin) and the plan would show a place nothing goes to.
+_NO_DESTINATION = frozenset({"trash", "list", "dedupe", "organize_tree", "organize_inbox",
+                             "big_report"})
+
+
+def _category_extensions(kinds: list[Any]) -> set[str]:
+    return {ext for kind in kinds if kind in CATEGORIES for ext in CATEGORIES[kind][1]}
+
+
+def normalize_wire(data: Any, *, now: datetime | None = None,
+                   tz: tzinfo | None = None) -> Any:
     """Forgive what small models get wrong before the schema is checked
-    (docs/wms/M8 §B): the strings "null", "none" and "" mean null, and a
-    Quartz cron becomes five-field cron. Anything still wrong after this
-    fails validation as before."""
+    (docs/wms/M8 §B, M8.1 §C, M8.2 §B). What it does:
+
+    * the strings "null", "none" and "" mean null;
+    * a Quartz cron becomes five-field cron;
+    * ``min_size`` / ``max_size`` of 0 mean no limit (``max_size: 0`` would
+      otherwise keep only empty files);
+    * times: period words, bare dates, and ``1m`` / ``1y`` (:func:`normalize_time`);
+    * no destination for intents that have none;
+    * ``extensions`` that all belong to the given ``kinds`` are dropped, so a
+      format the list forgot (``ass``, ``m2ts``) is not lost.
+
+    Anything still wrong after this fails validation as before.
+    """
     if not isinstance(data, dict):
         return data
+    zone = tz or ZoneInfo(DEFAULT_TZ)
+    instant = now or datetime.now(zone)
 
     def scalar(value: Any) -> Any:
         if isinstance(value, str) and value.strip().lower() in _NULLISH:
@@ -250,6 +350,7 @@ def normalize_wire(data: Any) -> Any:
         else:
             value = scalar(value)
         cleaned[key] = value
+
     schedule = cleaned.get("schedule")
     if isinstance(schedule, dict):
         cron = schedule.get("cron")
@@ -257,6 +358,23 @@ def normalize_wire(data: Any) -> Any:
             cleaned["schedule"] = None
         elif isinstance(cron, str):
             cleaned["schedule"] = {**schedule, "cron": quartz_to_cron(cron.strip())}
+
+    filters = cleaned.get("filters")
+    if isinstance(filters, dict):
+        for field in ("min_size", "max_size"):
+            if filters.get(field) == 0 and not isinstance(filters.get(field), bool):
+                filters[field] = None
+        for field in ("created_after", "created_before"):
+            filters[field] = normalize_time(filters.get(field), instant, zone)
+        kinds, extensions = filters.get("kinds"), filters.get("extensions")
+        if isinstance(kinds, list) and kinds and isinstance(extensions, list) and extensions:
+            covered = _category_extensions(kinds)
+            if all(isinstance(e, str) and e.lower().lstrip(".") in covered for e in extensions):
+                filters["extensions"] = []
+
+    args = cleaned.get("action_args")
+    if isinstance(args, dict) and cleaned.get("intent") in _NO_DESTINATION:
+        args["dest"] = None
     return cleaned
 
 

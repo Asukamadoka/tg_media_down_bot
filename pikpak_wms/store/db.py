@@ -136,6 +136,13 @@ class Store:
             nodes = [n for n in nodes if n.path.count("/") == depth + 1]
         return nodes
 
+    async def created_times(self) -> list[str]:
+        """When each file (not folder) arrived in the drive, as recorded."""
+        rows = await self._read(
+            "SELECT created_time FROM files WHERE kind != 'folder' AND created_time IS NOT NULL"
+        )
+        return [row["created_time"] for row in rows]
+
     async def count_files(self) -> int:
         rows = await self._read("SELECT COUNT(*) AS n FROM files")
         return int(rows[0]["n"])

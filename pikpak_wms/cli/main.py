@@ -25,8 +25,8 @@ from ..core.auth import StandaloneAuth, read_token
 from ..core.errors import WmsError
 from ..core.models import ActionType, Plan
 from ..i18n import t
+from ..ops import eventsync, listing, organize, plans, protect, tidy
 from ..ops import inbound as inbound_ops
-from ..ops import listing, organize, plans, protect, tidy
 from ..ops import outbound as outbound_ops
 from ..ops import stocktake as stocktake_ops
 from ..ops.context import Context, open_context
@@ -470,9 +470,10 @@ def inbound(
 def _tidy_command(build, *, apply_now: bool, limit: int | None, as_json: bool,
                   sample: int, prefix: str) -> None:
     async def work(ctx: Context):
-        await stocktake_ops.stocktake(ctx.client, ctx.store, roots=ctx.config.stocktake.roots,
-                                      full=False, page_size=ctx.config.stocktake.page_size)
+        await eventsync.refresh_index(ctx, allow_full=False)
         planned = await build(ctx)
+        if prefix == tidy.INBOX:
+            await eventsync.note_freshness(ctx, planned)
         if sample:
             # A spot check stores nothing, but shows exactly what would be
             # stored: the whitelist still applies.
@@ -564,8 +565,7 @@ def organize_inbox_command(
 def big_command(scope: str = typer.Option("/", "--scope", help="where to look")) -> None:
     """The biggest files and folders, and big files unchanged for long (never deletes)."""
     async def work(ctx):
-        await stocktake_ops.stocktake(ctx.client, ctx.store, roots=ctx.config.stocktake.roots,
-                                      full=False, page_size=ctx.config.stocktake.page_size)
+        await eventsync.refresh_index(ctx, allow_full=False)
         return await tidy.big_report(ctx, scope=scope)
 
     for line in _run(work).lines():

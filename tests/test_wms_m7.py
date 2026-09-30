@@ -529,8 +529,10 @@ class TestJobs:
         assert dedupe.enabled is False
         assert Config.model_validate({"schedule": {"builtin": False}}).schedule.effective_jobs() \
             == []
+        # M8.1 added the ten-minute stocktake (the event feed).
         assert {job.name for job in BUILTIN_JOBS} == {
-            "organize-inbox", "organize-tree", "dedupe", "big-report"}
+            "organize-inbox", "organize-tree", "dedupe", "big-report", "stocktake"}
+        assert by_name["stocktake"].cron == "*/10 * * * *"
 
     async def test_organize_tree_makes_one_plan_per_folder_and_retires_stale_ones(self, world):
         world.drive.add("/A/a1.mov", size=1)

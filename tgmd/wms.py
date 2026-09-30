@@ -284,6 +284,8 @@ class WmsInBot:
 
     async def _job_message(self, result: Any) -> tuple[str, Any] | None:
         name = escape_html(result.name)
+        if getattr(result, "alert", ""):
+            return escape_html(result.alert), None
         if getattr(result, "big", None) is not None:
             return report_message(result.big)
         many = list(getattr(result, "plan_ids", []) or [])

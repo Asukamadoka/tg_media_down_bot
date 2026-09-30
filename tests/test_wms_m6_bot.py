@@ -154,8 +154,14 @@ class TestDo:
 
     async def test_not_understood(self, bot):
         handlers, *_ = bot
-        event = await send(handlers, "今天天气怎么样")
+        event = await send(handlers, "帮我想想这周该看点什么")
         assert event.replies[0][0].startswith("没听懂")
+
+    async def test_small_talk_is_answered_by_the_rules_not_handed_to_a_model(self, bot):
+        # M8.2 §D: chit-chat used to fall through to "not understood".
+        handlers, *_ = bot
+        event = await send(handlers, "今天天气怎么样")
+        assert "我只处理网盘里的文件指令" in event.replies[0][0]
 
 
 class TestConversation:

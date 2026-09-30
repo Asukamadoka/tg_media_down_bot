@@ -7,6 +7,12 @@ short timeout. Any HTTP answer means the host is up; no answer means it is
 off. Both verdicts are remembered for :data:`TTL` seconds, so an offline host
 costs one short timeout a minute, not one per sentence.
 
+One missed answer is not yet "off" (docs/wms/M8.2 §E): a probe that fails is
+repeated at once, and a host is written off only after two failures in a row;
+a generation that fails is followed by an immediate probe, and the sentence is
+tried once more if the host answers it. A single hiccup therefore no longer
+costs every request of the next minute.
+
 The verdicts live in :data:`BOARD`, one per process: the bot builds a new
 translator for every sentence, and the memory has to outlast it. ``/verify``
 and ``wms doctor`` read the same board.
@@ -26,6 +32,9 @@ TTL = 60.0
 
 PROBE_TIMEOUT = 1.5
 """For ``GET /models``, and for connecting before a translation."""
+
+PROBE_ATTEMPTS = 2
+"""Probes in a row that must fail before a host counts as offline."""
 
 Get = Callable[[str, dict[str, str], float], Awaitable[int]]
 """(url, headers, timeout) → HTTP status; raises when nothing answers."""
@@ -102,18 +111,28 @@ class HostBoard:
         state = self.state(host)
         return state.online is not None and self.clock() - state.checked_at < self.ttl
 
-    async def online(self, host: Host, headers: dict[str, str], get: Get | None = None) -> bool:
-        """Whether ``host`` answers, asking it at most once per :data:`TTL`."""
+    async def online(self, host: Host, headers: dict[str, str], get: Get | None = None, *,
+                     force: bool = False) -> bool:
+        """Whether ``host`` answers, asking it at most once per :data:`TTL`.
+
+        Two failed probes in a row make it offline. ``force`` asks again now
+        whatever was remembered, and counts one failed probe as enough: the
+        caller has just seen a generation fail, which is the first failure.
+        """
         state = self.state(host)
-        if self.fresh(host):
+        if not force and self.fresh(host):
             return bool(state.online)
-        try:
-            await (get or _http_get)(f"{host.base_url}/models", headers, PROBE_TIMEOUT)
-        except Exception as exc:  # noqa: BLE001 - no answer at all is the point
-            self.offline(host, f"{type(exc).__name__}: {exc}"[:120])
-            return False
-        state.online, state.checked_at, state.error = True, self.clock(), ""
-        return True
+        why = ""
+        for _attempt in range(1 if force else PROBE_ATTEMPTS):
+            try:
+                await (get or _http_get)(f"{host.base_url}/models", headers, PROBE_TIMEOUT)
+            except Exception as exc:  # noqa: BLE001 - no answer at all is the point
+                why = f"{type(exc).__name__}: {exc}"[:120]
+                continue
+            state.online, state.checked_at, state.error = True, self.clock(), ""
+            return True
+        self.offline(host, why)
+        return False
 
     def offline(self, host: Host, why: str) -> None:
         state = self.state(host)

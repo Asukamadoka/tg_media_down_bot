@@ -162,13 +162,12 @@ class EmbeddedWms:
 
     async def organize_scope(self, scope: str) -> Any:
         """organize-tree for one top-level folder, planned only (/wms organize tree /A)."""
+        from .eventsync import refresh_index
         from .jobs import JobResult
-        from .stocktake import stocktake
 
         ctx = self._live
         async with self._scheduler.lock:
-            await stocktake(ctx.client, ctx.store, roots=ctx.config.stocktake.roots,
-                            full=False, page_size=ctx.config.stocktake.page_size)
+            await refresh_index(ctx, allow_full=False)
             planned = await tidy.organize_tree(ctx, scope=scope)
             ids = [pid for pid in [await plans.save(ctx, p) for p in planned] if pid]
         result = JobResult(tidy.TREE, t("job.nothing", name=tidy.TREE),

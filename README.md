@@ -281,6 +281,17 @@ docker compose run --rm bot wms audit          # every change, with what it was 
 docker compose run --rm bot wms undo 7 --apply # put one back
 ```
 
+The local index is kept current from PikPak's event feed, every ten minutes
+(docs/wms/M8.1): PikPak does not touch a folder's `modified_time` when a file
+is restored into it, so scanning only the folders whose time moved missed
+everything transferred in during the day. A question about when files
+arrived, or about the entry folders, reads the feed first and says when the
+index was last updated; when it finds nothing it also says how many files
+arrived today and yesterday, so a wrong condition can be told from a stale
+index. If the feed cannot be trusted (a lost cursor, an error), a full
+stocktake runs instead and the admins are told. `stocktake.events: false`
+in `wms.yaml` goes back to the old way.
+
 Every write is a dry run until you say `--apply`; deleting only ever moves to
 the trash (permanent deletion needs a config switch *and* a flag, and no
 scheduled job can do it). Rules and settings go in `/data/db/rules.yaml` and
@@ -355,8 +366,16 @@ rules parser answers what it can and the rest gets an immediate "model hosts
 offline" instead of a wait (`NL_OPENAI_TIMEOUT`, default 60 s, bounds a
 generation). `/verify` and `wms doctor` show each host, its model and the
 last answer's latency. Small models' habits are forgiven before the answer is
-checked: the string `"null"` means null, and a Quartz cron becomes five-field
-cron. 「整理一下 Pack From Shared」「把大文件单独放一起」
+checked: the string `"null"` means null, a Quartz cron becomes five-field
+cron, a size of 0 means no limit, `today` / `本周` / `上个月` become dates, a
+destination is dropped where the intent has none, and extensions the given
+kinds already cover are dropped. The time condition a model returns is also
+checked against the words of the sentence (「超过 7 天」 is older than, 「最近
+7 天」 within), corrected when it points the wrong way, and a plan that
+trashes files starts with the time in plain words. Greetings, questions about
+free space and 「清空回收站」 are answered by the rules and never reach a
+model; `python -m pikpak_wms.nl.eval` scores by meaning (`right`,
+`equivalent`, `wrong`, and `dangerous`). 「整理一下 Pack From Shared」「把大文件单独放一起」
 「去重」「看看最大的文件」 start the jobs above.
 
 **Privacy.** The parser runs on your machine. When a model is used, it is sent

@@ -665,7 +665,11 @@ class TestCommandLine:
     def test_events_raw_prints_pikpaks_answer(self, cli_world):
         result = invoke("events", "--raw", "--limit", "5")
         assert result.exit_code == 0
-        assert json.loads(result.output) == {"events": [], "next_page_token": ""}
+        raw = json.loads(result.output)
+        # The fake drive's feed now records its own changes (M8.1): whatever
+        # it holds comes back untouched, newest first, at most --limit of them.
+        assert raw["events"] == [dict(e) for e in reversed(cli_world.feed)][:5]
+        assert "next_page_token" in raw
 
     def test_inbound_is_a_dry_run_until_asked(self, cli_world):
         result = invoke("inbound", "magnet:?xt=urn:btih:abc")
