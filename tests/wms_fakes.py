@@ -7,6 +7,12 @@ call is counted, so tests can assert how many requests an operation cost.
 ``propagate`` decides whether a change inside a folder also touches the
 ``modified_time`` of every folder above it. Incremental stocktake relies on
 that; the tests run it both ways.
+
+Every change also lands in an event feed (``GET /drive/v1/events``): newest
+first, paged, each event naming the file it is about. The shape is what the
+M8.1 brief reports (``TYPE_RESTORE`` and friends); the fields beyond the type
+are a best guess until a real ``wms events --raw`` sample says otherwise.
+``feed = False`` silences it.
 """
 
 from __future__ import annotations
@@ -35,12 +41,26 @@ class FakeDrive:
         self.shares: list[dict[str, Any]] = []
         """What ``GET /drive/v1/share/list`` returns, one dict per share."""
         self.share_page = 100
+        self.feed: list[dict[str, Any]] = []
+        """Events, oldest first; ``events()`` answers newest first."""
+        self.emit = True
+        self.cursor_expired = False
 
     # ------------------------------------------------------------ building
 
     def _tick(self) -> str:
         self._clock += timedelta(seconds=1)
         return self._clock.isoformat()
+
+    def emit_event(self, kind: str, item_id: str) -> None:
+        if not self.emit:
+            return
+        item = self.items.get(item_id)
+        self.feed.append({
+            "kind": "drive#event", "id": f"ev{len(self.feed) + 1}", "type": kind,
+            "file_id": item_id, "file_name": item["name"] if item else "",
+            "created_time": self._tick(),
+        })
 
     def _touch(self, folder_id: str) -> None:
         stamp = self._tick()
@@ -60,8 +80,15 @@ class FakeDrive:
         mime: str = "",
         hash: str = "",
         created: str | None = None,
+        touch: bool = True,
+        event: str | None = None,
     ) -> str:
-        """Create ``path`` (and any missing parents); return its id."""
+        """Create ``path`` (and any missing parents); return its id.
+
+        ``touch=False`` leaves the parent's ``modified_time`` alone, as PikPak
+        does when something is restored into an existing folder (M8.1).
+        ``event`` names the event type the new item gets in the feed.
+        """
         parts = [p for p in path.split("/") if p]
         parent = ""
         for index, name in enumerate(parts):
@@ -85,8 +112,9 @@ class FakeDrive:
                 "modified_time": stamp,
                 "trashed": False,
             }
-            if parent:
+            if parent and touch:
                 self._touch(parent)
+            self.emit_event(event or ("TYPE_CREATE" if is_folder else "TYPE_UPLOAD"), item_id)
             parent = item_id
         return parent
 
@@ -178,6 +206,7 @@ class FakeDrive:
         self.items[id]["name"] = new_file_name
         if self.items[id]["parent_id"]:
             self._touch(self.items[id]["parent_id"])
+        self.emit_event("TYPE_RENAME", id)
         return dict(self.items[id])
 
     async def file_batch_move(self, ids, to_parent_id=None):
@@ -186,6 +215,7 @@ class FakeDrive:
         for item_id in ids:
             old_parent = self.items[item_id]["parent_id"]
             self.items[item_id]["parent_id"] = target
+            self.emit_event("TYPE_MOVE", item_id)
             if old_parent:
                 self._touch(old_parent)
         if target:
@@ -205,6 +235,7 @@ class FakeDrive:
         self._record("delete_to_trash")
         for item_id in ids:
             self.items[item_id]["trashed"] = True
+            self.emit_event("TYPE_TRASH", item_id)
             if self.items[item_id]["parent_id"]:
                 self._touch(self.items[item_id]["parent_id"])
         return {}
@@ -213,6 +244,7 @@ class FakeDrive:
         self._record("untrash")
         for item_id in ids:
             self.items[item_id]["trashed"] = False
+            self.emit_event("TYPE_RESTORE", item_id)
             if self.items[item_id]["parent_id"]:
                 self._touch(self.items[item_id]["parent_id"])
         return {}
@@ -220,6 +252,7 @@ class FakeDrive:
     async def delete_forever(self, ids):
         self._record("delete_forever")
         for item_id in ids:
+            self.emit_event("TYPE_DELETE", item_id)
             self.items.pop(item_id, None)
         return {}
 
@@ -282,7 +315,21 @@ class FakeDrive:
 
     async def events(self, size=100, next_page_token=None):
         self._record("events")
-        return {"events": [], "next_page_token": ""}
+        if self.cursor_expired and next_page_token:
+            raise PikpakException("invalid page token")
+        newest_first = list(reversed(self.feed))
+        start = int(next_page_token or 0)
+        page = newest_first[start : start + min(size, self.page_size_cap)]
+        after = start + len(page)
+        return {"events": [dict(e) for e in page],
+                "next_page_token": str(after) if after < len(newest_first) else ""}
+
+    async def offline_file_info(self, file_id):
+        """``GET /drive/v1/files/<id>``: one file, trashed or not."""
+        self._record("file_info")
+        if file_id not in self.items:
+            raise PikpakException("file not found (404)")
+        return dict(self.items[file_id], phase="PHASE_TYPE_COMPLETE")
 
 
 def provider_for(drive: FakeDrive):

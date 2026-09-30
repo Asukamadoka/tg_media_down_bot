@@ -8,6 +8,10 @@
 # 判分：rules 后端返回「不接」（None）不算错，算「未覆盖」，交给模型后端；
 # 覆盖率 = 接了的 / 总数（要求 ≥ 70%），接了的必须全对（要求零错误）。
 # 约定：1GB = 1024³ 字节；「最近 N 个月」= N×30 天；日期是整天，按下面的时区。
+# 日期模板（docs/wms/M8.2 §A2）：相对「现在」的日期写成 {today} {yesterday} {tomorrow}
+# {week_start} {last_week_start} {month_start} {last_month_start} {year_start}
+# {last_year_start}，以及 {year} {month} {mm}；运行评测时按 --now 展开（见 nl/eval.py）。
+# 写明年月日的句子（2026年9月20日）不是相对「现在」的，保持原样。
 now: "2026-09-24T12:00:00+08:00"
 timezone: Asia/Shanghai
 
@@ -16,25 +20,25 @@ cases:
   - text: 下载今天转存到网盘的所有大于1GB的视频
     expect:
       intent: download
-      filters: {created_after: "2026-09-24T00:00:00+08:00", min_size: 1073741824, kinds: [video]}
+      filters: {created_after: "{today}", min_size: 1073741824, kinds: [video]}
 
   # ---------------- 定向下载 ----------------
   - text: 把昨天入库的mkv下载到NAS
     expect:
       intent: download
-      filters: {created_after: "2026-09-23T00:00:00+08:00", created_before: "2026-09-24T00:00:00+08:00", extensions: [mkv]}
+      filters: {created_after: "{yesterday}", created_before: "{today}", extensions: [mkv]}
   - text: 下载最近三天转存的图片
     expect:
       intent: download
       filters: {created_after: "3d", kinds: [image]}
-  - text: 下载9月1日到9月10日入库的mp4
+  - text: 下载{month}月1日到{month}月10日入库的mp4
     expect:
       intent: download
-      filters: {created_after: "2026-09-01T00:00:00+08:00", created_before: "2026-09-11T00:00:00+08:00", extensions: [mp4]}
+      filters: {created_after: "{year}-{mm}-01T00:00:00+08:00", created_before: "{year}-{mm}-11T00:00:00+08:00", extensions: [mp4]}
   - text: 上个月入库的电子书下载到NAS
     expect:
       intent: download
-      filters: {created_after: "2026-08-01T00:00:00+08:00", created_before: "2026-09-01T00:00:00+08:00", kinds: [document]}
+      filters: {created_after: "{last_month_start}", created_before: "{month_start}", kinds: [document]}
   - text: 把/Media/电影里大于10GB的视频下载到本地
     expect:
       intent: download
@@ -43,7 +47,7 @@ cases:
   - text: 帮我下载本周转存的音乐
     expect:
       intent: download
-      filters: {created_after: "2026-09-21T00:00:00+08:00", kinds: [audio]}
+      filters: {created_after: "{week_start}", kinds: [audio]}
   - text: 下载名字包含「权力的游戏」的视频
     expect:
       intent: download
@@ -55,7 +59,7 @@ cases:
   - text: 把今天的压缩包都下载下来
     expect:
       intent: download
-      filters: {created_after: "2026-09-24T00:00:00+08:00", kinds: [archive]}
+      filters: {created_after: "{today}", kinds: [archive]}
 
   # ---------------- 移动 ----------------
   - text: 把最近7天的mkv文件移到/Media/电影
@@ -72,7 +76,7 @@ cases:
   - text: 把本周转存的音乐移到/Media/音乐
     expect:
       intent: move
-      filters: {created_after: "2026-09-21T00:00:00+08:00", kinds: [audio]}
+      filters: {created_after: "{week_start}", kinds: [audio]}
       action_args: {dest: /Media/音乐}
   - text: 把/Inbox里的字幕挪到/Media/字幕
     expect:
@@ -99,7 +103,7 @@ cases:
   - text: 按类型整理今天转存的文件
     expect:
       intent: classify
-      filters: {created_after: "2026-09-24T00:00:00+08:00"}
+      filters: {created_after: "{today}"}
   - text: 把最近一周的图片和视频分类
     expect:
       intent: classify
@@ -123,7 +127,7 @@ cases:
   - text: 把去年入库的照片归档
     expect:
       intent: archive
-      filters: {created_after: "2025-01-01T00:00:00+08:00", created_before: "2026-01-01T00:00:00+08:00", kinds: [image]}
+      filters: {created_after: "{last_year_start}", created_before: "{year_start}", kinds: [image]}
   - text: 把2026年1月1日之前的文件归档
     expect:
       intent: archive
@@ -162,7 +166,7 @@ cases:
   - text: 列出昨天下载的图片
     expect:
       intent: list
-      filters: {created_after: "2026-09-23T00:00:00+08:00", created_before: "2026-09-24T00:00:00+08:00", kinds: [image]}
+      filters: {created_after: "{yesterday}", created_before: "{today}", kinds: [image]}
   - text: 找出大于5GB的文件
     expect:
       intent: list
@@ -170,7 +174,7 @@ cases:
   - text: 今天离线下载的视频有哪些
     expect:
       intent: list
-      filters: {created_after: "2026-09-24T00:00:00+08:00", kinds: [video]}
+      filters: {created_after: "{today}", kinds: [video]}
   - text: 在1GB到4GB之间的视频有哪些
     expect:
       intent: list
@@ -187,7 +191,7 @@ cases:
   - text: 统计一下本月入库的视频
     expect:
       intent: list
-      filters: {created_after: "2026-09-01T00:00:00+08:00", kinds: [video]}
+      filters: {created_after: "{month_start}", kinds: [video]}
 
   # ---------------- 重命名 ----------------
   - text: 把/Inbox里的视频重命名为「{stem|title}.{ext}」
@@ -290,7 +294,7 @@ cases:
   - text: 删除今天和昨天的视频
     expect:           # rules 不接（两个时间）；模型可合并为「昨天零点以来」
       intent: trash
-      filters: {created_after: "2026-09-23T00:00:00+08:00", kinds: [video]}
+      filters: {created_after: "{yesterday}", kinds: [video]}
   - text: 把视频从/Inbox移到/Media
     expect:
       intent: move

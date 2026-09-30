@@ -127,12 +127,49 @@ CATALOG: dict[str, dict[str, str]] = {
         "nl.explain.dest_classify": "Sorted into: {pairs}",
         "nl.explain.rename": "Renamed with the template {template}",
         "nl.explain.trash": "Into the recycle bin only; it can be restored",
+        "nl.explain.direction_fixed": "Time direction put right to match your wording",
+        "nl.explain.plain_older_span": "Created {span} ago or longer (earlier than {when})",
+        "nl.explain.plain_newer_span": "Created within the last {span} (since {when})",
+        "nl.explain.plain_older_time": "Created before {when}",
+        "nl.explain.plain_newer_time": "Created after {when}",
+        "nl.explain.plain_between": "Created between {a} and {b}",
         "nl.explain.schedule": (
             "Runs on the schedule {cron} ({tz}); each run makes a plan for you to confirm"
         ),
         "nl.explain.matched": "Matches {count} file(s), {size} in all",
         "nl.explain.none": "Nothing matches right now",
+        "nl.explain.none_diagnosis": (
+            "By arrival in the drive: {today} file(s) today, {yesterday} yesterday"
+        ),
+        "events.sync": (
+            "Index synced from the event feed: {events} new event(s), {files} file(s) looked at,"
+            " {upserted} written, {removed} removed, {folders} folder(s) listed,"
+            " {requests} request(s), {seconds}s"
+        ),
+        "events.fallback": "The event feed could not be trusted ({reason}); a stocktake follows",
+        "events.alert": (
+            "The index could not be kept current from PikPak's event feed ({reason}), so a"
+            " stocktake was run instead. If this keeps happening, look at `wms events --raw`."
+        ),
+        "sync.updated": "Index updated at {time} ({kind})",
+        "sync.unknown": "When the index was last updated is unknown",
+        "sync.kind.events": "event sync",
+        "sync.kind.incremental": "incremental stocktake",
+        "sync.kind.full": "full stocktake",
         "nl.explain.examples": "For example: {names}",
+        "nl.ask.chat": (
+            "I only take instructions about the files in your PikPak drive: download, move,"
+            " rename, sort, archive, recycle, list, tidy. Tell me what to do with which files."
+        ),
+        "nl.ask.quota": "Asking how much drive space is left is not supported yet.",
+        "nl.ask.empty_trash": (
+            "Please empty the recycle bin in PikPak yourself: emptying it deletes for good,"
+            " which this bot never does."
+        ),
+        "nl.ask.time_direction": (
+            "I could not tell which way the time goes: files from the last N days, or older"
+            " than N days?"
+        ),
         "nl.ask.forever": (
             "Permanent deletion cannot be done from a sentence; the recycle bin is as far as "
             "this goes. Say “delete …” to move files to the recycle bin."
@@ -452,10 +489,40 @@ CATALOG: dict[str, dict[str, str]] = {
         "nl.explain.dest_classify": "分到：{pairs}",
         "nl.explain.rename": "按模板 {template} 重命名",
         "nl.explain.trash": "只放进回收站，可以还原",
+        "nl.explain.direction_fixed": "已按原句更正时间方向",
+        "nl.explain.plain_older_span": "创建于 {span}以前（早于 {when}）",
+        "nl.explain.plain_newer_span": "最近 {span}内创建（{when} 以来）",
+        "nl.explain.plain_older_time": "创建于 {when} 以前",
+        "nl.explain.plain_newer_time": "创建于 {when} 以后",
+        "nl.explain.plain_between": "创建于 {a} 到 {b} 之间",
         "nl.explain.schedule": "按 {cron}（{tz}）定时运行；每次运行生成计划，等你确认",
         "nl.explain.matched": "命中 {count} 个文件，共 {size}",
         "nl.explain.none": "目前没有匹配的文件",
+        "nl.explain.none_diagnosis": "按进网盘时间统计：今天 {today} 个文件，昨天 {yesterday} 个",
+        "events.sync": (
+            "索引已按事件流同步：新事件 {events} 条，涉及 {files} 个文件，写入 {upserted}，"
+            "移除 {removed}，列目录 {folders} 个，请求 {requests} 次，用时 {seconds} 秒"
+        ),
+        "events.fallback": "事件流不能信（{reason}），接着做一次盘点",
+        "events.alert": (
+            "没能靠 PikPak 的事件流保持索引最新（{reason}），所以改做了盘点。"
+            "如果反复出现，请看 `wms events --raw`。"
+        ),
+        "sync.updated": "索引更新于 {time}（{kind}）",
+        "sync.unknown": "索引上次更新的时间未知",
+        "sync.kind.events": "事件同步",
+        "sync.kind.incremental": "增量盘点",
+        "sync.kind.full": "全量盘点",
         "nl.explain.examples": "例如：{names}",
+        "nl.ask.chat": (
+            "我只处理网盘里的文件指令：下载、移动、重命名、分类、归档、放进回收站、查看、整理。"
+            "告诉我要对哪些文件做什么。"
+        ),
+        "nl.ask.quota": "暂时不支持查询网盘空间和配额。",
+        "nl.ask.empty_trash": "请在 PikPak 里手动清空回收站。清空意味着永久删除，这里不做。",
+        "nl.ask.time_direction": (
+            "时间条件我没弄明白：是要「N 天以内」的文件，还是「超过 N 天」的？"
+        ),
         "nl.ask.forever": "一句话不能永久删除，最多放进回收站。说「删除……」就会放进回收站。",
         "nl.ask.move_where": "移到哪里？请说出目录，比如 /Media/视频。",
         "nl.ask.rename_how": "改成什么名字？请给出模板，比如「{stem}.{ext}」。",

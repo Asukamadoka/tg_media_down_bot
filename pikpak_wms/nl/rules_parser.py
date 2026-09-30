@@ -143,6 +143,20 @@ def _iso(moment: datetime) -> str:
     return moment.isoformat(timespec="seconds")
 
 
+_EMPTY_TRASH = re.compile(r"(?:清空|倒空|清掉|清理)\s*(?:一下)?\s*(?:回收站|垃圾桶)", re.IGNORECASE)
+_CHAT = re.compile(
+    r"^\s*(?:你好|您好|嗨|哈喽|hello|hi|hey|在吗|在不在|谢谢|多谢|早上好|早安|晚上好|晚安|再见|拜拜)"
+    r"[啊呀吗呢吧!！。.~～\s]*$"
+    r"|天气|讲个?笑话|说个?笑话|讲个?故事|你是谁|你叫什么|你会什么|你能做什么",
+    re.IGNORECASE,
+)
+_QUOTA = re.compile(
+    r"还剩(?:下)?多少(?:空间|容量|位置)|剩余(?:空间|容量)|(?:空间|容量)还剩|用了多少(?:空间|容量)"
+    r"|多少(?:空间|容量)可用|可用(?:空间|容量)|配额",
+    re.IGNORECASE,
+)
+
+
 class RulesTranslator:
     name = "rules"
 
@@ -154,8 +168,16 @@ class RulesTranslator:
         s = _State(text=unicodedata.normalize("NFKC", text).strip(), now=now, tz=tz)
         if not s.text:
             return None
-        if re.search(r"永久删除|彻底删除|清空回收站|直接删除", s.text):
+        # Not instructions at all, or ones this bot never carries out (M8.2 §D):
+        # answered here, before any model can be tempted to invent a query.
+        if _EMPTY_TRASH.search(s.text):
+            return Clarification(question="nl.ask.empty_trash")
+        if re.search(r"永久删除|彻底删除|直接删除", s.text):
             return Clarification(question="nl.ask.forever")
+        if _CHAT.search(s.text):
+            return Clarification(question="nl.ask.chat")
+        if _QUOTA.search(s.text):
+            return Clarification(question="nl.ask.quota")
 
         for step in (_tidy, _names, _paths, _schedule, _sizes, _dates, _relative_days,
                      _windows, _kinds, _extensions, _arrival, _intents, _scope_words):

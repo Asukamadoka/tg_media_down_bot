@@ -33,6 +33,7 @@ Provider = Callable[[], Awaitable[Any]]
 # SDK passes on the server's error_description, which is not a stable code.
 _RATE_LIMIT_HINTS = ("too frequent", "too many", "rate limit", "frequency", "429")
 _AUTH_HINTS = ("invalid username or password", "unauthenticated", "invalid_grant", "token")
+_NOT_FOUND_HINTS = ("not found", "404", "does not exist", "file_not_found", "no such file")
 
 
 def _looks_like(message: str, hints: tuple[str, ...]) -> bool:
@@ -149,6 +150,23 @@ class WmsClient:
 
     async def events(self, *, page_size: int = 100, token: str | None = None) -> dict:
         return await self._call("events", size=page_size, next_page_token=token)
+
+    async def file_info(self, file_id: str) -> dict | None:
+        """One file or folder as PikPak has it now, or None when it is gone.
+
+        A trashed file still answers, with ``trashed`` set; callers decide.
+        """
+        try:
+            info = await self._call("offline_file_info", file_id)
+        except AuthError:
+            raise
+        except RateLimitedError:
+            raise
+        except WmsError as exc:
+            if _looks_like(str(exc), _NOT_FOUND_HINTS):
+                return None
+            raise
+        return info if isinstance(info, dict) and info.get("id") else None
 
     async def download_url(self, file_id: str) -> str:
         info = await self._call("get_download_url", file_id)

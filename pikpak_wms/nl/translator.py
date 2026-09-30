@@ -33,6 +33,7 @@ from typing import Any, Protocol
 from pydantic import ValidationError
 
 from ..core.errors import WmsError
+from .guard import guard
 from .hosts import BOARD, PROBE_TIMEOUT, Host, HostBoard, HostsConfigError, parse_hosts
 from .query import Clarification, Query, as_result, from_wire, normalize_wire, wire_schema
 from .rules_parser import RulesTranslator
@@ -114,6 +115,15 @@ value):
 "min_size": 2147483648}, "schedule": null, "needs_clarification": null}
 3. "把大文件移走" -> {"intent": "move", "schedule": null, "needs_clarification": \
 "多大算大文件? 要移到哪个文件夹?"}
+4. "删除 /Temp 里超过 7 天的文件" -> {"intent": "trash", "scope": {"path": "/Temp"}, \
+"filters": {"created_before": "7d"}}: older than 7 days is created_before, never created_after.
+5. "列出最近 7 天转存的视频" -> {"intent": "list", "filters": {"created_after": "7d", \
+"kinds": ["video"]}}: within the last 7 days is created_after, never created_before.
+6. "上个月入库的文件" on 2026-09-24 -> {"intent": "list", "filters": {"created_after": \
+"2026-08-01T00:00:00+08:00", "created_before": "2026-09-01T00:00:00+08:00"}}: a calendar \
+month is two dates, not a duration like "1m".
+7. "以 sample 开头的文件" -> {"intent": "list", "filters": {"name_regex": "^sample"}}: starts \
+with is a regular expression anchored with ^, not name_contains.
 
 Wrong answers, never write these:
 1. {"schedule": {"cron": "0 0 3 * * ?"}}: that is Quartz. cron has exactly five fields: \
@@ -150,8 +160,8 @@ def _valid(data: Any) -> bool:
     return True
 
 
-def _parse_answer(raw: str, backend: str,
-                  stats: SchemaStats | None = None) -> Query | Clarification:
+def _parse_answer(raw: str, backend: str, stats: SchemaStats | None = None, *,
+                  now: datetime | None = None, tz: tzinfo | None = None) -> Query | Clarification:
     raw = raw.strip()
     if raw.startswith("```"):
         # Some local models fence their JSON even in JSON mode.
@@ -162,7 +172,7 @@ def _parse_answer(raw: str, backend: str,
         data = json.loads(raw)
         if stats is not None and not _valid(data):
             stats.invalid_before += 1
-        return as_result(from_wire(normalize_wire(data)))
+        return as_result(from_wire(normalize_wire(data, now=now, tz=tz)))
     except (json.JSONDecodeError, ValidationError, ValueError, TypeError, AttributeError) as exc:
         if stats is not None:
             if isinstance(exc, json.JSONDecodeError):
@@ -234,7 +244,7 @@ class ClaudeTranslator:
             raise TranslationError("claude: answer cut off", key="nl.error.backend",
                                    backend=self.name, error="max_tokens")
         raw = next((block.text for block in response.content if block.type == "text"), "")
-        return _parse_answer(raw, self.name, self.stats)
+        return _parse_answer(raw, self.name, self.stats, now=now, tz=tz)
 
 
 class OllamaTranslator:
@@ -280,7 +290,7 @@ class OllamaTranslator:
             raise TranslationError(f"ollama: {exc}", key="nl.error.backend",
                                    backend=self.name, error=type(exc).__name__) from exc
         raw = ((answer or {}).get("message") or {}).get("content") or ""
-        return _parse_answer(raw, self.name, self.stats)
+        return _parse_answer(raw, self.name, self.stats, now=now, tz=tz)
 
 
 class OpenAITranslator:
@@ -395,10 +405,21 @@ class OpenAITranslator:
         for host in self.hosts:
             if not await self.board.online(host, self._headers(), self._get):
                 continue
-            try:
-                return await self._translate_on(host, text, now, tz)
-            except _HostDown as exc:
-                self.board.offline(host, str(exc))
+            for attempt in range(2):
+                try:
+                    return await self._translate_on(host, text, now, tz)
+                except _HostDown as exc:
+                    # One failed generation is not yet "offline": ask the host
+                    # again right now, and give the sentence one more try if
+                    # it answers. Two failures in a row, and the next host
+                    # is tried (docs/wms/M8.2 §E).
+                    log.info("model host %s failed a translation (%s)", host.label, exc)
+                    if attempt == 0 and await self.board.online(
+                        host, self._headers(), self._get, force=True
+                    ):
+                        continue
+                    self.board.offline(host, str(exc))
+                    break
         raise TranslationError(
             "openai: every model host is offline", key="nl.error.offline",
             hosts=", ".join(host.label for host in self.hosts))
@@ -425,7 +446,8 @@ class OpenAITranslator:
         if choice.get("finish_reason") == "length":
             raise TranslationError("openai: answer cut off", key="nl.error.backend",
                                    backend=self.name, error="length")
-        return _parse_answer(str(message.get("content") or ""), self.name, self.stats)
+        return _parse_answer(str(message.get("content") or ""), self.name, self.stats,
+                             now=now, tz=tz)
 
 
 class _HostDown(Exception):
@@ -462,6 +484,9 @@ class Chain:
                 log.warning("translator %s failed: %s", translator.name, exc)
                 failure = exc
                 continue
+            if result is not None and translator.name != "rules":
+                # A model's time condition is checked against the words (M8.2 §C).
+                result = guard(text, result)
             if result is not None:
                 self.last_used = translator.name
                 return result

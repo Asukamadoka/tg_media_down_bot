@@ -71,6 +71,10 @@ class StocktakeConfig(BaseModel):
     roots: list[str] = Field(default_factory=lambda: ["/"])
     incremental: bool = True
     page_size: int = 100
+    events: bool = True
+    """Keep the index current from PikPak's event feed (docs/wms/M8.1). False:
+    back to the ``modified_time`` pruning alone, which misses files restored
+    into an existing folder."""
 
 
 JOB_NAMES = (
@@ -104,6 +108,9 @@ BUILTIN_JOBS = (
     ScheduledJob(name="organize-tree", cron="30 4 * * *"),
     ScheduledJob(name="dedupe", cron="0 5 * * 1", apply=True),
     ScheduledJob(name="big-report", cron="0 10 * * 1"),
+    # docs/wms/M8.1: the index from the event feed every ten minutes. A deployment
+    # that lists "stocktake" itself keeps its own schedule (and now runs this).
+    ScheduledJob(name="stocktake", cron="*/10 * * * *"),
 )
 
 

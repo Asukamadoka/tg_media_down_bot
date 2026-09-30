@@ -18,7 +18,7 @@ from ..core.models import ActionType, Plan
 from ..i18n import t
 from ..rules.actions import Deliver
 from ..rules.units import human_size
-from . import inbound, organize, outbound, plans, tidy
+from . import eventsync, inbound, organize, outbound, plans, tidy
 from .context import Context
 from .stocktake import stocktake
 
@@ -37,6 +37,9 @@ class JobResult:
     reports: list[plans.ApplyReport] = field(default_factory=list)
     big: Any = None
     """big-report: the :class:`pikpak_wms.ops.tidy.BigReport`."""
+    alert: str = ""
+    """Something the admins should hear even though no plan is waiting (M8.1:
+    the event feed was lost and a stocktake ran instead)."""
 
 
 async def _plan_job(
@@ -55,10 +58,8 @@ async def _plan_job(
 
 
 async def _refresh(ctx: Context) -> None:
-    """An incremental stocktake first: M7 jobs read the whole index."""
-    cfg = ctx.config
-    await stocktake(ctx.client, ctx.store, roots=cfg.stocktake.roots, full=False,
-                    page_size=cfg.stocktake.page_size)
+    """Bring the index up to date first: M7 jobs read the whole index."""
+    await eventsync.refresh_index(ctx)
 
 
 async def _batch_job(ctx: Context, job: ScheduledJob, prefix: str,
@@ -108,7 +109,9 @@ async def run_job(ctx: Context, job: ScheduledJob, *, deliver: Deliver | None = 
         # "organize-tree" covers its ads plans ("organize-tree-ads:…") too.
         result = await _batch_job(ctx, job, tidy.TREE, await tidy.organize_tree(ctx))
     elif job.name == tidy.INBOX:
-        result = await _batch_job(ctx, job, tidy.INBOX, await tidy.organize_inbox(ctx))
+        planned = await tidy.organize_inbox(ctx)
+        await eventsync.note_freshness(ctx, planned)
+        result = await _batch_job(ctx, job, tidy.INBOX, planned)
     elif job.name == "dedupe":
         plan = await organize.dedupe(ctx, scope=cfg.dedupe.scope,
                                      keep_under=cfg.dedupe.keep_under)
@@ -118,6 +121,10 @@ async def run_job(ctx: Context, job: ScheduledJob, *, deliver: Deliver | None = 
         result = JobResult(job.name, t("big.summary", files=len(report.files),
                                        size=human_size(report.reclaimable)))
         result.big = report
+    elif job.name == "stocktake" and cfg.stocktake.incremental:
+        # M8.1: the event feed, and a stocktake only when it cannot be trusted.
+        synced = await eventsync.refresh_index(ctx)
+        result = JobResult(job.name, synced.summary(), alert=synced.alert)
     elif job.name in ("stocktake", "stocktake-full"):
         report = await stocktake(
             ctx.client, ctx.store, roots=cfg.stocktake.roots,

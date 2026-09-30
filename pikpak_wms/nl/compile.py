@@ -12,6 +12,7 @@ so it is shown in whatever language the reader uses.
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
 from typing import Any, Literal
@@ -125,10 +126,38 @@ def _span(value: str) -> dict[str, Any] | None:
     return _k(f"nl.span.{unit}", n=amount.rstrip("0").rstrip(".") if "." in amount else amount)
 
 
+def _plain_time(query: Query, now: datetime, tz: tzinfo) -> list[dict[str, Any]]:
+    """"Created 7 days ago or longer (earlier than 09-24 00:00)" / "within the last 7 days"."""
+    f = query.filters
+
+    def at(value: str) -> str:
+        return parse_moment(value, now=now, tz=tz).astimezone(tz).strftime("%m-%d %H:%M")
+
+    after, before = f.created_after, f.created_before
+    if after and before:
+        return [_k("nl.explain.plain_between", a=at(after), b=at(before))]
+    if before:
+        span = _span(before)
+        if span is not None:
+            return [_k("nl.explain.plain_older_span", span=span, when=at(before))]
+        return [_k("nl.explain.plain_older_time", when=at(before))]
+    if after:
+        span = _span(after)
+        if span is not None:
+            return [_k("nl.explain.plain_newer_span", span=span, when=at(after))]
+        return [_k("nl.explain.plain_newer_time", when=at(after))]
+    return []
+
+
 def explain(query: Query, config: Config, *, now: datetime, tz: tzinfo) -> list[dict[str, Any]]:
     """How the sentence was understood, as stored notes (keys + args)."""
     f, notes = query.filters, []
+    if query.intent == "trash":
+        # First, in plain words, so the direction is checked at a glance before
+        # anything is confirmed (docs/wms/M8.2 §C2).
+        notes.extend(_plain_time(query, now, tz))
     notes.append(_k("nl.explain.intent", intent=_k(f"nl.intent.{query.intent}")))
+    notes.extend(_k(key) for key in query.corrections)
     notes.append(_k("nl.explain.scope" if query.scope.recursive else "nl.explain.scope_flat",
                     path=query.scope.path))
     tz_name = str(tz)
@@ -222,10 +251,17 @@ async def _matching(store: Store, query: Query, *, now: datetime, tz: tzinfo) ->
 
 async def propose(
     store: Store, query: Query, config: Config, *, now: datetime, tz: tzinfo, name: str,
+    lead_notes: list[dict[str, Any]] | None = None,
+    on_empty: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None,
 ) -> Proposal:
-    """Everything to show before anything happens. Touches only the index."""
+    """Everything to show before anything happens. Touches only the index.
+
+    ``lead_notes`` follow the "Understood as" lines (how fresh the index is);
+    ``on_empty`` supplies the extra lines when nothing matches, so a person can
+    tell a wrong condition from a stale index (docs/wms/M8.1 §B).
+    """
     proposal = Proposal(kind="listing", query=query,
-                        notes=explain(query, config, now=now, tz=tz))
+                        notes=[*explain(query, config, now=now, tz=tz), *(lead_notes or [])])
     matches = await _matching(store, query, now=now, tz=tz)
     rules = rules_for(query, config, name=name)
     if query.schedule is not None:
@@ -243,7 +279,8 @@ async def propose(
                if matches else _k("nl.explain.none"))
     examples = ([_k("nl.explain.examples", names=[n.name for n in matches[:EXAMPLES]])]
                 if matches else [])
-    proposal.notes += [summary, *examples]
+    diagnosis = await on_empty() if not matches and on_empty is not None else []
+    proposal.notes += [summary, *diagnosis, *examples]
     if proposal.plan is not None:
-        proposal.plan.notes += [summary, *examples]
+        proposal.plan.notes += [summary, *diagnosis, *examples]
     return proposal

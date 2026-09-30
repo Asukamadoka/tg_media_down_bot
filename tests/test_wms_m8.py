@@ -108,7 +108,8 @@ class TestHosts:
         lan = Lan(PC)  # the Mac is off
         result = await translator(lan, clock).translate("去重", NOW, UTC)
         assert result.intent == "dedupe"
-        assert lan.probes == [f"{MAC}/models", f"{PC}/models"]
+        # The Mac is asked twice before it counts as off (M8.2 §E), the PC once.
+        assert lan.probes == [f"{MAC}/models", f"{MAC}/models", f"{PC}/models"]
         assert lan.posts == [f"{PC}/chat/completions"]
 
     async def test_in_order_when_both_are_up(self, clock):
@@ -121,8 +122,8 @@ class TestHosts:
         board = HostBoard(clock=clock)
         await translator(lan, clock, board=board).translate("去重", NOW, UTC)
         await translator(lan, clock, board=board).translate("去重", NOW, UTC)
-        # The Mac once, the PC once: both verdicts stood for the second sentence.
-        assert lan.probes == [f"{MAC}/models", f"{PC}/models"]
+        # Both verdicts stood for the second sentence.
+        assert lan.probes == [f"{MAC}/models", f"{MAC}/models", f"{PC}/models"]
         clock.now += 61
         lan.up.add(MAC)
         await translator(lan, clock, board=board).translate("去重", NOW, UTC)
@@ -149,7 +150,8 @@ class TestHosts:
         board = HostBoard(clock=clock)
         result = await translator(lan, clock, board=board).translate("去重", NOW, UTC)
         assert result.intent == "dedupe"
-        assert lan.posts == [f"{MAC}/chat/completions", f"{PC}/chat/completions"]
+        # M8.2 §E: it answered the probe in between, so it got one more try.
+        assert lan.posts == [f"{MAC}/chat/completions"] * 2 + [f"{PC}/chat/completions"]
         assert board.states[MAC].online is False
         assert board.states[PC].latency_ms is not None
 
@@ -171,7 +173,7 @@ class TestHosts:
         await first.translate("去重", NOW, UTC)
         again = OpenAITranslator(base_url=f"{MAC},{PC}", model="m", post=lan.post, get=lan.get)
         await again.translate("去重", NOW, UTC)
-        assert len(lan.probes) == 2
+        assert len(lan.probes) == 3  # nothing asked again
 
 
 class TestReport:
@@ -283,3 +285,74 @@ class TestEval:
 
         with pytest.raises(SystemExit):
             main(["--backend", "rules", "--base-url", MAC])
+
+
+class TestOneHiccupIsNotOffline:
+    """M8.2 §E: a single missed answer used to sink a minute of requests."""
+
+    async def test_a_probe_that_fails_once_is_asked_again(self, clock):
+        lan = Lan(MAC)
+        real = lan.get
+        misses = [1]
+
+        async def flaky(url, headers, timeout):
+            if misses and url.startswith(MAC):
+                misses.pop()
+                raise TimeoutError("one slow answer")
+            return await real(url, headers, timeout)
+
+        tr = OpenAITranslator(base_url=MAC, model="m", post=lan.post, get=flaky,
+                              board=HostBoard(clock=clock))
+        assert (await tr.translate("去重", NOW, UTC)).intent == "dedupe"
+        assert tr.board.states[MAC].online is True
+
+    async def test_a_failed_generation_is_probed_again_and_tried_once_more(self, clock):
+        lan = Lan(MAC)
+        real = lan.post
+        drops = [1]
+
+        async def flaky(url, body, headers):
+            if drops:
+                drops.pop()
+                raise ConnectionError("reset")
+            return await real(url, body, headers)
+
+        tr = OpenAITranslator(base_url=MAC, model="m", post=flaky, get=lan.get,
+                              board=HostBoard(clock=clock))
+        assert (await tr.translate("去重", NOW, UTC)).intent == "dedupe"
+        assert tr.board.states[MAC].online is True
+        assert lan.probes == [f"{MAC}/models", f"{MAC}/models"]  # before, and after the drop
+
+    async def test_two_failures_in_a_row_mean_offline(self, clock):
+        lan = Lan(MAC, PC)
+        lan.drop_mid_way = {MAC}
+        board = HostBoard(clock=clock)
+        result = await translator(lan, clock, board=board).translate("去重", NOW, UTC)
+        assert result.intent == "dedupe"
+        # The Mac failed twice (and was probed in between); the PC took over.
+        assert lan.posts == [f"{MAC}/chat/completions"] * 2 + [f"{PC}/chat/completions"]
+        assert board.states[MAC].online is False
+
+    async def test_a_generation_failure_and_a_failed_probe_go_to_the_next_host(self, clock):
+        lan = Lan(MAC, PC)
+        real_get = lan.get
+        down = []
+
+        async def dying(url, headers, timeout):
+            if down and url.startswith(MAC):
+                raise ConnectionError("gone")
+            return await real_get(url, headers, timeout)
+
+        lan.drop_mid_way = {MAC}
+        real_post = lan.post
+
+        async def post(url, body, headers):
+            if url.startswith(MAC):
+                down.append(1)
+            return await real_post(url, body, headers)
+
+        tr = OpenAITranslator(base_url=f"{MAC},{PC}", model="m", post=post, get=dying,
+                              board=HostBoard(clock=clock))
+        assert (await tr.translate("去重", NOW, UTC)).intent == "dedupe"
+        assert lan.posts.count(f"{MAC}/chat/completions") == 1   # no second try on a dead host
+        assert lan.posts[-1] == f"{PC}/chat/completions"

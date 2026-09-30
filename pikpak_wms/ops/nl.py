@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from ..core.errors import NotFoundError
-from ..core.models import render_note
+from ..core.models import parse_time, render_note
 from ..i18n import t
 from ..nl.compile import Proposal, propose
 from ..nl.hosts import BOARD
@@ -24,7 +24,7 @@ from ..nl.query import TIDY_INTENTS, Clarification, Query
 from ..nl.translator import OpenAITranslator, Translator, from_environment
 from ..rules.schema import Rule
 from ..rules.units import human_size
-from . import organize, plans, rulesfile, tidy
+from . import eventsync, organize, plans, rulesfile, tidy
 from .context import Context
 from .stocktake import stocktake
 
@@ -63,6 +63,66 @@ async def understand(
     )
 
 
+def _asks_about_arrival(query: Query) -> bool:
+    filters = query.filters
+    return bool(filters.created_after or filters.created_before)
+
+
+def _under_entry_folder(ctx: Context, path: str) -> bool:
+    """The scope is, or is inside, a folder new arrivals land in."""
+    entries = tidy.load_spec(ctx).inbox.folders
+    return any(path == f or path.startswith(f.rstrip("/") + "/") for f in entries)
+
+
+async def _freshness_note(ctx: Context) -> list[dict]:
+    found = await eventsync.freshness(ctx)
+    if found is None:
+        return []
+    clock, kind = found
+    return [{"key": "sync.updated", "args": {
+        "time": clock, "kind": {"key": f"sync.kind.{kind}", "args": {}}}}]
+
+
+async def _sync(ctx: Context, *, events: bool, scope: str) -> list[dict]:
+    """Bring the index up to date for this question; the line saying when.
+
+    A question about when files arrived, or about the entry folders, is the
+    one a stale index answers wrongly, so those read the event feed first
+    (docs/wms/M8.1 §B). A lost cursor is not waited on here: the incremental
+    stocktake answers, and the next scheduled sync (or the daily full run)
+    mends the rest. Other questions keep the incremental stocktake of their
+    scope, and say nothing about it.
+    """
+    with contextlib.suppress(NotFoundError):
+        if events:
+            await eventsync.refresh_index(ctx, allow_full=False, roots=[scope])
+        else:
+            await stocktake(ctx.client, ctx.store, roots=[scope], full=False,
+                            page_size=ctx.config.stocktake.page_size)
+    return await _freshness_note(ctx) if events else []
+
+
+async def _diagnose_empty(ctx: Context, now: datetime, *, with_freshness: bool) -> list[dict]:
+    """Nothing matched: what arrived today and yesterday, and when the index
+    was last updated, so a person can tell a wrong condition from a stale
+    index (docs/wms/M8.1 §B)."""
+    tz = ctx.config.schedule.tz
+    start = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday = start - timedelta(days=1)
+    today = earlier = 0
+    for raw in await ctx.store.created_times():
+        when = parse_time(raw)
+        if when is None:
+            continue
+        when = when.astimezone(tz)
+        if when >= start:
+            today += 1
+        elif when >= yesterday:
+            earlier += 1
+    notes = [{"key": "nl.explain.none_diagnosis", "args": {"today": today, "yesterday": earlier}}]
+    return [*(await _freshness_note(ctx) if with_freshness else []), *notes]
+
+
 async def _tidy_proposal(ctx: Context, query: Query, now: datetime) -> Proposal:
     """The M7 jobs, asked for in a sentence: planned exactly like /wms does."""
     proposal = Proposal(kind="plan", query=query)
@@ -71,8 +131,9 @@ async def _tidy_proposal(ctx: Context, query: Query, now: datetime) -> Proposal:
     scope = query.scope.path
     if scope != "/":
         proposal.notes.append({"key": "nl.explain.scope", "args": {"path": scope}})
-    await stocktake(ctx.client, ctx.store, roots=ctx.config.stocktake.roots, full=False,
-                    page_size=ctx.config.stocktake.page_size)
+    # They read the whole index: the event feed keeps it current (M8.1).
+    await eventsync.refresh_index(ctx, allow_full=False)
+    proposal.notes += await _freshness_note(ctx)
     if query.intent == "big_report":
         proposal.kind = "report"
         proposal.big = await tidy.big_report(ctx, scope=scope, at=now)
@@ -109,12 +170,15 @@ async def make_proposal(ctx: Context, query: Query, *, now: datetime | None = No
     now = now or datetime.now(tz)
     if query.intent in TIDY_INTENTS:
         return await _tidy_proposal(ctx, query, now)
-    # A folder that does not exist yet simply matches nothing.
-    with contextlib.suppress(NotFoundError):
-        await stocktake(ctx.client, ctx.store, roots=[query.scope.path], full=False,
-                        page_size=ctx.config.stocktake.page_size)
+    fresh = _asks_about_arrival(query) or _under_entry_folder(ctx, query.scope.path)
+    lead = await _sync(ctx, events=fresh, scope=query.scope.path)
+
+    async def diagnosis() -> list[dict]:
+        return await _diagnose_empty(ctx, now, with_freshness=not lead)
+
     proposal = await propose(ctx.store, query, ctx.config, now=now, tz=tz,
-                             name=f"nl-{now:%Y%m%d-%H%M%S}")
+                             name=f"nl-{now:%Y%m%d-%H%M%S}", lead_notes=lead,
+                             on_empty=diagnosis)
     if proposal.plan is not None and not proposal.plan.is_empty:
         proposal.plan_id = await plans.save(ctx, proposal.plan)
     return proposal

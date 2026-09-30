@@ -13,7 +13,6 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
-import yaml
 from typer.testing import CliRunner
 from wms_fakes import FakeDrive, provider_for
 
@@ -58,12 +57,12 @@ def chinese():
 
 class TestEvalSet:
     def test_at_least_sixty_chinese_cases_including_the_users_sentence(self):
-        data = yaml.safe_load((ROOT / "tests/nl/cases.yaml").read_text(encoding="utf-8"))
-        texts = [case["text"] for case in data["cases"]]
+        cases, _now, _tz = nl_eval.load_cases(ROOT / "tests/nl/cases.yaml")
+        texts = [case["text"] for case in cases]
         assert len(texts) >= 60
         assert USERS_SENTENCE in texts
-        assert sum(1 for case in data["cases"] if case.get("clarify")) >= 8
-        for case in data["cases"]:
+        assert sum(1 for case in cases if case.get("clarify")) >= 8
+        for case in cases:
             if case.get("expect"):
                 Query.model_validate(case["expect"])  # every expectation is a valid Query
 
