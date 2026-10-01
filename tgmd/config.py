@@ -114,7 +114,7 @@ class DownloadConfig:
     """``DOWNLOAD_LAYOUT``: ``dated`` files kept on the NAS under
     ``LIBRARY_DIR/整理/年/年.月/年.月.日`` (docs/wms/M8.3 §H); ``flat`` is the older
     ``MEDIA_DIR`` + ``MEDIA_TEMPLATE``. Without a ``LIBRARY_DIR`` it is always flat."""
-    default_layout: str = "整理/{Y}/{Y}.{M}/{Y}.{M}.{D}"
+    default_layout: str = "资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}"
     timezone: str = "Asia/Shanghai"
     """The zone whose calendar day names the dated folder."""
     concurrent: int = 2
@@ -515,7 +515,8 @@ def load_config(path: Path | None = None) -> Config:
         ).lower(),
         default_layout=_env_str(
             "DOWNLOAD_DEFAULT_LAYOUT",
-            str(_get(data, "download", "default_layout", default="整理/{Y}/{Y}.{M}/{Y}.{M}.{D}")),
+            str(_get(data, "download", "default_layout",
+                     default="资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}")),
         ),
         timezone=_env_str("TIMEZONE", str(_get(data, "download", "timezone",
                                                default="Asia/Shanghai"))),

@@ -155,7 +155,7 @@ class OutboundConfig(BaseModel):
     """The NAS share ``资源库`` as the container sees it; None means ``LIBRARY_DIR``.
     When there is one, files are filed by :mod:`pikpak_wms.ops.library` instead
     of under ``local_dir`` (docs/wms/M8.3 §H)."""
-    default_layout: str = "整理/{Y}/{Y}.{M}/{Y}.{M}.{D}"
+    default_layout: str = "资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}"
     """Where a download goes when no place is named, under the library. ``{Y}``,
     ``{M}``, ``{D}`` are the year, month and day the download runs, unpadded."""
     connections: int | None = None

@@ -836,10 +836,10 @@ class TestMediaDirectory:
             resolver=FakeResolver([media_message(1, "Holiday 2026.mp4")]),
         )
         await harness.run(await harness.job("local"))
-        folder = library / "整理" / "2026" / "2026.10" / "2026.10.1"
+        folder = library / "资源" / "整理" / "2026" / "2026.10" / "2026.10.1"
         assert (folder / "Holiday 2026.mp4").is_file()
         assert not (tmp_path / "media").exists()
-        assert ("smb://<LAN_IP>/资源库/%E6%95%B4%E7%90%86/2026/2026.10/2026.10.1/"
+        assert ("smb://<LAN_IP>/资源库/%E8%B5%84%E6%BA%90/%E6%95%B4%E7%90%86/2026/2026.10/2026.10.1/"
                 "Holiday%202026.mp4") in harness.bot.last_status
 
     async def test_flat_layout_keeps_the_media_directory_even_with_a_library(
