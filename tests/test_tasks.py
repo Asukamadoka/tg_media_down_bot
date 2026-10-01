@@ -218,6 +218,8 @@ class Harness:
                 delete_after_delivery=options.pop("delete_after_delivery", True),
                 media_dir=options.pop("media_dir", None),
                 local_url_prefix=options.pop("local_url_prefix", ""),
+                library_dir=options.pop("library_dir", None),
+                layout=options.pop("layout", "dated"),
             ),
             delivery=DeliveryConfig(
                 max_upload_size_mb=options.pop("max_upload_mb", 2000),
@@ -814,6 +816,42 @@ class TestMediaDirectory:
             "smb://<LAN_IP>/media/Some%20Channel/Holiday%202026.mp4"
             in harness.bot.last_status
         )
+
+    async def test_a_kept_file_goes_to_the_dated_library_folder(self, make, tmp_path, monkeypatch):
+        # docs/wms/M8.3 §H: LIBRARY_DIR set and DOWNLOAD_LAYOUT=dated (the default).
+        from datetime import UTC, datetime
+
+        from tgmd import config as config_module
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 9, 30, 16, 1, tzinfo=UTC).astimezone(tz)  # 00:01 on 10-01
+
+        monkeypatch.setattr(config_module, "datetime", Clock)
+        library = tmp_path / "lib"
+        harness = await make(
+            library_dir=library, media_dir=tmp_path / "media",
+            local_url_prefix="smb://<LAN_IP>/资源库/",
+            resolver=FakeResolver([media_message(1, "Holiday 2026.mp4")]),
+        )
+        await harness.run(await harness.job("local"))
+        folder = library / "整理" / "2026" / "2026.10" / "2026.10.1"
+        assert (folder / "Holiday 2026.mp4").is_file()
+        assert not (tmp_path / "media").exists()
+        assert ("smb://<LAN_IP>/资源库/%E6%95%B4%E7%90%86/2026/2026.10/2026.10.1/"
+                "Holiday%202026.mp4") in harness.bot.last_status
+
+    async def test_flat_layout_keeps_the_media_directory_even_with_a_library(
+        self, make, tmp_path
+    ):
+        harness = await make(
+            library_dir=tmp_path / "lib", layout="flat", media_dir=tmp_path / "media",
+            resolver=FakeResolver([media_message(1, "a.mp4")]),
+        )
+        await harness.run(await harness.job("local"))
+        assert (tmp_path / "media" / "Some Channel" / "a.mp4").is_file()
+        assert not (tmp_path / "lib").exists()
 
     async def test_without_media_dir_nothing_moves(self, make):
         # MEDIA_DIR defaults to DOWNLOAD_DIR, so existing deployments keep

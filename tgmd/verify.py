@@ -717,10 +717,12 @@ async def check_model_hosts(report: Report) -> None:
                    if host.latency_ms is not None else "")
         if host.online:
             report.add(Check.ok("model host", t("verify.model.online", url=host.url,
-                                                model=host.model, latency=latency)))
+                                                model=host.model, name=host.name,
+                                                latency=latency)))
         else:
             report.add(Check.warn("model host", t("verify.model.offline", url=host.url,
-                                                  model=host.model, latency=latency)))
+                                                  model=host.model, name=host.name,
+                                                  latency=latency)))
 
 
 async def _main(config_path: Path | None) -> int:

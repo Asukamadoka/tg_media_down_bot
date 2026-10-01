@@ -64,6 +64,18 @@ class Filters(_Strict):
     extensions: list[str] = Field(default_factory=list)
     name_contains: list[str] = Field(default_factory=list)
     name_regex: str | None = None
+    name_equals: str | None = None
+    """The whole file name (docs/wms/M8.3 §K). Set by the rules parser when a
+    full file name was given; not part of the wire format a model fills in."""
+    limit: int | None = None
+    """Only this many files: the newest to arrive first (「只要一个」「前 3 个」)."""
+
+    @field_validator("limit")
+    @classmethod
+    def _limit(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
+            raise ValueError("a limit is at least 1")
+        return value
 
     @field_validator("created_after", "created_before")
     @classmethod
@@ -133,6 +145,9 @@ class Query(_Strict):
         # A schedule says *when*; the intent must still say *what*.
         if self.schedule is not None and self.intent in ("schedule", "list"):
             self.needs_clarification = self.needs_clarification or "nl.ask.schedule_what"
+        # A count picks files that exist today; a job that runs again tomorrow has no such list.
+        if self.schedule is not None and self.filters.limit is not None:
+            self.needs_clarification = self.needs_clarification or "nl.ask.limit_schedule"
         # The M7 jobs take a folder at most: they already run on their own
         # schedule, and a filter would change what "tidy" means.
         if self.intent in TIDY_INTENTS and (self.schedule is not None or not self.filters.empty):
@@ -184,7 +199,7 @@ WIRE_SCHEMA: dict[str, Any] = {
             "type": "object",
             "additionalProperties": False,
             "required": ["created_after", "created_before", "min_size", "max_size", "kinds",
-                         "extensions", "name_contains", "name_regex"],
+                         "extensions", "name_contains", "name_regex", "limit"],
             "properties": {
                 "created_after": _nullable({"type": "string"}),
                 "created_before": _nullable({"type": "string"}),
@@ -194,6 +209,7 @@ WIRE_SCHEMA: dict[str, Any] = {
                 "extensions": {"type": "array", "items": {"type": "string"}},
                 "name_contains": {"type": "array", "items": {"type": "string"}},
                 "name_regex": _nullable({"type": "string"}),
+                "limit": _nullable({"type": "integer"}),
             },
         },
         "action_args": {
@@ -283,6 +299,8 @@ def normalize_time(value: Any, now: datetime, tz: tzinfo) -> Any:
     if not isinstance(value, str):
         return value
     text = value.strip()
+    if text.lower() in ("now", "现在", "此刻", "当前"):
+        return now.astimezone(tz).isoformat(timespec="seconds")
     moment = period_start(text, now, tz)
     if moment is not None:
         return moment.isoformat(timespec="seconds")

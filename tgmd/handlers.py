@@ -663,8 +663,15 @@ class BotHandlers:
                     text, buttons = plan_message(lines, result.plan_id)
                     await event.reply(text, parse_mode="html", buttons=buttons)
             elif action == "apply" and argument:
-                report = await embedded.apply(_plan_id(argument))
-                await event.reply(escape_html(report.summary()))
+                run = await embedded.start_apply(_plan_id(argument))
+                message = await event.reply(
+                    self._wms.progress_text(run), parse_mode="html",
+                    buttons=self._wms.stop_buttons(run.plan_id))
+
+                async def edit(text, buttons, message=message):
+                    await message.edit(text, parse_mode="html", buttons=buttons)
+
+                self._wms.watch(run, edit)
             elif action == "undo" and argument:
                 audit_id = _plan_id(argument)
                 outcome = await embedded.undo(audit_id, apply_now=False)
@@ -766,12 +773,71 @@ class BotHandlers:
         except (UnicodeDecodeError, ValueError):
             await event.answer()
             return
-        text, alert = await self._wms.nl_button(user_id, verb, pid)
+        text, alert, run = await self._wms.nl_button(user_id, verb, pid)
         if alert is not None:
             await event.answer(alert, alert=True)
             return
-        await event.answer()
-        await event.edit(text, parse_mode="html", buttons=None)
+        if run is None:
+            await event.answer()
+            await event.edit(text, parse_mode="html", buttons=None)
+            return
+        # Confirmed: answer now, show the run in this very message, work in the background.
+        await event.answer(t("wms.run.started"))
+        await event.edit(text, parse_mode="html", buttons=self._wms.stop_buttons(run.plan_id))
+        self._wms.watch(run, self._editor(event))
+
+    def _editor(self, event):
+        async def edit(text: str, buttons) -> None:
+            await event.edit(text, parse_mode="html", buttons=buttons)
+
+        return edit
+
+    async def _start_run(self, event, embedded, plan_id: int, *, in_place: bool) -> None:
+        """Start a plan in the background and show it (docs/wms/M8.3 §G): the
+        callback is answered at once, the message becomes a progress display with
+        a [stop] button, and the result replaces it when the run ends."""
+        try:
+            run = await embedded.start_apply(plan_id)
+        except WmsError as exc:
+            await event.answer(exc.display()[:190], alert=True)
+            return
+        await event.answer(t("wms.run.started"))
+        text, buttons = self._wms.progress_text(run), self._wms.stop_buttons(plan_id)
+        if in_place:
+            await event.edit(text, parse_mode="html", buttons=buttons)
+            self._wms.watch(run, self._editor(event))
+            return
+        message = await event.respond(text, parse_mode="html", buttons=buttons)
+
+        async def edit(new_text: str, new_buttons) -> None:
+            await message.edit(new_text, parse_mode="html", buttons=new_buttons)
+
+        self._wms.watch(run, edit)
+
+    async def _is_one_plan(self, event) -> bool:
+        """True when the message the button is on belongs to a single plan; a batch
+        (many plans, many [apply] buttons) must stay as it is, so its runs get a
+        message of their own."""
+        try:
+            message = await event.get_message()
+            rows = message.buttons or []
+            applies = [b for row in rows for b in row
+                       if bytes(getattr(b, "data", b"") or b"").startswith(b"wms:apply:")]
+            return len(applies) <= 1
+        except Exception:  # noqa: BLE001 - a button we cannot inspect is treated as a plan's own
+            return True
+
+    async def _stop_button(self, event, embedded) -> None:
+        try:
+            plan_id = int(event.data.decode().rsplit(":", 1)[1])
+        except (UnicodeDecodeError, ValueError):
+            await event.answer()
+            return
+        run = await embedded.stop_apply(plan_id)
+        if run is None:
+            await event.answer(t("wms.run.not_running"), alert=True)
+            return
+        await event.answer(t("wms.run.stopping"))
 
     async def _wms_for(self, event):
         """The running warehouse, or None after telling the sender why not."""
@@ -861,21 +927,29 @@ class BotHandlers:
         if event.data.startswith(b"wms:detail:"):
             await self._detail_button(event, embedded)
             return
+        if event.data.startswith(b"wms:stop:"):
+            await self._stop_button(event, embedded)
+            return
         try:
             _prefix, verb, raw = event.data.decode().split(":", 2)
             item = int(raw)
         except (UnicodeDecodeError, ValueError):
             await event.answer()
             return
+        if verb == "apply":
+            await self._start_run(event, embedded, item, in_place=await self._is_one_plan(event))
+            return
         try:
-            if verb == "apply":
-                result = escape_html((await embedded.apply(item)).summary())
-            elif verb == "discard":
+            if verb == "discard":
                 await embedded.discard(item)
                 result = t("wms.discarded", id=item)
             elif verb == "undo":
-                outcome = await embedded.undo(item, apply_now=True)
-                result = t("wms.undo.done", what=escape_html(outcome.action.describe()))
+                # Checked now, so a refusal is an alert; carried out in the background.
+                await embedded.undo(item, apply_now=False)
+                await event.answer(t("wms.undo.started"))
+                await event.edit(t("wms.undo.working"), parse_mode="html", buttons=None)
+                self._wms.background(self._undo(embedded, item, self._editor(event)))
+                return
             else:
                 await event.answer()
                 return
@@ -885,6 +959,14 @@ class BotHandlers:
         await event.answer()
         # The buttons go away with the edit, so a second press cannot repeat it.
         await event.edit(result, parse_mode="html", buttons=None)
+
+    async def _undo(self, embedded, audit_id: int, edit) -> None:
+        try:
+            outcome = await embedded.undo(audit_id, apply_now=True)
+            text = t("wms.undo.done", what=escape_html(outcome.action.describe()))
+        except WmsError as exc:
+            text = t("wms.error", error=escape_html(exc.display()))
+        await self._wms._safe_edit(edit, text, None)  # noqa: SLF001
 
     async def _trash_button(self, event, embedded) -> None:
         """[🗑 n] under the big-files report: one item to the trash, audited.

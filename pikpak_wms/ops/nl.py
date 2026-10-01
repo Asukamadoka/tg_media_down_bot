@@ -24,7 +24,7 @@ from ..nl.query import TIDY_INTENTS, Clarification, Query
 from ..nl.translator import OpenAITranslator, Translator, from_environment
 from ..rules.schema import Rule
 from ..rules.units import human_size
-from . import eventsync, organize, plans, rulesfile, tidy
+from . import eventsync, organize, outbound, plans, rulesfile, tidy
 from .context import Context
 from .stocktake import stocktake
 
@@ -38,6 +38,8 @@ class ModelHost:
     online: bool | None
     latency_ms: float | None
     error: str = ""
+    name: str = ""
+    """What the machine is called (``NL_OPENAI_NAMES``), shown with its model."""
 
 
 async def model_hosts(*, probe: bool = True) -> list[ModelHost]:
@@ -49,7 +51,7 @@ async def model_hosts(*, probe: bool = True) -> list[ModelHost]:
             await BOARD.online(host, translator._headers())  # noqa: SLF001
         state = BOARD.state(host)
         reports.append(ModelHost(host.base_url, host.model, state.online, state.latency_ms,
-                                 state.error))
+                                 state.error, host.display))
     return reports
 
 
@@ -180,6 +182,7 @@ async def make_proposal(ctx: Context, query: Query, *, now: datetime | None = No
                              name=f"nl-{now:%Y%m%d-%H%M%S}", lead_notes=lead,
                              on_empty=diagnosis)
     if proposal.plan is not None and not proposal.plan.is_empty:
+        outbound.annotate(ctx.config, proposal.plan, when=now)
         proposal.plan_id = await plans.save(ctx, proposal.plan)
     return proposal
 

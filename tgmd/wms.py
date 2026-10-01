@@ -30,6 +30,7 @@ from pikpak_wms.ops.embed import (
     AccountUnavailable,
     Clarification,
     EmbeddedWms,
+    Run,
     WmsError,
     run_command,
     set_language,
@@ -41,7 +42,7 @@ from .config import Config, load_config
 from .db import Database
 from .i18n import describe, t
 from .pikpak import PikPakError, PikPakService
-from .utils import escape_html
+from .utils import escape_html, human_duration, human_rate, human_size, truncate
 
 log = logging.getLogger(__name__)
 
@@ -81,14 +82,20 @@ links becomes one plan rather than one per link."""
 MERGE = "\uff0c"
 """The Chinese comma joining a sentence and the answer that refines it."""
 
-PROPOSALS_KEPT = 50
-"""Natural-language proposals remembered for their buttons; older ones expire."""
+PROGRESS_EVERY = 10.0
+"""Seconds between edits of a running plan's message."""
+
+PROGRESS_MIN_GAP = 5.0
+"""Never edit more often than this (Telegram limits how fast a message may change)."""
 
 MESSAGE_LIMIT = 3500
 """Telegram's limit is 4096; the plan is cut well before it."""
 
 Notify = Callable[[int, str, Any], Awaitable[None]]
 """Send ``text`` (HTML) with optional ``buttons`` to a chat."""
+
+Edit = Callable[[str, Any], Awaitable[None]]
+"""Replace a message's text (HTML) and buttons."""
 
 
 def plan_message(
@@ -170,11 +177,16 @@ class WmsInBot:
         self._shelve_task: asyncio.Task | None = None
         self._shelve_folders: set[str] = set()
         self._warned_uncovered = False
-        # /do: proposals waiting for a button, and who is refining a sentence.
-        self._proposals: dict[int, dict[str, Any]] = {}
+        # /do: who is refining a sentence (the proposals themselves are in the
+        # database, so their buttons survive a restart).
         self._editing: dict[int, int] = {}
-        self._next_pid = 0
         self._announced: set[int] = set()
+        # Background runs: one watcher edits one progress message.
+        self._watchers: set[asyncio.Task] = set()
+        self._finishing: dict[int, int] = {}
+        self.progress_every = PROGRESS_EVERY
+        self.min_gap = PROGRESS_MIN_GAP
+        self.tick = 1.0
 
     def attach_notifier(self, notify: Notify) -> None:
         self._notify = notify
@@ -240,6 +252,7 @@ class WmsInBot:
             self.embedded = EmbeddedWms(provider_for(self.config, self.pikpak),
                                         on_result=self.job_finished)
             await self.embedded.start()
+            await self.announce_interrupted()
         except Exception:
             # A broken WMS config must not keep the downloader from starting.
             log.exception("WMS could not start; the bot carries on without it")
@@ -312,38 +325,47 @@ class WmsInBot:
         """One sentence from an admin → (HTML reply, buttons or None)."""
         if self.embedded is None:
             return t("wms.off"), None
+        embedded = self.embedded
         editing = self._editing.pop(user_id, None)
-        if editing is not None and editing in self._proposals:
-            earlier = self._proposals.pop(editing)
-            await self._drop_plan(earlier)
-            text = f"{earlier['sentence']}{MERGE}{text}"
+        if editing is not None:
+            earlier = await embedded.load_proposal(editing)
+            if earlier is not None:
+                await embedded.drop_proposal(editing)
+                await self._drop_plan(earlier)
+                text = f"{earlier['sentence']}{MERGE}{text}"
         try:
-            result = await self.embedded.understand(text)
+            result = await embedded.understand(text)
         except WmsError as exc:
             return t("wms.nl.failed", error=escape_html(exc.display())), None
         if result is None:
             return t("wms.nl.not_understood"), None
-        pid = self._remember(user_id, text, None)
+        record = {"user": user_id, "sentence": text}
+        pid = await embedded.save_proposal(record)
         if isinstance(result, Clarification):
             # The next message answers the question: merge it with this one.
             self._editing[user_id] = pid
-            question = self.embedded.clarification_text(result)
+            question = embedded.clarification_text(result)
             return t("wms.nl.ask", question=escape_html(question)), None
         try:
-            proposal = await self.embedded.propose(result)
+            proposal = await embedded.propose(result)
         except WmsError as exc:
+            await embedded.drop_proposal(pid)
             return t("wms.error", error=escape_html(exc.display())), None
-        self._proposals[pid]["proposal"] = proposal
+        await embedded.save_proposal({
+            **record, "kind": proposal.kind, "plan_id": proposal.plan_id,
+            "rules": embedded.rules_to_json(proposal.rules),
+            "translator": proposal.translator,
+        }, pid)
         # M7: the report comes with its own buttons, a batch lists its plans.
         if proposal.kind == "report" and proposal.big is not None:
             return report_message(proposal.big)
         if proposal.kind == "batch":
-            summaries = await self.embedded.plan_overview(proposal.plan_ids)
+            summaries = await embedded.plan_overview(proposal.plan_ids)
             return batch_message("organize-tree", [_scoped(item) for item in summaries])
-        body = "\n".join(self.embedded.proposal_lines(proposal))
+        body = "\n".join(embedded.proposal_lines(proposal))
         if len(body) > MESSAGE_LIMIT:
             body = body[:MESSAGE_LIMIT].rsplit("\n", 1)[0] + "\n…"
-        intro = t("wms.nl.intro", translator=escape_html(proposal.translator or "rules"))
+        intro = t("wms.nl.intro", translator=escape_html(self.translator_label(proposal)))
         text_out = f"{intro}\n<pre>{escape_html(body)}</pre>"
         actionable = (proposal.kind == "rule" or
                       (proposal.kind == "plan" and proposal.plan_id is not None))
@@ -355,52 +377,161 @@ class WmsInBot:
             row.append((t("wms.button.cancel"), f"wms:nl:cancel:{pid}"))
         return text_out, callback_buttons([row])
 
-    async def nl_button(self, user_id: int, verb: str, pid: int) -> tuple[str | None, str | None]:
-        """A press on [confirm] / [edit] / [cancel]: (new message text, alert)."""
-        entry = self._proposals.get(pid)
-        if entry is None or entry["user"] != user_id or self.embedded is None:
-            return None, t("wms.nl.expired")
-        proposal = entry["proposal"]
+    def translator_label(self, proposal: Any) -> str:
+        return proposal.translator
+
+    async def nl_button(
+        self, user_id: int, verb: str, pid: int
+    ) -> tuple[str | None, str | None, Run | None]:
+        """A press on [confirm] / [edit] / [cancel]: (new message text, alert, run).
+
+        Confirming a plan does not wait for it: the run starts in the background
+        and comes back as ``run`` for the caller to watch (docs/wms/M8.3 §G)."""
+        if self.embedded is None:
+            return None, t("wms.nl.expired"), None
+        entry = await self.embedded.load_proposal(pid)
+        if entry is None or entry.get("user") != user_id or "kind" not in entry:
+            return None, t("wms.nl.expired"), None
         if verb == "edit":
             self._editing[user_id] = pid
-            return t("wms.nl.edit_prompt", sentence=escape_html(entry["sentence"])), None
+            return t("wms.nl.edit_prompt", sentence=escape_html(entry["sentence"])), None, None
         if verb == "cancel":
-            self._proposals.pop(pid, None)
+            await self.embedded.drop_proposal(pid)
             await self._drop_plan(entry)
-            return t("wms.nl.cancelled"), None
-        if verb == "apply" and proposal is not None:
+            return t("wms.nl.cancelled"), None, None
+        if verb == "apply":
             try:
-                if proposal.kind == "rule":
-                    path = await self.embedded.add_rules(proposal.rules,
-                                                         sentence=entry["sentence"])
-                    result = t("wms.nl.rule_added", path=escape_html(path))
-                else:
-                    report = await self.embedded.apply(proposal.plan_id)
-                    result = escape_html(report.summary())
+                if entry["kind"] == "rule":
+                    rules = self.embedded.rules_from_json(entry.get("rules") or [])
+                    path = await self.embedded.add_rules(rules, sentence=entry["sentence"])
+                    await self.embedded.drop_proposal(pid)
+                    return t("wms.nl.rule_added", path=escape_html(path)), None, None
+                if entry.get("plan_id") is None:
+                    return None, t("wms.nl.expired"), None
+                run = await self.embedded.start_apply(entry["plan_id"])
             except WmsError as exc:
-                return None, exc.display()[:190]
-            self._proposals.pop(pid, None)
-            return result, None
-        return None, t("wms.nl.expired")
+                return None, exc.display()[:190], None
+            self._finishing[run.plan_id] = pid  # forgotten when the run completes
+            return self.progress_text(run), None, run
+        return None, t("wms.nl.expired"), None
 
-    def _remember(self, user_id: int, sentence: str, proposal: Any) -> int:
-        self._next_pid += 1
-        self._proposals[self._next_pid] = {"user": user_id, "sentence": sentence,
-                                           "proposal": proposal}
-        while len(self._proposals) > PROPOSALS_KEPT:
-            self._proposals.pop(next(iter(self._proposals)))
-        return self._next_pid
+    # ------------------------------------------------------- background runs
+
+    def progress_text(self, run: Run) -> str:
+        """⏳ Plan 58: 3/591 done · the current file, its percent, rate and time left."""
+        lines = [t("wms.run.progress", id=run.plan_id, done=run.done, total=run.total)]
+        if run.file:
+            fraction = run.fraction
+            lines.append(t(
+                "wms.run.file", name=escape_html(truncate(run.file, 48)),
+                percent=f"{fraction * 100:.0f}" if fraction is not None else "?",
+                done=human_size(run.received), size=human_size(run.size),
+                rate=human_rate(run.speed), eta=human_duration(run.eta),
+            ))
+        return "\n".join(lines)
+
+    def stop_buttons(self, plan_id: int) -> Any:
+        return callback_buttons([[(t("wms.button.stop"), f"wms:stop:{plan_id}")]])
+
+    def _resume_buttons(self, plan_id: int) -> Any:
+        return callback_buttons([[(t("wms.button.resume"), f"wms:apply:{plan_id}"),
+                                  (t("wms.button.discard"), f"wms:discard:{plan_id}")]])
+
+    def finished_message(self, run: Run) -> tuple[str, Any]:
+        """What a run ended as: a summary, a stop, or an error (the plan stays usable)."""
+        if run.stopped:
+            return (t("wms.run.stopped", id=run.plan_id, done=run.done, total=run.total),
+                    self._resume_buttons(run.plan_id))
+        if run.error or run.report is None:
+            return (t("wms.run.failed", id=run.plan_id, error=escape_html(run.error or "?"),
+                      done=run.done, total=run.total), self._resume_buttons(run.plan_id))
+        report = run.report
+        lines = [escape_html(report.summary())]
+        lines += [t("wms.run.failure_line", path=escape_html(str(item.get("path") or "?")),
+                    error=escape_html(str(item.get("error") or "")))
+                  for item in report.failed[:3]]
+        if report.stopped:
+            lines.append(escape_html(report.stopped))
+        if report.remaining:
+            lines.append(t("wms.run.remaining", remaining=report.remaining))
+            return "\n".join(lines), self._resume_buttons(run.plan_id)
+        return "\n".join(lines), None
+
+    def watch(self, run: Run, edit: Edit) -> asyncio.Task:
+        """Keep one message showing ``run``: edited every :attr:`progress_every`
+        seconds (and sooner, never closer than :attr:`min_gap`, when another
+        action finished), then replaced by the result. Edits that Telegram
+        refuses are skipped, never fatal."""
+        task = asyncio.create_task(self._watch(run, edit), name=f"wms-watch-{run.plan_id}")
+        self._watchers.add(task)
+        task.add_done_callback(self._watchers.discard)
+        return task
+
+    async def _watch(self, run: Run, edit: Edit) -> None:
+        loop = asyncio.get_running_loop()
+        last, shown_done = loop.time(), run.done
+        while True:
+            try:
+                await asyncio.wait_for(run.finished.wait(), timeout=self.tick)
+                break
+            except TimeoutError:
+                pass
+            waited = loop.time() - last
+            if waited >= self.progress_every or (run.done != shown_done and waited >= self.min_gap):
+                last, shown_done = loop.time(), run.done
+                await self._safe_edit(edit, self.progress_text(run), self.stop_buttons(run.plan_id))
+        text, buttons = self.finished_message(run)
+        await self._safe_edit(edit, text, buttons)
+        pid = self._finishing.pop(run.plan_id, None)
+        if pid is not None and run.report is not None and not run.report.remaining \
+                and not run.error and not run.stopped and self.embedded is not None:
+            with contextlib.suppress(Exception):
+                await self.embedded.drop_proposal(pid)
+
+    async def _safe_edit(self, edit: Edit, text: str, buttons: Any) -> None:
+        try:
+            await edit(text, buttons)
+        except Exception as exc:  # noqa: BLE001 - "not modified", flood waits, a deleted message
+            log.debug("could not edit the progress message: %s", exc)
+
+    def background(self, work: Any) -> asyncio.Task:
+        """Run a coroutine beside the handler that started it (an undo)."""
+        task = asyncio.ensure_future(work)
+        self._watchers.add(task)
+        task.add_done_callback(self._watchers.discard)
+        return task
+
+    async def settle(self) -> None:
+        """Wait for every progress watcher to finish (tests, and shutdown)."""
+        if self._watchers:
+            await asyncio.gather(*list(self._watchers), return_exceptions=True)
+
+    async def announce_interrupted(self) -> None:
+        """After a restart: tell the admins which plans were cut off (docs/wms/M8.3 §G5)."""
+        if self.embedded is None or self._notify is None:
+            return
+        for info in self.embedded.interrupted:
+            text = t("wms.run.interrupted", id=info["id"], done=info["done"], total=info["total"])
+            for admin in self.config.access.admin_user_ids:
+                try:
+                    await self._notify(admin, text, self._resume_buttons(info["id"]))
+                except Exception:
+                    log.exception("could not tell %s that plan %s was interrupted",
+                                  admin, info["id"])
+        self.embedded.interrupted = []
 
     async def _drop_plan(self, entry: dict[str, Any]) -> None:
-        proposal = entry.get("proposal")
-        if proposal is not None and proposal.plan_id is not None and self.embedded is not None:
+        plan_id = entry.get("plan_id")
+        if plan_id is not None and self.embedded is not None:
             with contextlib.suppress(WmsError):
-                await self.embedded.discard(proposal.plan_id)
+                await self.embedded.discard(plan_id)
 
     def editing(self, user_id: int) -> bool:
         return user_id in self._editing
 
     async def stop(self) -> None:
+        for task in list(self._watchers):
+            task.cancel()
         if self._shelve_task is not None:
             self._shelve_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

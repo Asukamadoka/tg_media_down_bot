@@ -23,15 +23,17 @@ from ..core.errors import AuthError, WmsError
 from ..core.models import ActionType
 from ..i18n import set_language, t
 from ..nl.query import Clarification, Query
+from ..rules.schema import Rule
 from ..rules.units import human_size
 from . import nl, organize, outbound, plans, protect, tidy
 from .context import Context, open_context
+from .runs import Run, Runs
 
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "AccountUnavailable", "Clarification", "EmbeddedWms", "Query", "WmsError", "run_command",
-    "set_language",
+    "AccountUnavailable", "Clarification", "EmbeddedWms", "Query", "Rule", "Run", "WmsError",
+    "run_command", "set_language",
 ]
 
 ProviderFactory = Callable[[], Provider]
@@ -62,6 +64,9 @@ class EmbeddedWms:
         self.ctx: Context | None = None
         self._scheduler = None
         self._translator = None
+        self.runs: Runs | None = None
+        self.interrupted: list[dict[str, Any]] = []
+        """Plans a restart cut off, found at start (docs/wms/M8.3 §G5)."""
 
     async def start(self) -> list[str]:
         """Open the index and start the scheduler; returns the job names scheduled."""
@@ -69,6 +74,8 @@ class EmbeddedWms:
 
         self.ctx = await open_context(self.config, self.provider)
         self._scheduler = WmsScheduler(self.ctx, on_result=self.on_result)
+        self.runs = Runs(self.ctx, self._scheduler.lock)
+        self.interrupted = await self.runs.recover()
         self._scheduler.start()
         names = self.scheduled()
         log.info(
@@ -114,14 +121,23 @@ class EmbeddedWms:
             "timezone": self.config.schedule.timezone,
         }
 
+    async def _labelled(self, row: dict[str, Any]) -> dict[str, Any]:
+        summary = _plan_summary(row)
+        state = await self.runs.label(row["id"]) if self.runs is not None else ""
+        if state:
+            summary["state"] = state
+            summary["status_text"] = t(f"plan.status.{state}")
+        return summary
+
     async def open_plans(self, *, limit: int = 20) -> list[dict[str, Any]]:
         rows = await plans.listing(self._live, open_only=True, limit=limit)
-        return [_plan_summary(row) for row in rows]
+        return [await self._labelled(row) for row in rows]
 
     async def plan_lines(self, plan_id: int, *, limit: int = 60) -> list[str]:
         row = await plans.get(self._live, plan_id)
         lines = plans.plan_lines(row["plan"], plan_id=plan_id, limit=limit)
-        lines.append(t("cli.plan.status", status=t(f"plan.status.{row['status']}"),
+        state = (await self.runs.label(plan_id) if self.runs is not None else "") or row["status"]
+        lines.append(t("cli.plan.status", status=t(f"plan.status.{state}"),
                        progress=row["progress"], total=len(row["plan"])))
         return lines
 
@@ -129,6 +145,8 @@ class EmbeddedWms:
         """Apply a stored plan. Never with permanent deletion: a plan holding
         any is refused here (rule 2); that needs the command line."""
         ctx = self._live
+        if self.runs is not None and (run := self.runs.get(plan_id)) and run.active:
+            raise WmsError(f"plan {plan_id} is already running", key="plan.running", id=plan_id)
         async with self._scheduler.lock:
             row = await plans.get(ctx, plan_id)
             deliver = None
@@ -136,7 +154,25 @@ class EmbeddedWms:
                 deliver = outbound.make_deliver(ctx)
             return await plans.apply(ctx, plan_id, limit=limit, deliver=deliver)
 
+    async def start_apply(self, plan_id: int, *, limit: int | None = None) -> Run:
+        """Confirming a plan: start it in the background and return at once
+        (docs/wms/M8.3 §G). Watch the returned :class:`Run`; stop it with
+        :meth:`stop_apply`. A plan already running is refused (``plan.running``)."""
+        ctx = self._live
+        assert self.runs is not None
+        return await self.runs.start(
+            plan_id, limit=limit,
+            make_deliver=lambda progress: outbound.make_deliver(ctx, progress=progress))
+
+    async def stop_apply(self, plan_id: int) -> Run | None:
+        return await self.runs.stop(plan_id) if self.runs is not None else None
+
+    def run_of(self, plan_id: int) -> Run | None:
+        return self.runs.get(plan_id) if self.runs is not None else None
+
     async def discard(self, plan_id: int) -> None:
+        if self.runs is not None and (run := self.runs.get(plan_id)) and run.active:
+            raise WmsError(f"plan {plan_id} is running", key="plan.running", id=plan_id)
         async with self._scheduler.lock:
             await plans.discard(self._live, plan_id)
 
@@ -157,7 +193,7 @@ class EmbeddedWms:
         out = []
         for plan_id in plan_ids:
             row = await plans.get(self._live, plan_id)
-            out.append(_plan_summary(row))
+            out.append(await self._labelled(row))
         return out
 
     async def organize_scope(self, scope: str) -> Any:
@@ -211,7 +247,9 @@ class EmbeddedWms:
 
     @property
     def last_translator(self) -> str:
-        return getattr(self._nl(), "last_used", None) or ""
+        """Who understood the last sentence, for a person (docs/wms/M8.3 §I): the rules,
+        or a local model with the name of the machine it runs on."""
+        return getattr(self._nl(), "last_label", "") or t("nl.by.rules")
 
     async def propose(self, query: Any) -> Any:
         async with self._scheduler.lock:
@@ -224,6 +262,50 @@ class EmbeddedWms:
 
     def clarification_text(self, result: Any) -> str:
         return nl.clarification_text(result)
+
+    # A proposal's buttons must outlive a restart, so what they act on is kept
+    # in the database (meta ``nl:<id>``), not in the bot's memory (docs/wms/M8.3 §G6).
+
+    PROPOSALS_KEPT = 200
+
+    @staticmethod
+    def rules_to_json(rules: list[Any]) -> list[dict[str, Any]]:
+        """Rules as plain data (a step is written ``{op: spec}``, as in the rules file)."""
+        out = []
+        for rule in rules:
+            data = rule.model_dump(mode="json", exclude={"actions"})
+            data["actions"] = [
+                {step.op: step.spec.model_dump(mode="json") if hasattr(step.spec, "model_dump")
+                 else (step.spec or {})}
+                for step in rule.actions
+            ]
+            out.append(data)
+        return out
+
+    @staticmethod
+    def rules_from_json(items: list[dict[str, Any]]) -> list[Rule]:
+        return [Rule.model_validate(item) for item in items]
+
+    async def save_proposal(self, data: dict[str, Any], pid: int | None = None) -> int:
+        """Store (or replace) a proposal's record; returns its id."""
+        import json
+
+        store = self._live.store
+        if pid is None:
+            pid = int(await store.get_meta("nl_next") or 0) + 1
+            await store.set_meta("nl_next", str(pid))
+            await store.delete_meta(f"nl:{pid - self.PROPOSALS_KEPT}")
+        await store.set_meta(f"nl:{pid}", json.dumps(data, ensure_ascii=False))
+        return pid
+
+    async def load_proposal(self, pid: int) -> dict[str, Any] | None:
+        import json
+
+        raw = await self._live.store.get_meta(f"nl:{pid}")
+        return json.loads(raw) if raw else None
+
+    async def drop_proposal(self, pid: int) -> None:
+        await self._live.store.delete_meta(f"nl:{pid}")
 
     async def add_rules(self, rules: list[Any], *, sentence: str) -> str:
         async with self._scheduler.lock:
@@ -244,6 +326,9 @@ class EmbeddedWms:
         ]
 
     async def stop(self) -> None:
+        if self.runs is not None:
+            await self.runs.stop_all()
+            self.runs = None
         if self._scheduler is not None:
             self._scheduler.shutdown()
             self._scheduler = None

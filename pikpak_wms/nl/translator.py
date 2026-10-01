@@ -22,18 +22,22 @@ index, or anything else from the drive (README, "PikPak warehouse").
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime, tzinfo
 from typing import Any, Protocol
 
 from pydantic import ValidationError
 
 from ..core.errors import WmsError
-from .guard import guard
+from ..i18n import t
+from .guard import ground, guard
 from .hosts import BOARD, PROBE_TIMEOUT, Host, HostBoard, HostsConfigError, parse_hosts
 from .query import Clarification, Query, as_result, from_wire, normalize_wire, wire_schema
 from .rules_parser import RulesTranslator
@@ -51,6 +55,26 @@ _FALLBACK_MODELS = ("claude-opus-5", "claude-fable-5-1")
 
 class TranslationError(WmsError):
     """A model backend failed or answered outside the schema."""
+
+
+class CutOff(TranslationError):
+    """The model did not stop in time (``finish_reason: length``): this sentence only."""
+
+
+class GenerationTimeout(TranslationError):
+    """The host answers probes but did not finish this sentence in time: this sentence
+    only. It is not a reason to call the host offline (docs/wms/M8.3 §A2)."""
+
+
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def strip_thinking(raw: str) -> str:
+    """A hybrid-thinking model may put its reasoning in front of the JSON: remove the
+    ``<think>…</think>`` block (an unclosed one takes the rest of the answer with it)."""
+    raw = _THINK_BLOCK.sub("", raw)
+    start = raw.lower().find("<think>")
+    return raw if start == -1 else raw[:start]
 
 
 class Translator(Protocol):
@@ -82,7 +106,8 @@ schedule.
 - filters.created_after / created_before: when files arrived in the drive (转存, 入库, \
 下载到网盘, 新增 all mean arrival). Either an ISO 8601 datetime with the given UTC offset \
 (a bare date means the start of that day in the given time zone; "today" starts at local \
-midnight) or a duration counted back from now: "7d", "12h", "2w" (a month is 30d, a year \
+midnight; a week starts on Monday) or a duration counted back from now: "7d", "12h", \
+"2w" (a month is 30d, a year \
 365d). "最近7天" is created_after "7d"; "30天前" / "超过30天" is created_before "30d".
 - filters.min_size / max_size: bytes, binary units (1GB = 1073741824).
 - filters.kinds: video, image, audio, document, archive (compressed files), subtitle.
@@ -162,7 +187,7 @@ def _valid(data: Any) -> bool:
 
 def _parse_answer(raw: str, backend: str, stats: SchemaStats | None = None, *,
                   now: datetime | None = None, tz: tzinfo | None = None) -> Query | Clarification:
-    raw = raw.strip()
+    raw = strip_thinking(raw).strip()
     if raw.startswith("```"):
         # Some local models fence their JSON even in JSON mode.
         raw = raw.strip("`").removeprefix("json").strip()
@@ -202,6 +227,9 @@ class ClaudeTranslator:
             # Credentials come from ANTHROPIC_API_KEY (or the SDK's other sources).
             self._client = AsyncAnthropic()
         return self._client
+
+    def describe(self, _result: Query | Clarification | None = None) -> str:
+        return t("nl.by.claude", model=self.model)
 
     async def translate(self, text: str, now: datetime, tz: tzinfo) -> Query | Clarification:
         import anthropic
@@ -273,6 +301,9 @@ class OllamaTranslator:
             response.raise_for_status()
             return await response.json(content_type=None)
 
+    def describe(self, _result: Query | Clarification | None = None) -> str:
+        return t("nl.by.model", model=self.model, host="Ollama")
+
     async def translate(self, text: str, now: datetime, tz: tzinfo) -> Query | Clarification:
         body = {
             "model": self.model,
@@ -309,24 +340,47 @@ class OpenAITranslator:
     one that drops out mid-way counts as offline and the next is tried.
     When none is up, the sentence fails at once with ``nl.error.offline``.
     Connecting is bounded by 1.5 s, the answer by ``NL_OPENAI_TIMEOUT``
-    (default 60 s).
+    (default 30 s).
+
+    Docs/wms/M8.3: the answer is capped by ``NL_OPENAI_MAX_TOKENS`` (512; one value
+    or one per host), a model that hits the cap fails *that sentence* (``CutOff``)
+    and so does one that times out while its host still answers probes
+    (``GenerationTimeout``): neither makes the host "offline". A hybrid-thinking
+    model is asked not to think (``NL_OPENAI_THINK=off``, the default), and any
+    ``<think>`` block is removed anyway. ``NL_OPENAI_RETRY_MODEL`` names a second,
+    stronger model on the same host for a sentence the first cut off, could not
+    put into the schema, or asked a question about.
     """
 
     name = "openai"
 
     def __init__(self, *, base_url: str | None = None, model: str | None = None,
                  api_key: str | None = None, post: Any = None, get: Any = None,
-                 timeout: float | None = None, board: HostBoard | None = None) -> None:
+                 timeout: float | None = None, board: HostBoard | None = None,
+                 names: str | None = None, max_tokens: str | None = None,
+                 think: str | None = None, retry_model: str | None = None) -> None:
         urls = base_url if base_url is not None else os.environ.get("NL_OPENAI_BASE_URL", "")
         models = model if model is not None else os.environ.get("NL_OPENAI_MODEL", "")
+        labels = names if names is not None else os.environ.get("NL_OPENAI_NAMES", "")
+        limits = (max_tokens if max_tokens is not None
+                  else os.environ.get("NL_OPENAI_MAX_TOKENS", ""))
         self.config_error = ""
         try:
-            self.hosts = parse_hosts(urls, models)
+            self.hosts = parse_hosts(urls, models, labels, limits)
         except HostsConfigError as exc:
             self.hosts, self.config_error = [], str(exc)
+        self.think = (think if think is not None
+                      else os.environ.get("NL_OPENAI_THINK", "off")).strip().lower() or "off"
+        self.retry_model = (retry_model if retry_model is not None
+                            else os.environ.get("NL_OPENAI_RETRY_MODEL", "")).strip()
+        self.last_host: Host | None = None
+        self.last_reviewed = False
+        """The host that answered the last sentence, and whether the retry model did."""
+        self._no_effort_hosts: set[str] = set()
+        """Hosts that refused ``reasoning_effort``; later calls leave it out."""
         self.api_key = (api_key if api_key is not None
                         else os.environ.get("NL_OPENAI_API_KEY", "")).strip()
-        self.timeout = timeout if timeout is not None else _env_seconds("NL_OPENAI_TIMEOUT", 60.0)
+        self.timeout = timeout if timeout is not None else _env_seconds("NL_OPENAI_TIMEOUT", 30.0)
         self._post = post or self._http_post
         self._get = get
         self.board = board or BOARD
@@ -368,15 +422,20 @@ class OpenAITranslator:
         else:
             response_format = {"type": "json_schema", "json_schema": {
                 "name": "query", "strict": True, "schema": wire_schema()}}
-        return {
+        body: dict[str, Any] = {
             "model": host.model,
             "temperature": 0,
+            "max_tokens": host.max_tokens,
             "response_format": response_format,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_message(text, now, tz)},
             ],
         }
+        if self.think != "on" and host.base_url not in self._no_effort_hosts:
+            # Ollama's OpenAI endpoint reads this as think=false.
+            body["reasoning_effort"] = "none"
+        return body
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -388,8 +447,11 @@ class OpenAITranslator:
         started = time.perf_counter()
         try:
             answer = await self._post(f"{host.base_url}/chat/completions", body, self._headers())
+        except (TimeoutError, asyncio.TimeoutError) as exc:  # noqa: UP041 - one name on 3.10
+            # No answer in time. Whether the host is gone is for a probe to say.
+            raise _GenerationTimeout(f"{type(exc).__name__}: {exc}"[:120]) from exc
         except Exception as exc:
-            # Refused, reset, or no answer in time: the host went away.
+            # Refused or reset: the host went away.
             raise _HostDown(f"{type(exc).__name__}: {exc}"[:120]) from exc
         self.board.answered(host, time.perf_counter() - started)
         return answer
@@ -407,7 +469,17 @@ class OpenAITranslator:
                 continue
             for attempt in range(2):
                 try:
-                    return await self._translate_on(host, text, now, tz)
+                    return await self._translate_reviewed(host, text, now, tz)
+                except _GenerationTimeout as exc:
+                    # Slow on this sentence. If the host still answers, only the
+                    # sentence is lost (M8.3 §A2): no second try, nothing "offline".
+                    log.info("model host %s timed out on a sentence (%s)", host.label, exc)
+                    if await self.board.online(host, self._headers(), self._get, force=True):
+                        raise GenerationTimeout(
+                            f"openai: no answer within {self.timeout:g} s",
+                            key="nl.error.timeout", seconds=f"{self.timeout:g}") from exc
+                    self.board.offline(host, str(exc))
+                    break
                 except _HostDown as exc:
                     # One failed generation is not yet "offline": ask the host
                     # again right now, and give the sentence one more try if
@@ -424,17 +496,63 @@ class OpenAITranslator:
             "openai: every model host is offline", key="nl.error.offline",
             hosts=", ".join(host.label for host in self.hosts))
 
+    async def _translate_reviewed(self, host: Host, text: str, now: datetime,
+                                  tz: tzinfo) -> Query | Clarification:
+        """One sentence on ``host``; with ``NL_OPENAI_RETRY_MODEL``, a second look by that
+        model when the first cut off, broke the schema, or asked a question."""
+        self.last_host, self.last_reviewed = host, False
+        try:
+            first = await self._translate_on(host, text, now, tz)
+            problem: TranslationError | None = None
+        except (CutOff, TranslationError) as exc:
+            if getattr(exc, "key", "") not in ("nl.error.cut_off", "nl.error.schema"):
+                raise
+            first, problem = None, exc
+        if not self.retry_model or self.retry_model == host.model:
+            if problem is not None:
+                raise problem
+            return first  # type: ignore[return-value]
+        if problem is None and not isinstance(first, Clarification):
+            return first  # type: ignore[return-value]
+        reviewer = replace(host, model=self.retry_model)
+        try:
+            second = await self._translate_on(reviewer, text, now, tz)
+        except (TranslationError, _HostDown, _GenerationTimeout) as exc:
+            log.info("second look by %s failed: %s", self.retry_model, exc)
+            if problem is not None:
+                raise problem from exc
+            return first  # type: ignore[return-value]
+        if isinstance(second, Clarification) and problem is None:
+            return first  # type: ignore[return-value]  # no better: keep the first question
+        self.last_host, self.last_reviewed = reviewer, True
+        return second
+
+    def describe(self, result: Query | Clarification | None = None) -> str:
+        """Who understood the sentence, in the reader's language (docs/wms/M8.3 §I)."""
+        host = self.last_host or (self.hosts[0] if self.hosts else None)
+        if host is None:
+            return t("nl.by.model_unknown")
+        key = "nl.by.review" if self.last_reviewed else "nl.by.model"
+        return t(key, model=host.model, host=host.display)
+
     async def _translate_on(self, host: Host, text: str, now: datetime,
                             tz: tzinfo) -> Query | Clarification:
+        async def send(json_mode: bool) -> tuple[int, dict[str, Any]]:
+            return await self._ask(host, self._body(host, text, now, tz, json_mode=json_mode))
+
         json_mode = host.base_url in self._json_hosts
-        status, answer = await self._ask(host, self._body(host, text, now, tz,
-                                                          json_mode=json_mode))
+        sent_effort = self.think != "on" and host.base_url not in self._no_effort_hosts
+        status, answer = await send(json_mode)
         if status in (400, 404, 415, 422) and not json_mode:
             log.info("openai backend: %s refused json_schema (HTTP %s); using json_object",
                      host.label, status)
             self._json_hosts.add(host.base_url)
-            status, answer = await self._ask(host, self._body(host, text, now, tz,
-                                                              json_mode=True))
+            status, answer = await send(True)
+        if status in (400, 422) and sent_effort:
+            # A server that does not know reasoning_effort says so; ask without it from now on.
+            log.info("openai backend: %s refused reasoning_effort; leaving it out", host.label)
+            self._no_effort_hosts.add(host.base_url)
+            status, answer = await send(host.base_url in self._json_hosts)
         if status >= 400:
             message = str(((answer or {}).get("error") or {}).get("message") or "")[:120]
             raise TranslationError(f"openai: HTTP {status}: {message}", key="nl.error.backend",
@@ -444,14 +562,18 @@ class OpenAITranslator:
         if message.get("refusal"):
             return Clarification(question="nl.ask.declined")
         if choice.get("finish_reason") == "length":
-            raise TranslationError("openai: answer cut off", key="nl.error.backend",
-                                   backend=self.name, error="length")
+            # Not parsed, not retried on this model: the sentence is lost, the host is fine.
+            raise CutOff("openai: answer cut off", key="nl.error.cut_off", backend=self.name)
         return _parse_answer(str(message.get("content") or ""), self.name, self.stats,
                              now=now, tz=tz)
 
 
 class _HostDown(Exception):
     """A model host stopped answering in the middle of a translation."""
+
+
+class _GenerationTimeout(Exception):
+    """A model took longer than ``NL_OPENAI_TIMEOUT`` over one sentence."""
 
 
 def _env_seconds(name: str, default: float) -> float:
@@ -472,8 +594,10 @@ class Chain:
 
     def __init__(self, translators: Sequence[Translator]) -> None:
         self.translators = list(translators)
-        self.name = "+".join(t.name for t in self.translators)
+        self.name = "+".join(inner.name for inner in self.translators)
         self.last_used: str | None = None
+        self.last_label = ""
+        """Who understood the last sentence, for a person (docs/wms/M8.3 §I)."""
 
     async def translate(self, text: str, now: datetime, tz: tzinfo) -> Query | Clarification | None:
         failure: TranslationError | None = None
@@ -485,14 +609,28 @@ class Chain:
                 failure = exc
                 continue
             if result is not None and translator.name != "rules":
-                # A model's time condition is checked against the words (M8.2 §C).
-                result = guard(text, result)
+                # A model's time condition is checked against the words (M8.2 §C), and
+                # so is every condition it may have made up (M8.3 §C).
+                result = ground(text, guard(text, result, now=now, tz=tz))
             if result is not None:
                 self.last_used = translator.name
+                self.last_label = _label(translator, result)
                 return result
         if failure is not None:
             raise failure
         return None
+
+
+def _label(translator: Translator, result: Query | Clarification) -> str:
+    """Who understood it: the rules, a local model on a named host, or both when the
+    word checks (direction, basis) changed what the model said."""
+    if translator.name == "rules":
+        return t("nl.by.rules")
+    describe = getattr(translator, "describe", None)
+    who = describe(result) if describe is not None else translator.name
+    if isinstance(result, Query) and result.corrections:
+        return t("nl.by.both", model=who)
+    return who
 
 
 def _make(name: str) -> Translator:

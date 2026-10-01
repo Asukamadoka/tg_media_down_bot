@@ -44,36 +44,62 @@ class HostsConfigError(ValueError):
     """``NL_OPENAI_MODEL`` lists a number of models that fits no reading."""
 
 
+DEFAULT_MAX_TOKENS = 512
+"""Longest answer asked of a model. A Query is a few hundred tokens; a model that
+does not stop (docs/wms/M8.3 §A) is cut off here instead of at the time limit."""
+
+
 @dataclass(frozen=True)
 class Host:
     base_url: str
     model: str
+    name: str = ""
+    """What a person calls the machine (``Mac``); the address's host name when unset."""
+    max_tokens: int = DEFAULT_MAX_TOKENS
 
     @property
     def label(self) -> str:
         return self.base_url
 
+    @property
+    def display(self) -> str:
+        from urllib.parse import urlparse
 
-def parse_hosts(base_urls: str, models: str) -> list[Host]:
-    """``NL_OPENAI_BASE_URL`` and ``NL_OPENAI_MODEL``, comma-separated.
+        return self.name or urlparse(self.base_url).hostname or self.base_url
 
-    One model serves every host; otherwise there is one model per host, in
-    the same order.
-    """
-    urls = [url.strip().rstrip("/") for url in (base_urls or "").split(",") if url.strip()]
-    names = [name.strip() for name in (models or "").split(",") if name.strip()]
-    if not urls:
-        return []
-    if len(names) == 1:
-        names = names * len(urls)
-    elif names and len(names) != len(urls):
+
+def _spread(raw: str, count: int, variable: str, noun: str = "values") -> list[str]:
+    """One value for every host, or one per host, in order; none at all is empty strings."""
+    values = [v.strip() for v in (raw or "").split(",") if v.strip()]
+    if len(values) == 1:
+        return values * count
+    if values and len(values) != count:
         raise HostsConfigError(
-            f"NL_OPENAI_MODEL lists {len(names)} models for {len(urls)} hosts; "
+            f"{variable} lists {len(values)} {noun} for {count} hosts; "
             "give one for all of them, or one per host"
         )
-    elif not names:
-        names = [""] * len(urls)
-    return [Host(url, name) for url, name in zip(urls, names, strict=True)]
+    return values or [""] * count
+
+
+def parse_hosts(base_urls: str, models: str, names: str = "", max_tokens: str = "") -> list[Host]:
+    """``NL_OPENAI_BASE_URL``, ``NL_OPENAI_MODEL``, ``NL_OPENAI_NAMES`` and
+    ``NL_OPENAI_MAX_TOKENS``, comma-separated.
+
+    One model (name, limit) serves every host; otherwise there is one per host,
+    in the same order.
+    """
+    urls = [url.strip().rstrip("/") for url in (base_urls or "").split(",") if url.strip()]
+    if not urls:
+        return []
+    model_list = _spread(models, len(urls), "NL_OPENAI_MODEL", "models")
+    name_list = _spread(names, len(urls), "NL_OPENAI_NAMES")
+    limits = _spread(max_tokens, len(urls), "NL_OPENAI_MAX_TOKENS")
+    try:
+        counts = [int(v) if v else DEFAULT_MAX_TOKENS for v in limits]
+    except ValueError as exc:
+        raise HostsConfigError(f"NL_OPENAI_MAX_TOKENS is not a number: {max_tokens!r}") from exc
+    return [Host(url, model, name, max(count, 16))
+            for url, model, name, count in zip(urls, model_list, name_list, counts, strict=True)]
 
 
 @dataclass

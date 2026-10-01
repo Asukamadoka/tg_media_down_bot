@@ -257,8 +257,13 @@ class TestCommands:
         replies = await say(handlers, "/wms plan 1")
         assert "Plan 1" in replies[-1][0]
 
-        replies = await say(handlers, "/wms apply 1")
-        assert "Plan 1: 3 applied" in replies[-1][0]
+        # M8.3 §G: /wms apply starts the plan in the background, shows progress in a
+        # message of its own, and edits that message into the result.
+        event = Event("/wms apply 1")
+        await handlers.on_wms(event)
+        assert "Plan 1 running" in event.replies[-1][0]
+        await inbot.settle()
+        assert "Plan 1: 3 applied" in event.edits[-1][0]
         assert drive.id_at("/Media/Lost/S01/Lost.S01E01.mkv")
 
         replies = await say(handlers, "/wms apply 1")
@@ -270,6 +275,7 @@ class TestCommands:
         handlers = bot_for(config, inbot)
         await say(handlers, "/wms plan")
         await say(handlers, "/wms apply 1")
+        await inbot.settle()  # applying runs in the background now (M8.3 §G)
         entries = await inbot.embedded.audit()
         move = next(e for e in entries if e["action"] == "move")
         text, kwargs = (await say(handlers, f"/wms undo {move['id']}"))[-1]
@@ -307,7 +313,11 @@ class TestButtons:
         handlers = bot_for(config, inbot)
         await say(handlers, "/wms plan")
         event = await self.press(handlers, b"wms:apply:1")
-        (text, kwargs), = event.edits
+        # M8.3 §G: first the progress display with a [stop] button, then the result.
+        assert "Plan 1 running" in event.edits[0][0] and event.edits[0][1]["buttons"] is not None
+        assert event.answers[0][0] == "Started."
+        await inbot.settle()
+        text, kwargs = event.edits[-1]
         assert "Plan 1: 3 applied" in text and kwargs["buttons"] is None
         # A second press (an old message) is refused with the reason.
         again = await self.press(handlers, b"wms:apply:1")
@@ -324,6 +334,7 @@ class TestButtons:
         drive.add("/Inbox/lost.S01E02.mkv", size=BIG)
         await say(handlers, "/wms plan")
         await self.press(handlers, b"wms:apply:2")
+        await inbot.settle()
         rename = next(e for e in await inbot.embedded.audit() if e["action"] == "rename")
         event = await self.press(handlers, f"wms:undo:{rename['id']}".encode())
         # The rename was followed by a move, so undoing it alone is refused.
@@ -331,7 +342,9 @@ class TestButtons:
         move = next(e for e in await inbot.embedded.audit() if e["action"] == "move"
                     and "E02" in e["what"])
         event = await self.press(handlers, f"wms:undo:{move['id']}".encode())
-        assert event.edits[0][0].startswith("Undone:")
+        assert "Undoing" in event.edits[0][0]  # M8.3 §G: undo runs in the background too
+        await inbot.settle()
+        assert event.edits[-1][0].startswith("Undone:")
 
     async def test_only_admins_may_press(self, world):
         config, _drive, inbot, _ = world

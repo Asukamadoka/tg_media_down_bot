@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from pikpak_wms.ops.library import expand_layout
 
 from . import i18n
 from .utils import ALLOWED_TEMPLATE_FIELDS, parse_bool, parse_id_list, template_fields
@@ -105,6 +108,15 @@ class DownloadConfig:
     """Layout under the media directory: the original file name, by chat."""
     local_url_prefix: str = ""
     """Prepended to a kept file's path in replies, e.g. smb://nas/share/."""
+    library_dir: Path | None = None
+    """The NAS share ``资源库`` as mounted in the container (``LIBRARY_DIR``)."""
+    layout: str = "dated"
+    """``DOWNLOAD_LAYOUT``: ``dated`` files kept on the NAS under
+    ``LIBRARY_DIR/整理/年/年.月/年.月.日`` (docs/wms/M8.3 §H); ``flat`` is the older
+    ``MEDIA_DIR`` + ``MEDIA_TEMPLATE``. Without a ``LIBRARY_DIR`` it is always flat."""
+    default_layout: str = "整理/{Y}/{Y}.{M}/{Y}.{M}.{D}"
+    timezone: str = "Asia/Shanghai"
+    """The zone whose calendar day names the dated folder."""
     concurrent: int = 2
     connections: int = 4
     """Connections per large file. Parallel parts over separate connections is
@@ -122,6 +134,18 @@ class DownloadConfig:
     @property
     def media_root(self) -> Path:
         return self.media_dir if self.media_dir is not None else self.dir
+
+    @property
+    def dated(self) -> bool:
+        return self.layout == "dated" and self.library_dir is not None
+
+    def dated_dir(self, when: datetime | None = None) -> Path:
+        """The folder for files kept today (the day the download runs)."""
+        from zoneinfo import ZoneInfo
+
+        assert self.library_dir is not None
+        moment = (when or datetime.now(UTC)).astimezone(ZoneInfo(self.timezone))
+        return self.library_dir / expand_layout(self.default_layout, moment)
 
 
 @dataclass
@@ -241,6 +265,10 @@ class Config:
             raise ConfigError(
                 "missing required settings: " + ", ".join(missing)
             )
+
+        if self.download.layout not in ("dated", "flat"):
+            raise ConfigError(
+                f"DOWNLOAD_LAYOUT must be dated or flat, got {self.download.layout!r}")
 
         if self.wms.auto_shelve not in AUTO_SHELVE_CHOICES:
             raise ConfigError(
@@ -479,6 +507,18 @@ def load_config(path: Path | None = None) -> Config:
         local_url_prefix=_env_str(
             "LOCAL_URL_PREFIX", str(_get(data, "download", "local_url_prefix", default=""))
         ),
+        library_dir=_optional_path(
+            _env_str("LIBRARY_DIR", str(_get(data, "download", "library_dir", default="")))
+        ),
+        layout=_env_str(
+            "DOWNLOAD_LAYOUT", str(_get(data, "download", "layout", default="dated"))
+        ).lower(),
+        default_layout=_env_str(
+            "DOWNLOAD_DEFAULT_LAYOUT",
+            str(_get(data, "download", "default_layout", default="整理/{Y}/{Y}.{M}/{Y}.{M}.{D}")),
+        ),
+        timezone=_env_str("TIMEZONE", str(_get(data, "download", "timezone",
+                                               default="Asia/Shanghai"))),
         concurrent=_env_int(
             "CONCURRENT_DOWNLOADS", int(_get(data, "download", "concurrent", default=2))
         ),

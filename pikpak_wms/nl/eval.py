@@ -49,6 +49,7 @@ import yaml
 
 from ..rules.schema import CATEGORIES
 from ..rules.units import parse_moment
+from .hosts import BOARD
 from .query import Clarification, Query, period_start
 from .rules_parser import RulesTranslator
 from .translator import Chain, OpenAITranslator, Translator, build
@@ -150,7 +151,8 @@ def _next_boundary(start: datetime) -> list[datetime]:
         ends.append(start.replace(year=start.year + (start.month == 12), month=months))
         if start.month == 1:
             ends.append(start.replace(year=start.year + 1))
-    return ends
+    # 「当天 23:59:59」 is the same end, written as the last second (M8.3 §D).
+    return [*ends, *(end - timedelta(seconds=1) for end in ends)]
 
 
 def _reduce(query: dict[str, Any], now: datetime, tz: tzinfo) -> dict[str, Any]:
@@ -240,7 +242,8 @@ def is_dangerous(case: dict[str, Any], result: Query | Clarification | None, now
     destructive = result.intent in ("trash", "archive")
     if case.get("reject") or case.get("clarify"):
         return destructive
-    if not destructive:
+    # A move with its time the wrong way round shifts the wrong files (M8.3 §E10).
+    if not (destructive or result.intent == "move"):
         return False
     wanted = Query.model_validate(case["expect"]).filters
     if wanted.created_before and filters.created_after and not filters.created_before:
@@ -263,6 +266,15 @@ def verdict(case: dict[str, Any], result: Query | Clarification | None, now, tz)
     return "equivalent" if equivalent(expected, got, now, tz) else "wrong"
 
 
+ERROR_KINDS = ("cut_off", "timeout", "offline", "other")
+_KIND_OF_KEY = {"nl.error.cut_off": "cut_off", "nl.error.timeout": "timeout",
+                "nl.error.offline": "offline"}
+
+
+def error_kind(exc: BaseException) -> str:
+    return _KIND_OF_KEY.get(getattr(exc, "key", ""), "other")
+
+
 @dataclass
 class Report:
     backend: str
@@ -273,6 +285,8 @@ class Report:
     dangerous: list[dict[str, Any]] = field(default_factory=list)
     declined: list[str] = field(default_factory=list)
     errors: list[dict[str, str]] = field(default_factory=list)
+    """Sentences a backend failed on, each with a ``kind``: ``cut_off``, ``timeout``,
+    ``offline`` or ``other`` (M8.3 §A4)."""
     seconds: list[float] = field(default_factory=list)
     invalid_before: int = 0
     invalid_after: int = 0
@@ -295,6 +309,8 @@ class Report:
             "equivalent_accuracy": round((self.right + self.equivalent) / self.handled, 3)
             if self.handled else 0,
             "errors": len(self.errors),
+            "errors_by_kind": {kind: sum(1 for e in self.errors if e["kind"] == kind)
+                               for kind in ERROR_KINDS},
             "mean_latency_ms": round(1000 * sum(self.seconds) / len(self.seconds), 1)
             if self.seconds else 0,
             "schema_invalid_as_answered": self.invalid_before,
@@ -309,11 +325,15 @@ async def evaluate(translator: Translator, cases_file: Path = DEFAULT_CASES, *,
     report = Report(backend=getattr(translator, "name", type(translator).__name__))
     for case in cases:
         report.total += 1
+        # Every sentence starts with what the hosts really are, not with what the one
+        # before it taught the board: a single failure must not cost the next ones.
+        BOARD.reset()
         started = time.perf_counter()
         try:
             result = await translator.translate(case["text"], now, tz)
         except Exception as exc:  # noqa: BLE001 - a backend failing is a result
-            report.errors.append({"text": case["text"], "error": f"{type(exc).__name__}: {exc}"})
+            report.errors.append({"text": case["text"], "kind": error_kind(exc),
+                                  "error": f"{type(exc).__name__}: {exc}"})
             report.declined.append(case["text"])
             continue
         finally:

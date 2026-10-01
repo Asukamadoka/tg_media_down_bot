@@ -105,20 +105,24 @@ class TestDo:
         handlers, _inbot, _drive, _config = bot
         event = await send(handlers, "/do 下载所有大于1GB的视频")
         text, kwargs = event.replies[0]
-        assert text.startswith("计划如下（由 rules 理解）。现在还什么都没改。")
+        assert text.startswith("计划如下（由规则理解）。现在还什么都没改。")
         assert "理解为：下载到 NAS" in text and "命中 1 个文件，共 2.0 GiB" in text
         assert [label for label, _ in buttons_of(kwargs)] == ["确认执行", "修改", "取消"]
         assert buttons_of(kwargs)[0][1] == b"wms:nl:apply:1"
 
     async def test_plain_text_from_an_admin_is_a_sentence(self, bot):
-        handlers, _inbot, drive, _config = bot
+        handlers, inbot, drive, _config = bot
         event = await send(handlers, "把/Inbox里的图片移到/Media/图片")
         text, kwargs = event.replies[0]
         assert "移动    /Inbox/cover.jpg  →  /Media/图片/cover.jpg" in text
         confirm = buttons_of(kwargs)[0][1].decode()
         pressed = await press(handlers, confirm)
-        assert "执行 2" in pressed.edits[0][0]  # the folder, then the move
-        assert pressed.edits[0][1]["buttons"] is None
+        # M8.3 §G: answered at once, the message shows the run, the result follows.
+        assert pressed.answers[0][0] == "开始执行"
+        assert "执行中" in pressed.edits[0][0]
+        await inbot.settle()
+        assert "执行 2" in pressed.edits[-1][0]  # the folder, then the move
+        assert pressed.edits[-1][1]["buttons"] is None
         assert drive.id_at("/Media/图片/cover.jpg")
         # The same button again: the proposal is used up.
         again = await press(handlers, confirm)

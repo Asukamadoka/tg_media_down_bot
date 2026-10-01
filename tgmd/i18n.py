@@ -543,7 +543,7 @@ CATALOG: dict[str, dict[str, str]] = {
             '<code>/do 下载今天转存到网盘的所有大于1GB的视频</code>\n'
             'In a private chat, admins can also just send the sentence.'
         ),
-        'wms.nl.intro': 'Here is the plan (understood by: {translator}). Nothing has changed yet.',
+        'wms.nl.intro': 'Here is the plan (understood by {translator}). Nothing has changed yet.',
         'wms.nl.ask': '🤔 {question}\nReply with the missing part; it is added to your sentence.',
         'wms.nl.not_understood': (
             'I did not understand that as a drive command. Links are still downloaded as '
@@ -558,6 +558,25 @@ CATALOG: dict[str, dict[str, str]] = {
         'wms.nl.rule_added': 'Added to {path}. It runs on its schedule and asks before changing.',
         'wms.job.waiting': '⏰ The scheduled job “{name}” made a plan; it waits for you:',
         'wms.discarded': 'Plan {id} discarded.',
+        'wms.run.started': 'Started.',
+        'wms.run.progress': '⏳ Plan {id} running: {done}/{total} done',
+        'wms.run.file': 'Now {name} {percent}% ({done} of {size}) · {rate} · about {eta} left',
+        'wms.run.stopped': (
+            '⏹ Plan {id} stopped at {done}/{total}. What was done stays; '
+            'a half-fetched file carries on next time.'
+        ),
+        'wms.run.failed': (
+            '⚠️ Plan {id} failed: {error}\nDone {done}/{total}; press Continue to try again.'
+        ),
+        'wms.run.remaining': '{remaining} action(s) left; press Continue.',
+        'wms.run.failure_line': '✗ {path}: {error}',
+        'wms.run.interrupted': 'Plan {id} was cut off by a restart: {done}/{total} done.',
+        'wms.run.not_running': 'That plan is not running.',
+        'wms.run.stopping': 'Stopping…',
+        'wms.button.stop': 'Stop',
+        'wms.button.resume': 'Continue',
+        'wms.undo.started': 'Undoing.',
+        'wms.undo.working': '⏳ Undoing…',
         'wms.undo.preview': 'This would be undone:\n<code>{what}</code>',
         'wms.undo.done': 'Undone: <code>{what}</code>',
         'wms.shelved.planned': '📦 New files in PikPak. The rules would do this:',
@@ -954,9 +973,10 @@ CATALOG: dict[str, dict[str, str]] = {
         'verify.live.pikpak_ok': '{source}, {used} of {limit} used',
         'verify.live.pikpak_failed': '{source}: {error}',
         'verify.live.login_ok': '/pikpak login opens the Mini App',
-        'verify.model.online': 'model host {url} ({model}): online{latency}',
+        'verify.model.online': 'local model {model} ({name}, {url}): online{latency}',
         'verify.model.offline': (
-            'model host {url} ({model}): offline (the Mac or PC is off?){latency}; sentences'
+            'local model {model} ({name}, {url}): offline (the Mac or PC is off?){latency};'
+            ' sentences'
             ' the rules parser cannot read get a quick "offline" answer'
         ),
         'verify.model.latency': ', last answer {ms} ms',
@@ -1419,7 +1439,7 @@ CATALOG: dict[str, dict[str, str]] = {
             '<code>/do 下载今天转存到网盘的所有大于1GB的视频</code>\n'
             '管理员在私聊里也可以直接发这句话。'
         ),
-        'wms.nl.intro': '计划如下（由 {translator} 理解）。现在还什么都没改。',
+        'wms.nl.intro': '计划如下（由{translator}理解）。现在还什么都没改。',
         'wms.nl.ask': '🤔 {question}\n直接回复补充的部分，会接在你刚才那句话后面。',
         'wms.nl.not_understood': (
             '没听懂这是一条网盘指令。发链接照常下载；管理网盘可以这样说：'
@@ -1432,6 +1452,22 @@ CATALOG: dict[str, dict[str, str]] = {
         'wms.nl.rule_added': '已写入 {path}。以后按时运行，每次改动前都会先问你。',
         'wms.job.waiting': '⏰ 定时任务「{name}」生成了一份计划，等你确认：',
         'wms.discarded': '计划 {id} 已丢弃。',
+        'wms.run.started': '开始执行',
+        'wms.run.progress': '⏳ 计划 {id} 执行中：已完成 {done}/{total}',
+        'wms.run.file': '当前 {name} {percent}%（{done} / {size}）· {rate} · 预计剩余 {eta}',
+        'wms.run.stopped': (
+            '⏹ 计划 {id} 已停止于 {done}/{total}。做完的保留，下载到一半的文件下次接着下。'
+        ),
+        'wms.run.failed': '⚠️ 计划 {id} 出错：{error}\n已完成 {done}/{total}，可以点「继续」重试。',
+        'wms.run.remaining': '还剩 {remaining} 个动作，点「继续」接着做。',
+        'wms.run.failure_line': '✗ {path}：{error}',
+        'wms.run.interrupted': '计划 {id} 因重启中断，已完成 {done}/{total}。',
+        'wms.run.not_running': '这个计划没有在执行。',
+        'wms.run.stopping': '正在停止……',
+        'wms.button.stop': '停止',
+        'wms.button.resume': '继续',
+        'wms.undo.started': '开始撤销',
+        'wms.undo.working': '⏳ 撤销中……',
         'wms.undo.preview': '将撤销：\n<code>{what}</code>',
         'wms.undo.done': '已撤销：<code>{what}</code>',
         'wms.shelved.planned': '📦 PikPak 里有新文件，按规则将会这样整理：',
@@ -1778,9 +1814,9 @@ CATALOG: dict[str, dict[str, str]] = {
         'verify.live.pikpak_ok': '{source}，已用 {used} / {limit}',
         'verify.live.pikpak_failed': '{source}：{error}',
         'verify.live.login_ok': '/pikpak login 会打开 Mini App',
-        'verify.model.online': '模型主机 {url}（{model}）：在线{latency}',
+        'verify.model.online': '本地模型 {model}（{name}，{url}）：在线{latency}',
         'verify.model.offline': (
-            '模型主机 {url}（{model}）：离线（Mac/PC 没开机？）{latency}；'
+            '本地模型 {model}（{name}，{url}）：离线（Mac/PC 没开机？）{latency}；'
             '规则解析不了的句子会马上回复「离线」'
         ),
         'verify.model.latency': '，上次响应 {ms} 毫秒',

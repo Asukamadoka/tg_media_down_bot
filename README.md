@@ -363,8 +363,8 @@ first, for machines that are not always on (a Mac and a PC on the LAN): each
 is asked `GET /models` with a 1.5 s limit and the verdict is remembered for
 a minute, the first one that is up gets the sentence, and when none is, the
 rules parser answers what it can and the rest gets an immediate "model hosts
-offline" instead of a wait (`NL_OPENAI_TIMEOUT`, default 60 s, bounds a
-generation). `/verify` and `wms doctor` show each host, its model and the
+offline" instead of a wait (`NL_OPENAI_TIMEOUT`, default 30 s, bounds a
+generation; one that is too slow fails only that sentence, never the host). `/verify` and `wms doctor` show each host, its model and the
 last answer's latency. Small models' habits are forgiven before the answer is
 checked: the string `"null"` means null, a Quartz cron becomes five-field
 cron, a size of 0 means no limit, `today` / `本周` / `上个月` become dates, a

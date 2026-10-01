@@ -155,7 +155,8 @@ def doctor() -> None:
         latency = (t("cli.doctor.model_latency", ms=f"{host.latency_ms:.0f}")
                    if host.latency_ms is not None else "")
         table.add_row(t("cli.doctor.model_host"),
-                      f"{host.url} ({host.model}): {up}{latency}")
+                      f"{t('nl.by.model', model=host.model, host=host.name)} "
+                      f"{host.url}: {up}{latency}")
     console.print(table)
 
 
