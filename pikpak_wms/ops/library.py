@@ -3,7 +3,7 @@
 The NAS share ``资源库`` is mounted in the container as ``LIBRARY_DIR``
 (``/library``). Two cases:
 
-* no place named: ``LIBRARY_DIR/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}`` — month and day
+* no place named: ``LIBRARY_DIR/资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}`` — month and day
   without zero padding (``2026.9``, ``2026.9.30``), the day being the day the
   download *runs*, in the WMS time zone;
 * a place named: always a path *inside* the library. ``资源库/电影/日剧``,
@@ -26,7 +26,7 @@ from ..core.errors import WmsError
 LIBRARY_NAME = "资源库"
 """How the share is called on the NAS; shown in front of every library path."""
 
-DEFAULT_LAYOUT = "整理/{Y}/{Y}.{M}/{Y}.{M}.{D}"
+DEFAULT_LAYOUT = "资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}"
 
 # A first segment that names a place in the container or on the NAS itself,
 # not a folder of the library. "/电影/日剧" is a library path; "/etc/x" or
@@ -81,7 +81,7 @@ def resolve_user_path(raw: str, *, library_dir: str | Path | None = None) -> str
 
 
 def display_path(relative: str) -> str:
-    """What a person sees: 资源库/整理/2026/2026.10/2026.10.1."""
+    """What a person sees: 资源库/资源/整理/2026/2026.10/2026.10.1."""
     return "/".join(p for p in (LIBRARY_NAME, relative.strip("/")) if p)
 
 

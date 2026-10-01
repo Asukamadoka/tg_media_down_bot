@@ -425,10 +425,10 @@ class TestRuns:
 
 class TestLibraryLayout:
     @pytest.mark.parametrize(("when", "expected"), [
-        (datetime(2026, 9, 30, 12, tzinfo=SH), "整理/2026/2026.9/2026.9.30"),
-        (datetime(2026, 10, 1, 0, 5, tzinfo=SH), "整理/2026/2026.10/2026.10.1"),
-        (datetime(2026, 12, 31, 23, 59, tzinfo=SH), "整理/2026/2026.12/2026.12.31"),
-        (datetime(2027, 1, 1, 0, 0, tzinfo=SH), "整理/2027/2027.1/2027.1.1"),
+        (datetime(2026, 9, 30, 12, tzinfo=SH), "资源/整理/2026/2026.9/2026.9.30"),
+        (datetime(2026, 10, 1, 0, 5, tzinfo=SH), "资源/整理/2026/2026.10/2026.10.1"),
+        (datetime(2026, 12, 31, 23, 59, tzinfo=SH), "资源/整理/2026/2026.12/2026.12.31"),
+        (datetime(2027, 1, 1, 0, 0, tzinfo=SH), "资源/整理/2027/2027.1/2027.1.1"),
     ])
     def test_the_template_has_no_zero_padding(self, when, expected):
         assert library.expand_layout(library.DEFAULT_LAYOUT, when) == expected
@@ -476,7 +476,7 @@ class TestDefaultDestination:
         plan = await self._plan(library_world)
         (action,) = plan.actions
         line = action.describe()
-        assert "资源库/整理/" in line and "/library" not in line and "/media" not in line
+        assert "资源库/资源/整理/" in line and "/library" not in line and "/media" not in line
 
     async def test_a_named_place_is_shown_and_a_new_folder_is_announced(self, library_world):
         plan = await self._plan(library_world, to="/电影/日剧")
@@ -494,11 +494,13 @@ class TestDefaultDestination:
         plan_id = await plans.save(w.ctx, plan)
         # Planned at 23:59 on 30 September; run at 00:01 on 1 October (Shanghai).
         clock = lambda: datetime(2026, 9, 30, 16, 1, tzinfo=UTC)  # noqa: E731 - 00:01 +08:00
-        deliver = outbound.make_deliver(w.ctx, io=FakeIO(payload(3), any_url=True), clock=clock)
+        io = FakeIO(payload(3), any_url=True)
+        deliver = outbound.make_deliver(w.ctx, io=io, clock=clock)
         await plans.apply(w.ctx, plan_id, deliver=deliver)
-        assert (tmp_path / "lib" / "整理" / "2026" / "2026.10" / "2026.10.1" / "a.mkv").exists()
+        folder = tmp_path / "lib" / "资源" / "整理" / "2026" / "2026.10" / "2026.10.1"
+        assert (folder / "a.mkv").exists()
         entry = (await w.ctx.store.audit_entries())[0]
-        assert entry["after"]["library_path"] == "资源库/整理/2026/2026.10/2026.10.1"
+        assert entry["after"]["library_path"] == "资源库/资源/整理/2026/2026.10/2026.10.1"
 
     async def test_a_named_place_receives_the_file(self, library_world, tmp_path):
         w = library_world
@@ -518,7 +520,7 @@ class TestDefaultDestination:
             (tmp_path / "lib").chmod(0o755)
         if report.applied:  # running as root: nothing to refuse
             pytest.skip("the directory is writable anyway")
-        assert "No permission to write 资源库/整理" in report.failed[0]["error"]
+        assert "No permission to write 资源库/资源" in report.failed[0]["error"]
 
     async def test_without_a_library_the_old_layout_stays(self, world, tmp_path):
         world.drive.add("/Media/a.mkv", size=3)
@@ -531,9 +533,10 @@ class TestDefaultDestination:
 
 def test_the_default_day_follows_the_configured_zone():
     config = Config()
-    late = datetime(2026, 9, 30, 20, 0, tzinfo=UTC)  # already 1 October in Shanghai
-    assert outbound.library.default_dir(config, late) == "整理/2026/2026.10/2026.10.1"
-    assert library.default_dir(config, late - timedelta(hours=5)) == "整理/2026/2026.9/2026.9.30"
+    late = datetime(2026, 9, 30, 20, 0, tzinfo=UTC)  # 1 October in Shanghai
+    assert outbound.library.default_dir(config, late) == "资源/整理/2026/2026.10/2026.10.1"
+    earlier = late - timedelta(hours=5)
+    assert library.default_dir(config, earlier) == "资源/整理/2026/2026.9/2026.9.30"
 
 
 _ = Path

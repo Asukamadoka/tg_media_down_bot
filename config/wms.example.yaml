@@ -60,10 +60,10 @@ outbound:
   # local 模式的目标目录；不填则用 bot 的 MEDIA_DIR（再不行用 DOWNLOAD_DIR）
   # local_dir: /data/media
   # 资源库（docs/wms/M8.3 §H）：设了 LIBRARY_DIR（或这里的 library_dir）就按它归档：
-  # 没指定位置 → <资源库>/整理/年/年.月/年.月.日（月日不补零，下载当天）；
+  # 没指定位置 → <资源库>/资源/整理/年/年.月/年.月.日（月日不补零，下载当天）；
   # 指定了位置 → 一律当作资源库里的路径，越界的拒绝。此时 local_dir 不再使用。
   # library_dir: /library
-  # default_layout: "整理/{Y}/{Y}.{M}/{Y}.{M}.{D}"
+  # default_layout: "资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}"
   # connections: 8     # 每个文件同时开几条 HTTP Range 连接（环境变量 OUTBOUND_CONNECTIONS）
   # verify: size       # off | size | hash（环境变量 OUTBOUND_VERIFY）
 

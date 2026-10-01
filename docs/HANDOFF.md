@@ -1741,13 +1741,13 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
   - 取消或出错不删 `.part`（下次续传）；大小不对才删。
   - 一个文件下载失败（任何异常）只算这个动作失败，不再中断整个计划（原来非 `WmsError` 的异常会让整个 apply 带着没写进度的状态退出）。
 
-**H · 默认落盘到 资源库/整理/年/年.月/年.月.日**（`ops/library.py`、`ops/outbound.py`、`nl/compile.py`、`tgmd/config.py`、`tgmd/tasks.py`、`tgmd/delivery.py`）
+**H · 默认落盘到 资源库/资源/整理/年/年.月/年.月.日**（`ops/library.py`、`ops/outbound.py`、`nl/compile.py`、`tgmd/config.py`、`tgmd/tasks.py`、`tgmd/delivery.py`）
 
 - 设了 `LIBRARY_DIR`（或 `outbound.library_dir`）就进入资源库模式；没设，一切照旧（`MEDIA_DIR` + 子目录，旧测试原样通过）。设了显式的 `outbound.local_dir` 时也不进入资源库模式。
-- **没指定位置**：`LIBRARY_DIR/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}`，月日不补零，按 `Asia/Shanghai` 的**执行当天**（`make_deliver` 里每次下载时取当前时间；计划里显示的是生成计划那天，执行日不同时会变，已在计划说明里写明）。模板在 `outbound.default_layout`。
+- **没指定位置**：`LIBRARY_DIR/资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}`，月日不补零，按 `Asia/Shanghai` 的**执行当天**（`make_deliver` 里每次下载时取当前时间；计划里显示的是生成计划那天，执行日不同时会变，已在计划说明里写明）。模板在 `outbound.default_layout`。
 - **指定了位置**：「资源库/电影/日剧」「/电影/日剧」「电影/日剧」「/library/电影/日剧」都解析成 `LIBRARY_DIR/电影/日剧`；带 `..`、`~`、盘符，或第一段是 `etc`、`usr`、`var`、`tmp`、`mnt`、`media`、`volume*` 之类的绝对路径，一律拒绝并说明（`library.outside`）。**这一类「库外绝对路径」是靠一份很短的名单识别的**（容器和 NAS 的系统目录名），不在名单里的 `/xxx` 一律当作资源库里的目录——这是简报「`/电影/日剧` 要算库内路径」不得不带来的歧义，见待决问题 1。
-- 计划里写 `下载到 NAS：资源库/整理/2026/2026.10/2026.10.1`（动作行和「理解为」都是），目录不存在时加一行「将新建目录 资源库/电影/日剧」。不再出现 `/media/PikPak`。
-- 没有写入权限：「没有写入权限：资源库/整理」。
+- 计划里写 `下载到 NAS：资源库/资源/整理/2026/2026.10/2026.10.1`（动作行和「理解为」都是），目录不存在时加一行「将新建目录 资源库/电影/日剧」。不再出现 `/media/PikPak`。
+- 没有写入权限：「没有写入权限：资源库/资源」（报的是库里第一层目录）。
 - bot 自己把内容落盘到 NAS 的那条路（受限视频存到 NAS、太大传不了的）：`DOWNLOAD_LAYOUT=dated|flat`，默认 `dated`；只有同时设了 `LIBRARY_DIR` 才生效。`dated` 时文件放进当天的整理目录，文件名保持原样（**不再按频道分子目录**），回复里的链接是 `LOCAL_URL_PREFIX` + 相对 `LIBRARY_DIR` 的路径（要求把 `LOCAL_URL_PREFIX` 改成 `smb://10.10.10.2/资源库/`）。早先存进缓存的文件不搬，路径照旧可用（链接不在库里就回落成容器路径，不会拼出错的 smb 地址）。
 - 新增环境变量 `DOWNLOAD_DEFAULT_LAYOUT`、`TIMEZONE`（bot 一侧的模板和时区，默认同上）。
 
@@ -1822,7 +1822,7 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
    | `NL_OPENAI_TIMEOUT` | 可以删掉临时的 `25` | `30` | |
    | `DOWNLOAD_DEFAULT_LAYOUT`、`TIMEZONE` | 不用设 | 见 H | bot 一侧的模板和时区 |
 
-3. **权限**：容器里是 uid 10001。在宿主机上建 `资源库/整理`，属主设为 10001（bot 也会自己建，建不出来会明确报「没有写入权限：资源库/整理」）。
+3. **权限**：容器里是 uid 10001。见文末「路径更正」：`资源/整理` 已经存在，不需要新建或改属主。
 4. **数据库**：没有结构变化（只在 `meta` 表里多了 `running:*`、`interrupted:*`、`stopped:*`、`nl:*`、`nl_next`，旧版本不会读）。
 5. **改 `wms.yaml` 要用 `docker compose exec bot` 在容器里改**，不要在宿主机上 `sed -i`（会丢掉 ACL，WMS 启动失败）。本阶段 `wms.yaml` **不需要改**；`stocktake-full` 照 F 的安排到时候改回每天 05:00。
 6. **升级后第一次**：正在跑的老版本里没有「执行中」标记，所以不会有「中断」通知；之后每次重启才会有。
@@ -1830,7 +1830,7 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
 ### 用户需要在 Telegram 里做什么（对应简报的 NAS 验收）
 
 1. `/do 只下载一个印象足拍的视频`，在被反问后回复完整文件名：计划里应当有「文件名完全等于…」和「只取最新的 1 个」，**没有**多出来的时间和大小；点【确认执行】：1 秒内消息变成「执行中」，大约每 10 秒更新一次；再点一次，提示「正在执行」；点【停止】能停；点【继续】从 `.part` 接着下。
-2. 不指定位置的下载：落在 `资源库/整理/2026/2026.10/2026.10.2/`（执行当天）；`/do 把…下载到 资源库/电影/日剧`：落到对应目录，计划里有「将新建目录」。
+2. 不指定位置的下载：落在 `资源库/资源/整理/2026/2026.10/2026.10.2/`（执行当天）；`/do 把…下载到 资源库/电影/日剧`：落到对应目录，计划里有「将新建目录」。
 3. 计划第一行：「由本地模型 qwen3.6-35b-a3b（Mac）理解」。
 4. 下载速度明显高于单线程的 0.2～1.1 MiB/s。
 5. 下载到一半重启 bot：admin 收到「计划 N 因重启中断」和【继续】；重启前发出的「确认执行」按钮仍然能用。
@@ -1844,7 +1844,7 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
 docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
     --base-url http://10.10.10.1:11434/v1 --with-rules --json     # bot 的真实做法
 # 看 errors_by_kind：不应该有 offline 连坐；cut_off 应当很少
-docker compose exec bot ls -la /library/整理                      # 属主 10001 且可写
+docker compose exec bot ls -la /library/资源/整理                 # 容器里能写（靠 group_add 10）
 # 在 bot 里发 /wms plans：执行中的计划显示「执行中」（命令行的 wms plans 不读这个状态）
 ```
 
@@ -1869,3 +1869,10 @@ docker compose exec bot ls -la /library/整理                      # 属主 100
 9. **bot 落盘 `dated` 时不再按频道分子目录**（文件都在当天目录里，重名自动加 `(1)`）。
 10. **没有测过真实的 Telegram 编辑限流**：用了 5 秒的最小间隔，跳过被拒绝的编辑；真实表现要 NAS 上看。
 11. **没有在真实网络上测多连接下载**：这里只有假服务器，下载速度的提升要 NAS 上实测（验收第 5 条）。
+
+### 路径更正（后续修订）
+
+默认目录是 `资源库/资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}`（模板 `资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}`），不是 `资源库/整理/…`：Saki 已有的目录就是 `资源/整理/2026/2026.9/2026.9.27` 这样。上文所有「整理」路径都以此为准；其他行为没有变。NAS 上要这样挂载和授权：
+
+- 挂载改成 `/volume3/资源库/资源:/library/资源` 和 `/volume3/资源库/Telegram:/library/Telegram`（`LIBRARY_DIR=/library` 不变；原来的 `/media` 挂载仍保留）。上文第 1 条的 `/volume3/资源库:/library` 以这里为准。
+- bot 容器要加 `group_add: ["10"]`（NAS 的 admin 组），因为 `资源/整理` 是 `drwxrwx--- 1000:10`，容器用户 10001 不在这个组里就写不进去；不需要改属主。
