@@ -222,12 +222,16 @@ class Delivery:
         """
         download = self._config.download
         prefix = download.local_url_prefix
+        # Dated layout: the prefix names the library share, and paths are
+        # relative to it (LOCAL_URL_PREFIX=smb://nas/资源库/). Files kept before
+        # the switch still sit under the media directory and are given as paths.
+        root = download.library_dir if download.dated else download.media_root
         try:
-            inside = path.resolve().relative_to(download.media_root.resolve())
+            inside = path.resolve().relative_to(root.resolve())
         except ValueError:
             return str(path)
         if not prefix:
-            return str(download.media_root / inside)
+            return str(root / inside)
         return prefix.rstrip("/") + "/" + quote(inside.as_posix())
 
     # ---------------------------------------------------------------- pikpak

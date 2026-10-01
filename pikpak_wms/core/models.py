@@ -168,7 +168,8 @@ class Action:
         if self.type is ActionType.CREATE_FOLDER:
             return t("action.create_folder", path=after.get("path"))
         if self.type is ActionType.OUTBOUND:
-            return t("action.outbound", path=path, dest=after.get("to") or "/")
+            dest = after.get("shown") or after.get("to") or "/"
+            return t("action.outbound", path=path, dest=dest)
         if self.type is ActionType.INBOUND:
             return t("action.inbound", source=after.get("source"), path=after.get("path"))
         key = f"action.{self.type}"

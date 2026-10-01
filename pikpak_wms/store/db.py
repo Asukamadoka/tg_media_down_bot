@@ -292,6 +292,14 @@ class Store:
             )
         )
 
+    async def delete_meta(self, key: str) -> None:
+        await self._write(lambda conn: conn.execute("DELETE FROM meta WHERE key = ?", (key,)))
+
+    async def meta_with_prefix(self, prefix: str) -> dict[str, str]:
+        rows = await self._read(
+            "SELECT key, value FROM meta WHERE substr(key, 1, ?) = ?", (len(prefix), prefix))
+        return {row["key"]: row["value"] for row in rows}
+
     # ---------------------------------------------------------------- audit
 
     async def record(

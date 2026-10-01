@@ -143,6 +143,24 @@ def _iso(moment: datetime) -> str:
     return moment.isoformat(timespec="seconds")
 
 
+# A whole file name: one run of characters (no spaces) ending in a video, image or archive
+# extension (docs/wms/M8.3 §K). A path (with a /) is a place, not a name.
+_NAME_EXTENSIONS = sorted(
+    {ext for kind in ("video", "image", "archive") for ext in CATEGORIES[kind][1]},
+    key=len, reverse=True)
+_FILENAME = re.compile(
+    r"(?<![^\s，,。；;、:：(（\"'「“『])"
+    r"[^\s，,。；;、:：/\\\"'「」“”『』]{3,}\.(?:" + "|".join(_NAME_EXTENSIONS) + r")"
+    r"(?![0-9A-Za-z_])",
+    re.IGNORECASE,
+)
+_EXCEPT = re.compile(r"以外|之外|除了|除外|不是|不含|不包括|别的|其他|其它")
+# 「不要删除 /Inbox 里的视频」: told not to, so nothing is done (docs/wms/M8.3 §D).
+_NEGATED = re.compile(
+    r"(?:不要|不用|不必|无需|不需要|不想|请勿|千万别|千万不要|别)\s*(?:再|去|给我|帮我)?\s*"
+    r"(?:删除|删掉|删了|删|下载|移动|移到|挪|归档|分类|整理|清理|清空|重命名|改名|去重|取回|出库|转移)",
+    re.IGNORECASE,
+)
 _EMPTY_TRASH = re.compile(r"(?:清空|倒空|清掉|清理)\s*(?:一下)?\s*(?:回收站|垃圾桶)", re.IGNORECASE)
 _CHAT = re.compile(
     r"^\s*(?:你好|您好|嗨|哈喽|hello|hi|hey|在吗|在不在|谢谢|多谢|早上好|早安|晚上好|晚安|再见|拜拜)"
@@ -164,6 +182,12 @@ class RulesTranslator:
         return self.parse(text, now, tz)
 
     def parse(self, text: str, now: datetime, tz: tzinfo) -> Query | Clarification | None:
+        # A whole file name is lifted out first, exactly as typed: normalizing it would
+        # change characters that are really in the name (full-width brackets, digits).
+        found = _FILENAME.search(text)
+        filename = found.group(0) if found else None
+        if found:
+            text = text[: found.start()] + " " + text[found.end():]
         # Matching ignores case; paths and names keep theirs.
         s = _State(text=unicodedata.normalize("NFKC", text).strip(), now=now, tz=tz)
         if not s.text:
@@ -178,12 +202,21 @@ class RulesTranslator:
             return Clarification(question="nl.ask.chat")
         if _QUOTA.search(s.text):
             return Clarification(question="nl.ask.quota")
+        if _NEGATED.search(s.text):
+            return Clarification(question="nl.ask.negated")
 
         for step in (_tidy, _names, _paths, _schedule, _sizes, _dates, _relative_days,
-                     _windows, _kinds, _extensions, _arrival, _intents, _scope_words):
+                     _windows, _limit, _kinds, _extensions, _arrival, _intents, _scope_words):
             step(s)
 
         leftover = _PUNCT.sub("", _FILLER.sub("", s.text))
+        if filename is not None:
+            # The name says exactly which file; words describing it (「印象足拍的视频」) add
+            # nothing, unless they turn it around (「……以外的」).
+            if _EXCEPT.search(s.text):
+                return None
+            s.put("filters", "name_equals", filename)
+            leftover = ""
         if leftover or s.conflict:
             return None  # not understood, or contradictory: not ours to guess
 
@@ -501,6 +534,28 @@ def _windows(s: _State) -> None:
     s.take(_SPAN + r"\s*(?:前|以前|之前)", older)
     if s.take(r"旧文件|老文件|很久以前|以前的|很久没") and "created_before" not in s.filters:
         s.need("nl.ask.old_age")
+
+
+def _limit(s: _State) -> None:
+    """「只要一个」「前 3 个」「最新的 2 个」「最新的」: how many, newest first (M8.3 §K3)."""
+
+    def count(match: re.Match) -> None:
+        s.put("filters", "limit", max(int(number(match.group("n"))), 1))
+
+    n = r"(?P<n>" + NUM + r")"
+    def counted_verb(match: re.Match) -> None:
+        count(match)
+        verb = match.group("verb")
+        if verb in ("下载", "删除", "删掉", "删", "移动", "归档"):
+            s.text += " " + verb  # the count is read; the instruction stays to be read
+
+    s.take(r"(?:只|仅)\s*(?P<verb>要|需要|下载|取|拿|删除|删掉|删|移动|归档)?\s*" + n + r"\s*个",
+           counted_verb)
+    s.take(r"(?:最新|最近)的?\s*" + n + r"\s*个", count)
+    s.take(r"前\s*" + n + r"\s*个(?!月|星期|小时)", count)
+    things = r"视频|影片|电影|图片|照片|文件|压缩包|文档|音频|字幕|电视剧|剧集"
+    s.take(r"(?<![0-9零〇一二两三四五六七八九十])" + n + r"\s*个(?=\s*(?:" + things + "))", count)
+    s.take(r"最新的?", lambda _m: s.filters.setdefault("limit", 1))
 
 
 def _kinds(s: _State) -> None:

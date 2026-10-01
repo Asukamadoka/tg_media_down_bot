@@ -57,6 +57,11 @@ class Match(_Strict):
 
     kind: Literal["file", "folder"] | None = None
     name_regex: str | None = None
+    name_equals: str | None = None
+    """The file name, exactly (docs/wms/M8.3 §K)."""
+    file_ids: list[str] | None = None
+    """Only these files. Written by ``/do`` when a count was asked for (「只要一个」),
+    never by hand: ids mean nothing to a rule that runs again tomorrow."""
     path_glob: list[str] | None = None
     mime: list[str] | None = None
     min_size: int | None = None

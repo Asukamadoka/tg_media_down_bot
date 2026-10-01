@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -173,6 +174,14 @@ def _check_forever(ctx: Context, actions: list[Action], allow_forever: bool) -> 
         raise WmsError("permanent deletion is not enabled", key="forever.refused")
 
 
+Checkpoint = Callable[[int, ApplyReport], Awaitable[None]]
+"""Told after a batch of actions: how many of this run's actions are handled so far,
+and the report so far. The runner keeps the plan's progress current with it."""
+
+CHECKPOINT_SKIPS = 50
+"""Actions that are only skipped do not each write the plan: every this many do."""
+
+
 async def execute(
     ctx: Context,
     actions: list[Action],
@@ -182,6 +191,7 @@ async def execute(
     deliver: Deliver | None = None,
     undo_of: int | None = None,
     protection: protect.Protection | None = None,
+    checkpoint: Checkpoint | None = None,
 ) -> tuple[int, ApplyReport]:
     """Carry out ``actions`` in order, at most ``budget`` of them.
 
@@ -192,8 +202,13 @@ async def execute(
     rt = Runtime(client=ctx.client, store=ctx.store, deliver=deliver)
     report = ApplyReport(plan_id=plan_id)
     failed_files: set[str] = set()
-    index = handled = 0
+    index = handled = told = 0
     while index < len(actions) and handled < budget:
+        if checkpoint is not None and handled > told and (
+            report.applied or report.failed or handled - told >= CHECKPOINT_SKIPS
+        ):
+            told = handled
+            await checkpoint(index, report)
         action = actions[index]
         primitive = PRIMITIVES[action.type]
         if action.file_id and action.file_id in failed_files:
@@ -271,8 +286,14 @@ async def apply(
     limit: int | None = None,
     allow_forever: bool = False,
     deliver: Deliver | None = None,
+    on_step: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> ApplyReport:
-    """Apply a stored plan, or the next part of one (see the module docstring)."""
+    """Apply a stored plan, or the next part of one (see the module docstring).
+
+    The plan's progress is written as the run goes (not only at its end), so a
+    run that is stopped, or cut off by a restart, resumes where it was.
+    ``on_step(done, total)`` is told each time, for a progress display.
+    """
     row = await get(ctx, plan_id)
     if row["status"] not in OPEN:
         raise WmsError(f"plan {plan_id} is {row['status']}", key="plan.closed",
@@ -285,18 +306,31 @@ async def apply(
     budget = ctx.config.runtime.max_actions_per_run
     if limit is not None:
         budget = min(budget, max(limit, 0))
+    previous = row["result"] or {}
+
+    def merged(report: ApplyReport) -> dict[str, Any]:
+        result = report.to_result()
+        result["applied"] += int(previous.get("applied", 0))
+        for state, count in (previous.get("skipped") or {}).items():
+            result["skipped"][state] = result["skipped"].get(state, 0) + count
+        result["failed"] = list(previous.get("failed") or []) + result["failed"]
+        result["audit_ids"] = list(previous.get("audit_ids") or []) + result["audit_ids"]
+        return result
+
+    async def checkpoint(index: int, report: ApplyReport) -> None:
+        await ctx.store.update_plan(plan_id, status=PARTIAL, progress=start + index,
+                                    result=merged(report))
+        if on_step is not None:
+            await on_step(start + index, len(plan.actions))
+
     handled, report = await execute(ctx, todo, budget=budget, plan_id=plan_id, deliver=deliver,
-                                    protection=await protect.load(ctx))
+                                    protection=await protect.load(ctx), checkpoint=checkpoint)
 
     progress = start + handled
     report.remaining = len(plan.actions) - progress
-    previous = row["result"] or {}
-    result = report.to_result()
-    result["applied"] += int(previous.get("applied", 0))
-    for state, count in (previous.get("skipped") or {}).items():
-        result["skipped"][state] = result["skipped"].get(state, 0) + count
-    result["failed"] = list(previous.get("failed") or []) + result["failed"]
-    result["audit_ids"] = list(previous.get("audit_ids") or []) + result["audit_ids"]
+    result = merged(report)
+    if on_step is not None:
+        await on_step(progress, len(plan.actions))
     status = APPLIED if report.remaining == 0 else PARTIAL
     await ctx.store.update_plan(plan_id, status=status, progress=progress, result=result)
     log.info(

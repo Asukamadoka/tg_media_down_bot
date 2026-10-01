@@ -73,6 +73,10 @@ class Matcher:
         m = self.match
         if m.kind is not None and str(node.kind) != m.kind:
             return None
+        if m.name_equals is not None and node.name != m.name_equals:
+            return None
+        if m.file_ids is not None and node.file_id not in m.file_ids:
+            return None
         if m.exclude_paths and any(
             node.path == folder or node.path.startswith(folder.rstrip("/") + "/")
             for folder in m.exclude_paths

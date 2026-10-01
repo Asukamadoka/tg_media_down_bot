@@ -561,7 +561,11 @@ class JobQueue:
             )
 
         download = self._config.download
-        keep_at = place(download.media_template, download.media_root)
+        if download.dated:
+            # Kept files are filed by the day they are downloaded (docs/wms/M8.3 §H).
+            keep_at = place("{name}", download.dated_dir())
+        else:
+            keep_at = place(download.media_template, download.media_root)
         # A file that is to be kept is downloaded straight to where it stays.
         destination = unique_path(
             keep_at if mode == "local" else place(download.filename_template, download.dir)

@@ -19,6 +19,7 @@ from typing import Any, Literal
 
 from ..config import Config
 from ..core.models import FileNode, Plan, normalize_path, parse_time
+from ..ops import library
 from ..rules.engine import evaluate
 from ..rules.matcher import Matcher
 from ..rules.schema import Rule
@@ -50,9 +51,13 @@ def name_pattern(query: Query) -> str | None:
     return ("(?i)" if contains else "") + "^" + "".join(parts)
 
 
-def _match(query: Query) -> dict[str, Any]:
+def _match(query: Query, only: list[str] | None = None) -> dict[str, Any]:
     f = query.filters
     match: dict[str, Any] = {"kind": "file"}
+    if f.name_equals:
+        match["name_equals"] = f.name_equals
+    if only is not None:
+        match["file_ids"] = only
     if f.kinds:
         match["category"] = list(f.kinds)
     if f.extensions:
@@ -71,12 +76,14 @@ def _match(query: Query) -> dict[str, Any]:
     return match
 
 
-def rules_for(query: Query, config: Config, *, name: str) -> list[Rule]:
-    """The M2 rules this Query means. ``list`` has none: it only reads."""
+def rules_for(query: Query, config: Config, *, name: str,
+              only: list[str] | None = None) -> list[Rule]:
+    """The M2 rules this Query means. ``list`` has none: it only reads.
+    ``only`` limits them to those files (a count was asked for)."""
     base: dict[str, Any] = {
         "scope": query.scope.path,
         "recursive": query.scope.recursive,
-        "match": _match(query),
+        "match": _match(query, only),
     }
     if query.schedule is not None:
         base["schedule"] = {"cron": query.schedule.cron, "apply": False}
@@ -96,7 +103,9 @@ def rules_for(query: Query, config: Config, *, name: str) -> list[Rule]:
         return rules
 
     if intent == "download":
-        to = (args.dest or nl.download_to).strip("/")
+        # With a library mounted, no place named means the dated folder (M8.3 §H).
+        fallback = "" if config.outbound.library_path is not None else nl.download_to
+        to = (args.dest or fallback).strip("/")
         actions: list[Any] = [{"outbound": {"to": to, "via": "local"}}]
     elif intent == "move":
         actions = [{"move": {"to": normalize_path(args.dest or "/")}}]
@@ -152,12 +161,18 @@ def _plain_time(query: Query, now: datetime, tz: tzinfo) -> list[dict[str, Any]]
 def explain(query: Query, config: Config, *, now: datetime, tz: tzinfo) -> list[dict[str, Any]]:
     """How the sentence was understood, as stored notes (keys + args)."""
     f, notes = query.filters, []
-    if query.intent == "trash":
-        # First, in plain words, so the direction is checked at a glance before
+    if query.intent in ("trash", "archive", "move", "classify"):
+        # (M8.3 §E8: not only trash.) First, in plain words, so the direction is checked at a
+        # glance before
         # anything is confirmed (docs/wms/M8.2 §C2).
         notes.extend(_plain_time(query, now, tz))
     notes.append(_k("nl.explain.intent", intent=_k(f"nl.intent.{query.intent}")))
-    notes.extend(_k(key) for key in query.corrections)
+    for correction in query.corrections:
+        key, _, what = correction.partition(":")
+        if what:  # "nl.explain.dropped:size,time"
+            notes.append(_k(key, what=[_k(f"nl.cond.{item}") for item in what.split(",")]))
+        else:
+            notes.append(_k(key))
     notes.append(_k("nl.explain.scope" if query.scope.recursive else "nl.explain.scope_flat",
                     path=query.scope.path))
     tz_name = str(tz)
@@ -180,13 +195,20 @@ def explain(query: Query, config: Config, *, now: datetime, tz: tzinfo) -> list[
         notes.append(_k("nl.explain.kinds", kinds=[_k(f"nl.kind.{kind}") for kind in f.kinds]))
     if f.extensions:
         notes.append(_k("nl.explain.extensions", extensions=", ".join(f.extensions)))
+    if f.name_equals:
+        notes.append(_k("nl.explain.name_equals", text=f.name_equals))
+    if f.limit:
+        notes.append(_k("nl.explain.limit", n=f.limit))
     if f.name_contains:
         notes.append(_k("nl.explain.name_contains", text="」「".join(f.name_contains)))
     if f.name_regex:
         notes.append(_k("nl.explain.name_regex", regex=f.name_regex))
 
     args, nl = query.action_args, config.nl
-    if query.intent == "download":
+    if query.intent == "download" and config.outbound.library_path is not None:
+        _relative, shown = library.destination(config, args.dest or "", when=now)
+        notes.append(_k("nl.explain.dest_download", dest=shown))
+    elif query.intent == "download":
         local = config.outbound.local_path
         target = "/".join(p for p in (str(local) if local else "MEDIA_DIR",
                                       (args.dest or nl.download_to).strip("/")) if p)
@@ -263,7 +285,12 @@ async def propose(
     proposal = Proposal(kind="listing", query=query,
                         notes=[*explain(query, config, now=now, tz=tz), *(lead_notes or [])])
     matches = await _matching(store, query, now=now, tz=tz)
-    rules = rules_for(query, config, name=name)
+    only = None
+    if query.filters.limit is not None:
+        # Newest arrivals first (that is how _matching sorts): the first N.
+        matches = matches[: query.filters.limit]
+        only = [n.file_id for n in matches]
+    rules = rules_for(query, config, name=name, only=only)
     if query.schedule is not None:
         proposal.kind, proposal.rules = "rule", rules
     elif rules:

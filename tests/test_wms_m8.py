@@ -159,7 +159,8 @@ class TestHosts:
         monkeypatch.setenv("NL_OPENAI_TIMEOUT", "30")
         assert OpenAITranslator(base_url=MAC, model="m").timeout == 30
         monkeypatch.setenv("NL_OPENAI_TIMEOUT", "soon")
-        assert OpenAITranslator(base_url=MAC, model="m").timeout == 60
+        # M8.3 §A3: the default is 30 s now, not 60.
+        assert OpenAITranslator(base_url=MAC, model="m").timeout == 30
         assert hosts_module.PROBE_TIMEOUT == 1.5
 
     async def test_a_model_count_that_fits_nothing_is_an_error(self, clock):

@@ -142,7 +142,10 @@ class TestTheAcceptanceFlow:
         assert "/Telegram/Cos 花絮 EP1.mp4" in detail.replies[0][0]
 
         pressed = await press(handlers, apply_data)
-        assert "执行" in pressed.edits[0][0] and pressed.edits[0][1]["buttons"] is None
+        # M8.3 §G: the press shows the run (with a [stop] button); the result follows.
+        assert "执行中" in pressed.edits[0][0] and pressed.edits[0][1]["buttons"] is not None
+        await inbot.settle()
+        assert "执行" in pressed.edits[-1][0] and pressed.edits[-1][1]["buttons"] is None
         # Shelved into /Cos; "Cos 花絮" is named like /Cos, so no /Cos/Cos 花絮/ (M7.1 A4.1).
         assert exists(drive, "/Cos/Cos 花絮 EP1.mp4")
         audit = await inbot.embedded.audit(limit=20)
@@ -153,6 +156,7 @@ class TestTheAcceptanceFlow:
         preview = await wms_command(handlers, f"/wms undo {entry['id']}")
         assert "撤销" in preview.replies[0][0] or "undone" in preview.replies[0][0]
         undone = await press(handlers, f"wms:undo:{entry['id']}")
+        await inbot.settle()
         assert undone.edits, undone.answers
         assert exists(drive, entry["before"]["path"])
 
@@ -215,7 +219,7 @@ class TestCommands:
         assert "用法" in bad.replies[0][0]
 
     async def test_dedupe_and_plans(self, bot):
-        handlers, _inbot, drive = bot
+        handlers, inbot, drive = bot
         drive.add("/Other/copy1.mkv", size=5, hash="X")
         drive.add("/Other/copy2.mkv", size=5, hash="X")
         event = await wms_command(handlers, "/wms dedupe")
@@ -226,6 +230,7 @@ class TestCommands:
         text, kwargs = listed.replies[0]
         assert "等待确认的计划" in text and "dedupe" in text
         await press(handlers, buttons_of(kwargs)[0][1])  # ✅ applies it from the list
+        await inbot.settle()
         assert not (exists(drive, "/Other/copy1.mkv") and exists(drive, "/Other/copy2.mkv"))
         empty = await wms_command(handlers, "/wms plans")
         assert empty.replies[0][0] == "没有等待确认的计划。"

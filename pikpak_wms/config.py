@@ -151,6 +151,18 @@ class OutboundConfig(BaseModel):
     """None means the bot's ``MEDIA_DIR`` (else ``DOWNLOAD_DIR``), so files land
     in the same NAS folder the bot already writes to."""
 
+    library_dir: Path | None = None
+    """The NAS share ``资源库`` as the container sees it; None means ``LIBRARY_DIR``.
+    When there is one, files are filed by :mod:`pikpak_wms.ops.library` instead
+    of under ``local_dir`` (docs/wms/M8.3 §H)."""
+    default_layout: str = "整理/{Y}/{Y}.{M}/{Y}.{M}.{D}"
+    """Where a download goes when no place is named, under the library. ``{Y}``,
+    ``{M}``, ``{D}`` are the year, month and day the download runs, unpadded."""
+    connections: int | None = None
+    """Parallel HTTP Range connections per file; None means ``OUTBOUND_CONNECTIONS`` (8)."""
+    verify: Literal["off", "size", "hash"] | None = None
+    """What to check once a file is complete; None means ``OUTBOUND_VERIFY`` (size)."""
+
     @property
     def local_path(self) -> Path | None:
         if self.local_dir is not None:
@@ -160,6 +172,30 @@ class OutboundConfig(BaseModel):
             if value:
                 return Path(value)
         return None
+
+    @property
+    def library_path(self) -> Path | None:
+        """The library when one is mounted and ``local_dir`` is not set explicitly."""
+        if self.local_dir is not None:
+            return None
+        if self.library_dir is not None:
+            return self.library_dir
+        value = os.environ.get("LIBRARY_DIR", "").strip()
+        return Path(value) if value else None
+
+    @property
+    def parallel(self) -> int:
+        if self.connections is not None:
+            return max(self.connections, 1)
+        try:
+            return max(int(os.environ.get("OUTBOUND_CONNECTIONS", "") or 8), 1)
+        except ValueError:
+            return 8
+
+    @property
+    def verify_mode(self) -> str:
+        mode = self.verify or os.environ.get("OUTBOUND_VERIFY", "").strip().lower() or "size"
+        return mode if mode in ("off", "size", "hash") else "size"
 
 
 class NlConfig(BaseModel):
