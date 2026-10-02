@@ -321,10 +321,10 @@ class TestMediaDirectory:
 
     def test_it_can_point_at_a_nas_share(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MEDIA_DIR", "/media/nas")
-        monkeypatch.setenv("LOCAL_URL_PREFIX", "smb://<LAN_IP>/media/")
+        monkeypatch.setenv("LOCAL_URL_PREFIX", "smb://10.0.0.2/media/")
         config = load_config(write_config(tmp_path, MINIMAL_YAML))
         assert config.download.media_root == Path("/media/nas")
-        assert config.download.local_url_prefix == "smb://<LAN_IP>/media/"
+        assert config.download.local_url_prefix == "smb://10.0.0.2/media/"
 
     def test_the_default_layout_keeps_the_original_name(self, tmp_path):
         config = load_config(write_config(tmp_path, MINIMAL_YAML))

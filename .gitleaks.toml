@@ -1,0 +1,125 @@
+# gitleaks configuration (docs/security/README.md).
+#
+# This repository is public. The default rules find tokens and keys; the rules below find what
+# no entropy rule can: an address on a private network, a chat id, a share path, a device model.
+# They hold patterns only. A value that belongs here is a placeholder: `<NAS_IP>`, `<MODEL_HOST>`,
+# `<OWNER_ID>`, `<CACHE_CHAT_ID>`, `<NAS_VOLUME>`, `<USER>` in prose; in tests the invented
+# addresses 10.0.0.x, 192.168.0.x, 172.16.0.x and ids that are plainly made up (-1001234567890).
+
+title = "tg_media_down_bot"
+
+[extend]
+useDefault = true
+
+# ---- addresses and host names -------------------------------------------------------------
+
+[[rules]]
+id = "private-ipv4"
+description = "An address on a private network (use 10.0.0.x, 192.168.0.x or 172.16.0.x)"
+regex = '''(?:^|[^\d.])((?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}))(?:$|[^\d.]|\.(?:$|[^\d]))'''
+secretGroup = 1
+keywords = ["10.", "192.168", "172."]
+[rules.allowlist]
+regexes = ['''^(?:10\.0\.0\.\d+|192\.168\.0\.\d+|172\.16\.0\.\d+)$''']
+
+[[rules]]
+id = "mdns-host"
+description = "A .local host name (use <NAS_IP>, or nas.local in tests)"
+regex = '''\b[A-Za-z0-9-]+\.local\b'''
+keywords = [".local"]
+[rules.allowlist]
+regexes = ['''^(?:nas|name|host|server|mac|example|model|my-nas)\.local$''']
+
+[[rules]]
+id = "tailnet-host"
+description = "A Tailscale host name (use <FUNNEL_HOST>)"
+regex = '''\b[a-z0-9-]+\.tail[0-9a-f]+\.ts\.net\b'''
+keywords = [".ts.net"]
+
+[[rules]]
+id = "smb-url"
+description = "A share URL with a real host (use smb://<NAS_IP>/<SHARE>/)"
+regex = '''smb://[^\s"'<>`]+'''
+keywords = ["smb://"]
+[rules.allowlist]
+regexes = ['''^smb://(?:…|<[^>]+>|10\.0\.0\.\d+|nas|nas-host|host|server)(?:/.*)?$''']
+
+# ---- people and chats ---------------------------------------------------------------------
+
+[[rules]]
+id = "telegram-chat-id"
+description = "A supergroup or channel id (use <CACHE_CHAT_ID>, or -1001234567890 in tests)"
+regex = '''(?:^|[^\d])(-100\d{9,})(?:$|[^\d])'''
+secretGroup = 1
+keywords = ["-100"]
+[rules.allowlist]
+regexes = ['''^-100(?:1234567890|9876543210|9999999999|1111111111|0000000000)$''']
+
+[[rules]]
+id = "telegram-user-id"
+description = "A user, owner or admin id (use <OWNER_ID>)"
+regex = '''(?i)(?:owner|admin|user|chat|cache)[_ -]?(?:id|ids)\b["'\s:=\[]{1,6}-?\d{8,}'''
+keywords = ["id"]
+[rules.allowlist]
+regexes = ['''(?:1234567890?|9876543210?|0123456789|0{6}|1{6}|2{6}|3{6}|4{6}|5{6}|6{6}|7{6}|8{6}|9{6})''']
+
+[[rules]]
+id = "personal-email"
+description = "An e-mail address"
+regex = '''\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z]{2,}\b'''
+keywords = ["@"]
+[rules.allowlist]
+regexes = ['''(?i)(?:@example\.|@anthropic\.com$|users\.noreply\.github\.com$|^noreply@)''']
+
+# ---- the device ----------------------------------------------------------------------------
+
+[[rules]]
+id = "nas-volume-path"
+description = "A NAS volume path (use <NAS_VOLUME>, or /volume9/x in tests)"
+regex = '''/(?:[Vv]olume\d+|mnt/[A-Za-z0-9_-]+)/[^\s"'<>`]+'''
+keywords = ["/volume", "/mnt/"]
+[rules.allowlist]
+regexes = ['''^/volume9/''', '''^/mnt/c/''']
+
+[[rules]]
+id = "home-path"
+description = "A home directory with a real user name (use <USER>)"
+regex = '''/(?:Users|home)/[A-Za-z0-9<._-]+'''
+keywords = ["/users/", "/home/"]
+[rules.allowlist]
+regexes = ['''^/home/tgmd$''', '''^/(?:Users|home)/<''']
+
+[[rules]]
+id = "nas-model"
+description = "The NAS's make or model (use <NAS_MODEL>)"
+regex = '''(?i)\b(?:Synology|DS\d{3}\+?|QNAP)\b'''
+keywords = ["synology", "ds", "qnap"]
+
+# ---- known false positives of the default rules -------------------------------------------
+# Each is a variable name or an invented value; none is a credential.
+
+[[allowlists]]
+description = "Invented values in tests, variable names in code"
+targetRules = ["generic-api-key"]
+paths = [
+  '''tests/test_app\.py''',
+  '''tests/test_verify\.py''',
+  '''tgmd/bench\.py''',
+  '''pikpak_wms/core/client\.py''',
+]
+
+[[allowlists]]
+description = "This file and the audit script hold the patterns, not values"
+paths = [
+  '''\.gitleaks\.toml''',
+  '''scripts/public_audit\.py''',
+  '''docs/security/.*''',
+]
+
+[[allowlists]]
+description = "Local caches (never committed): they hold the machine's own paths"
+paths = [
+  '''(?:^|/)__pycache__/''',
+  '''(?:^|/)\.(?:ruff|pytest|mypy)_cache/''',
+  '''(?:^|/)\.git/''',
+]

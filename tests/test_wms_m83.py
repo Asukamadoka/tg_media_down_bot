@@ -442,7 +442,7 @@ class TestLibraryLayout:
     def test_a_named_place_is_always_inside_the_library(self, raw):
         assert library.resolve_user_path(raw, library_dir="/library") == "电影/日剧"
 
-    @pytest.mark.parametrize("raw", ["../x", "电影/../../x", "/etc/passwd", "<NAS_VOLUME>",
+    @pytest.mark.parametrize("raw", ["../x", "电影/../../x", "/etc/passwd", "/volume9/x",
                                      "/media/PikPak", "C:/x", "~/x", "/tmp"])
     def test_a_place_outside_is_refused(self, raw):
         with pytest.raises(WmsError) as refused:

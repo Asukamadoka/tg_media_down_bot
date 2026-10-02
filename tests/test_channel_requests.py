@@ -20,7 +20,7 @@ from tgmd.tasks import JobKind
 
 ADMIN = 4242
 OTHER_ADMIN = 5151
-CACHE = <CACHE_CHAT_ID>
+CACHE = -1001234567890
 ELSEWHERE = -1009999999999
 LINK = "https://t.me/somechannel/42"
 MAGNET = "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01&dn=x"

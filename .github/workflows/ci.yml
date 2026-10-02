@@ -40,6 +40,30 @@ jobs:
       - name: ruff check
         run: ruff check --output-format=github .
 
+  # The repository and the image are public. This fails the build on a token, or on an address,
+  # chat id, share path or device name that belongs in the NAS's .env instead (see
+  # docs/security/README.md). It reads the files of this commit with .gitleaks.toml; history
+  # is audited with scripts/public_audit.py (a finding already in history cannot be un-found).
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned release, checksum verified: the scanner is not itself a way into the build.
+      - name: Install gitleaks
+        env:
+          VERSION: "8.30.1"
+          SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          curl -sSLfo gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
+          echo "${SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+
+      - name: gitleaks (this commit's files)
+        run: ./gitleaks dir . --config .gitleaks.toml --redact --no-banner --exit-code 1
+
   test:
     runs-on: ubuntu-latest
     strategy:

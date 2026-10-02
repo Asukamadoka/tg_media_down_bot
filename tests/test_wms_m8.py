@@ -26,7 +26,7 @@ from pikpak_wms.nl.translator import (
 )
 
 NOW = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
-MAC = "http://<LAN_IP>:11434/v1"
+MAC = "http://10.0.0.1:11434/v1"
 PC = "http://192.168.0.50:11434/v1"
 
 
@@ -205,7 +205,7 @@ class TestReport:
         monkeypatch.setenv("NL_OPENAI_MODEL", "qwen2.5:7b")
         result = CliRunner().invoke(cli.app, ["doctor"])
         assert result.exit_code == 0, result.output
-        assert "<LAN_IP>" in result.output and "offline" in result.output
+        assert "10.0.0.1" in result.output and "offline" in result.output
 
 
 class TestNormalizing:

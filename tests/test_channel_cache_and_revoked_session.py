@@ -19,7 +19,7 @@ from tgmd.config import Config
 from tgmd.handlers import BotHandlers
 
 ADMIN = 4242
-CHANNEL = <CACHE_CHAT_ID>
+CHANNEL = -1001234567890
 
 
 class Rights:

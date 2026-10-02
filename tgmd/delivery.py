@@ -234,7 +234,7 @@ class Delivery:
     def local_address(self, path: Path) -> str:
         """How the user should find a kept file.
 
-        With LOCAL_URL_PREFIX (say ``smb://<LAN_IP>/media/``) it is that plus
+        With LOCAL_URL_PREFIX (say ``smb://<NAS_IP>/media/``) it is that plus
         the path inside the media directory, ready to paste into a file
         manager. Without it, the path as the container sees it.
         """

@@ -4,7 +4,7 @@
     python -m pikpak_wms.nl.eval --backend claude     # needs ANTHROPIC_API_KEY
     python -m pikpak_wms.nl.eval --backend ollama     # needs OLLAMA_URL
     python -m pikpak_wms.nl.eval --backend openai     # needs NL_OPENAI_BASE_URL, NL_OPENAI_MODEL
-    python -m pikpak_wms.nl.eval --backend openai --base-url http://<LAN_IP>:11434/v1
+    python -m pikpak_wms.nl.eval --backend openai --base-url http://<MODEL_HOST>:11434/v1
     python -m pikpak_wms.nl.eval --backend openai --with-rules   # as the bot runs it
 
 For each case the translator either *handles* it (a Query or a question
@@ -402,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="the moment the date templates and the sentences are read at, ISO;"
                              " default: the current time")
     parser.add_argument("--base-url", default=None,
-                        help="openai only: measure this one host, e.g. http://<LAN_IP>:11434/v1")
+                        help="openai only: measure this one host, e.g. http://<MODEL_HOST>:11434/v1")
     args = parser.parse_args(argv)
 
     if args.base_url and args.backend != "openai":

@@ -4,6 +4,8 @@
 
 执行方是 Claude Code（编码、测试、推送）；核验与部署方是 Cowork（NAS、Telegram 客户端）。规格见 `CC_BRIEF.md`。
 
+仓库是公开的，所以这里不写真实的地址和 id：`<NAS_IP>`、`<MODEL_HOST>`、`<OWNER_ID>`、`<CACHE_CHAT_ID>`、`<NAS_VOLUME>`、`<SHARE>` 等占位符各代表什么、真实值放在哪里，见 `docs/security/README.md`（真实值在 NAS 的 `.env` 和 Saki 私有的 skill-builder 中枢里）。
+
 ---
 
 ## 阶段 0 · 测试门禁
@@ -108,7 +110,7 @@ docker compose up -d bot
 **可选：**
 
 - `PIKPAK_LOGIN_LINK_TTL` 如果在 `.env` 或 compose 里设过，现在不再起作用，可以删；不删也照常启动。
-- 如果 NAS 的 compose 因为当初的崩溃把 `HTTP_ENABLED` 设成了 `"false"`：只要 Tailscale Funnel 的地址可用，就可以设 `HTTP_ENABLED: "true"` 和 `PUBLIC_BASE_URL: "https://<NAS_HOSTNAME>.tail212e43.ts.net"`，这样 `/pikpak login` 会直接弹出 Mini App，Telegram 媒体也能转存 PikPak。即使地址暂时不可用，现在也只是一条警告，不会再崩溃循环。**改之前先看一眼 NAS 上现在的值，不要盲改。**
+- 如果 NAS 的 compose 因为当初的崩溃把 `HTTP_ENABLED` 设成了 `"false"`：只要 Tailscale Funnel 的地址可用，就可以设 `HTTP_ENABLED: "true"` 和 `PUBLIC_BASE_URL: "https://<FUNNEL_HOST>"`，这样 `/pikpak login` 会直接弹出 Mini App，Telegram 媒体也能转存 PikPak。即使地址暂时不可用，现在也只是一条警告，不会再崩溃循环。**改之前先看一眼 NAS 上现在的值，不要盲改。**
 
 ### 用户需要在 Telegram 里做什么
 
@@ -339,7 +341,7 @@ docker pull ghcr.io/asukamadoka/tg_media_down_bot:sha-2424ad2
   - local 模式、auto 模式里受限的文件、超过 2 GB 上传上限而留下的文件，都落在这里。要留下的文件**直接下载到媒体目录**，不在工作目录里转一手。
   - **保留原文件名**：新增 `MEDIA_TEMPLATE`，默认 `{chat}/{name}`（按频道名分文件夹，文件名就是原名；同名时自动加 ` (1)`，不覆盖）。`FILENAME_TEMPLATE` 只管工作目录里的临时文件，行为不变。
   - `DELETE_AFTER_DELIVERY` 对留下的文件永远不生效。
-  - 新增可选 `LOCAL_URL_PREFIX`，例如 `smb://<LAN_IP>/media/`。设了之后，回复里给出的是「前缀 + 媒体目录内的相对路径」（已做 URL 编码，空格是 `%20`），可以直接粘进文件管理器；不设就显示容器内路径。
+  - 新增可选 `LOCAL_URL_PREFIX`，例如 `smb://<NAS_IP>/media/`。设了之后，回复里给出的是「前缀 + 媒体目录内的相对路径」（已做 URL 编码，空格是 `%20`），可以直接粘进文件管理器；不设就显示容器内路径。
 - 顺带修正 `deploy/restricted-network/docker-compose.yml` 里一条过时注释：没有公网地址时开 `HTTP_ENABLED` 已经不会 exit 2 了（阶段 1 A2）。
 
 **一处可察觉的行为变化**：以前 local 模式的文件名带消息编号前缀（`频道/123_视频.mp4`），现在是原文件名（`频道/视频.mp4`），这是简报 2d 的要求。已有的旧文件不动。想要旧格式，设 `MEDIA_TEMPLATE={chat}/{message_id}_{name}`。
@@ -1542,7 +1544,7 @@ docker compose logs bot | grep -E 'direct-v2|TG_DIRECT_ENDPOINTS'
 - **要用局域网模型**：`.env` 里
   ```
   NL_BACKEND=openai
-  NL_OPENAI_BASE_URL=http://<LAN_IP>:11434/v1,http://192.168.0.50:11434/v1
+  NL_OPENAI_BASE_URL=http://<MODEL_HOST>:11434/v1,http://192.168.0.50:11434/v1
   NL_OPENAI_MODEL=qwen2.5:7b-instruct
   ```
   模型名换成 Mac 上实际装的。Mac 上的 Ollama 要监听局域网（`OLLAMA_HOST=0.0.0.0`），并且防火墙放行；Windows PC 一样。
@@ -1562,7 +1564,7 @@ docker compose logs bot | grep -E 'direct-v2|TG_DIRECT_ENDPOINTS'
 docker compose run --rm bot wms doctor                                   # 「模型主机」行，每个最多 1.5 秒
 # Mac 上装好模型后，一次测一台：
 docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
-    --base-url http://<LAN_IP>:11434/v1 --json
+    --base-url http://<MODEL_HOST>:11434/v1 --json
 docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
     --base-url http://192.168.0.50:11434/v1 --json
 ```
@@ -1686,9 +1688,9 @@ docker compose run --rm bot wms events --raw --limit 20
 docker compose logs bot | grep -E 'event sync|events'        # 回落时有一行 warning 和原因
 # 按 bot 的真实做法测（rules 在前）和只测模型，两个数字都要
 docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
-    --base-url http://<LAN_IP>:11434/v1 --with-rules --json
+    --base-url http://<MODEL_HOST>:11434/v1 --with-rules --json
 docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
-    --base-url http://<LAN_IP>:11434/v1 --json
+    --base-url http://<MODEL_HOST>:11434/v1 --json
 ```
 
 - 目标：等价准确率 ≥ 85%，`dangerous` = 0，平均每句 ≤ 5 秒。
@@ -1748,7 +1750,7 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
 - **指定了位置**：「资源库/电影/日剧」「/电影/日剧」「电影/日剧」「/library/电影/日剧」都解析成 `LIBRARY_DIR/电影/日剧`；带 `..`、`~`、盘符，或第一段是 `etc`、`usr`、`var`、`tmp`、`mnt`、`media`、`volume*` 之类的绝对路径，一律拒绝并说明（`library.outside`）。**这一类「库外绝对路径」是靠一份很短的名单识别的**（容器和 NAS 的系统目录名），不在名单里的 `/xxx` 一律当作资源库里的目录——这是简报「`/电影/日剧` 要算库内路径」不得不带来的歧义，见待决问题 1。
 - 计划里写 `下载到 NAS：资源库/资源/整理/2026/2026.10/2026.10.1`（动作行和「理解为」都是），目录不存在时加一行「将新建目录 资源库/电影/日剧」。不再出现 `/media/PikPak`。
 - 没有写入权限：「没有写入权限：资源库/资源」（报的是库里第一层目录）。
-- bot 自己把内容落盘到 NAS 的那条路（受限视频存到 NAS、太大传不了的）：`DOWNLOAD_LAYOUT=dated|flat`，默认 `dated`；只有同时设了 `LIBRARY_DIR` 才生效。`dated` 时文件放进当天的整理目录，文件名保持原样（**不再按频道分子目录**），回复里的链接是 `LOCAL_URL_PREFIX` + 相对 `LIBRARY_DIR` 的路径（要求把 `LOCAL_URL_PREFIX` 改成 `smb://<LAN_IP>/资源库/`）。早先存进缓存的文件不搬，路径照旧可用（链接不在库里就回落成容器路径，不会拼出错的 smb 地址）。
+- bot 自己把内容落盘到 NAS 的那条路（受限视频存到 NAS、太大传不了的）：`DOWNLOAD_LAYOUT=dated|flat`，默认 `dated`；只有同时设了 `LIBRARY_DIR` 才生效。`dated` 时文件放进当天的整理目录，文件名保持原样（**不再按频道分子目录**），回复里的链接是 `LOCAL_URL_PREFIX` + 相对 `LIBRARY_DIR` 的路径（要求把 `LOCAL_URL_PREFIX` 改成 `smb://<NAS_IP>/资源库/`）。早先存进缓存的文件不搬，路径照旧可用（链接不在库里就回落成容器路径，不会拼出错的 smb 地址）。
 - 新增环境变量 `DOWNLOAD_DEFAULT_LAYOUT`、`TIMEZONE`（bot 一侧的模板和时区，默认同上）。
 
 **I · 计划里写清楚「由谁理解」**
@@ -1805,14 +1807,14 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
 
 ### NAS 上要改什么（部署清单，给 Cowork）
 
-1. **compose 加挂载**：`<NAS_VOLUME>`（`/media` 即 `<NAS_VOLUME>` 的挂载**保留**，旧的缓存路径要用）。
+1. **compose 加挂载**：`<NAS_VOLUME>:/library`（`/media` 即 `<NAS_VOLUME>/Telegram` 的挂载**保留**，旧的缓存路径要用）。
 2. **新环境变量**（都有默认值，不设也能起来，但不设 `LIBRARY_DIR` 就是旧行为）：
 
    | 变量 | 建议值 | 默认 | 作用 |
    |---|---|---|---|
    | `LIBRARY_DIR` | `/library` | 空（旧行为） | 打开资源库模式，`/do` 下载和 bot 落盘都按日期归档 |
    | `DOWNLOAD_LAYOUT` | （不用设） | `dated` | 设 `flat` 回到 `MEDIA_DIR` 旧做法 |
-   | `LOCAL_URL_PREFIX` | `smb://<LAN_IP>/资源库/` | 现为 `…/media/` | `dated` 时它指向资源库本身，路径是相对 `LIBRARY_DIR` 的；**必须同时改，否则回复里的链接打不开** |
+   | `LOCAL_URL_PREFIX` | `smb://<NAS_IP>/资源库/` | 现为 `…/media/` | `dated` 时它指向资源库本身，路径是相对 `LIBRARY_DIR` 的；**必须同时改，否则回复里的链接打不开** |
    | `OUTBOUND_CONNECTIONS` | `8` | `8` | 每个文件的并行 Range 连接数 |
    | `OUTBOUND_VERIFY` | `size` | `size` | `off`/`size`/`hash` |
    | `NL_OPENAI_NAMES` | `Mac,WinPC`（和 `NL_OPENAI_BASE_URL` 同顺序） | 主机名 | 计划里显示「（Mac）」 |
@@ -1840,9 +1842,9 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
 ```bash
 # 评测：不加任何补丁，原样跑
 docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
-    --base-url http://<LAN_IP>:11434/v1 --json                  # 只测模型
+    --base-url http://<MODEL_HOST>:11434/v1 --json                  # 只测模型
 docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
-    --base-url http://<LAN_IP>:11434/v1 --with-rules --json     # bot 的真实做法
+    --base-url http://<MODEL_HOST>:11434/v1 --with-rules --json     # bot 的真实做法
 # 看 errors_by_kind：不应该有 offline 连坐；cut_off 应当很少
 docker compose exec bot ls -la /library/资源/整理                 # 容器里能写（靠 group_add 10）
 # 在 bot 里发 /wms plans：执行中的计划显示「执行中」（命令行的 wms plans 不读这个状态）
@@ -1874,7 +1876,7 @@ docker compose exec bot ls -la /library/资源/整理                 # 容器�
 
 默认目录是 `资源库/资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}`（模板 `资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}`），不是 `资源库/整理/…`：Saki 已有的目录就是 `资源/整理/2026/2026.9/2026.9.27` 这样。上文所有「整理」路径都以此为准；其他行为没有变。NAS 上要这样挂载和授权：
 
-- 挂载改成 `<NAS_VOLUME>` 和 `<NAS_VOLUME>`（`LIBRARY_DIR=/library` 不变；原来的 `/media` 挂载仍保留）。上文第 1 条的 `<NAS_VOLUME>` 以这里为准。
+- 挂载改成 `<NAS_VOLUME>/资源:/library/资源` 和 `<NAS_VOLUME>/Telegram:/library/Telegram`（`LIBRARY_DIR=/library` 不变；原来的 `/media` 挂载仍保留）。上文第 1 条的 `<NAS_VOLUME>:/library` 以这里为准。
 - bot 容器要加 `group_add: ["10"]`（NAS 的 admin 组），因为 `资源/整理` 是 `drwxrwx--- 1000:10`，容器用户 10001 不在这个组里就写不进去；不需要改属主。
 
 ## Stage 3 · M9: proxy traffic meter, `/traffic`, budgets, download gate and rate limits
@@ -1901,7 +1903,7 @@ Spec: `docs/wms/M9-traffic-monitor-and-control.md` (baseline `b4e8ee6`). Dispatc
 
 - Budgets: `TRAFFIC_BUDGET_DAILY_CNY`, `TRAFFIC_BUDGET_MONTHLY_CNY`, `TRAFFIC_BUDGET_DAILY_PROXY_GB`; alert at 80 % and 100 % once per period. The totals are kept in memory and updated on every poll, so a budget can trip within one poll, not one flush.
 - Spike (`TRAFFIC_SPIKE_MBPS`, a 60 s average above it for 5 consecutive minutes, once per episode) and single connection (`TRAFFIC_CONN_ALERT_MB`, once per connection); both name host, category and node.
-- Route leak: a `pikpak` or `lan` connection, or one to the Mac model host `<LAN_IP>:11434`, whose outbound is `proxy`; once per host per day. An Ollama pull through the proxy is *not* a leak (it is expected and billed; see open decision 2).
+- Route leak: a `pikpak` or `lan` connection, or one to the Mac model host `<MODEL_HOST>:11434`, whose outbound is `proxy`; once per host per day. An Ollama pull through the proxy is *not* a leak (it is expected and billed; see open decision 2).
 - Which alerts were already sent is stored in the bot database, so a restart does not repeat them.
 
 **D · Gate and rate limits** (`tgmd/traffic/gate.py`)
@@ -1963,7 +1965,7 @@ Spec: `docs/wms/M9-traffic-monitor-and-control.md` (baseline `b4e8ee6`). Dispatc
 8. **Waiting inside a transfer.** The single-connection Telethon fallback and `Downloader.stream` wait for the gate inside their per-chunk hook. A long pause there can outlast a connection or, for `PIKPAK_STREAM`, PikPak's own request timeout; the transfer then fails normally and the job reports it. The parallel route waits between parts and does not have this problem. Not tested against the real services.
 9. **Server-side forwards are not gated**: a forward through the bot's `Forwarder` moves no bytes through this machine, so there is nothing to meter or limit.
 10. **A budget pause is not undone by the same budget.** After `恢复下载` against `daily_cny:2026-10-02`, that budget does not close the gate again that day; another budget, or the same one the next day, still does.
-11. **The route-leak rule** treats a `model` connection as a leak only when it is the Mac host (`<LAN_IP>:11434`), because an Ollama pull through the proxy is expected. Say if Ollama through the proxy should also alert.
+11. **The route-leak rule** treats a `model` connection as a leak only when it is the Mac host (`<MODEL_HOST>:11434`), because an Ollama pull through the proxy is expected. Say if Ollama through the proxy should also alert.
 12. **The direct cap** counts direct bytes that are neither LAN nor model (that is, internet bandwidth on the NAS), not only PikPak.
 13. **Process-wide hook.** `pikpak_wms.ops.fetch.throttle` is a module global set by the bot. It is a small, explicit seam; if you prefer it passed through `Context`, that is a separate change.
 14. **Existing test changed:** `tests/test_tasks.py`'s `FakeDownloader.download` now accepts `on_gated=None`, because the job queue passes it. No test was removed.
@@ -2222,3 +2224,99 @@ Plan 66 finished with 5 files applied and 4 failed (one 503, three `Cannot conne
 10. **Links waiting for a connection can expire** when many files queue behind the pool; the existing relink (three per file) handles it, and the patient mode's relink does not use that count.
 11. **Ask text price.** `≈¥` is `PROXY_PROBE_MAX_MB × TRAFFIC_DEFAULT_PRICE / 1024`; with the defaults that prints `0.01` as in the spec, but it moves with the price.
 12. **`docs/briefs/2026-10-01-m8.3-dispatch.md`** is still untracked in the working tree (it was before I started); I did not commit it.
+
+---
+
+## Stage 3 · M9.3: per-task start / pause / stop, cleanup pass, public-repo hygiene
+
+Spec: `docs/wms/M9.3-task-controls-cleanup-public-repo-hygiene.md` (baseline `dd947d2`). Dispatch brief: `docs/briefs/2026-10-03-m9.3-dispatch.md`. Sections 0, A, B and C are done; the commits are `docs(brief): the repository is public`, `feat(wms): M9.3 - …` and `chore(security): …`.
+
+### Open questions (read these first)
+
+1. **Decide: rewrite the public history or not.** The plan is `docs/security/history-rewrite-plan.md`; nothing was run. The audit found no token, key or password in history, only addresses, share paths, the NAS's make, the Funnel host and the cache chat id (`docs/security/2026-10-03-public-audit.md`). The old GHCR image versions hold the old code, including the address that used to be a code default; delete them after the new image is out.
+2. **The NAS's `.env` needs `TRAFFIC_MODEL_HOST=<MODEL_HOST>:11434`.** The address was a code default (`tgmd/traffic/classify.py`) and is now empty by default. Without it the "model host went through the proxy" route-leak alert is silent and a connection to the model host counts as `lan`. (Cowork: set it, restart.)
+3. **File names of the downloads in the documents and tests** (catalogue codes and a studio's name, about 85 lines in 14 files). Not in the spec's categories, so left alone and counted in the audit. Say if they should be replaced too.
+4. **`资源库`** is the library's share name and a constant in the code (`LIBRARY_NAME`) that users type as a path prefix; only the volume path around it was scrubbed. Making it a setting would change what the NAS accepts until `.env` says so.
+5. **`proxy_ui._when` prints the machine's local zone** (a container without `TZ` shows UTC). Not WMS and not a leak; a one-line change to use `TRAFFIC_TIMEZONE` if wanted.
+6. **No `AGENTS.md` or `CLAUDE.md` exists in the repo** (the task named them); I read `CC_BRIEF.md` for the red lines again.
+7. **Still open from M9 / M9.1 / M9.2** (nothing here had an obvious answer; numbers are those of each section's own list):
+   - M9, the two decisions for Saki: 1 (prefer `TG-TOKYO`?), 2 (Ollama pulls through the proxy: direct or blocked?);
+   - M9, deviations: #2 (the traffic database is `<DATA_DIR>/traffic.sqlite3`; confirm the location), #3 (mihomo's `chains` order: check one real `/connections` sample), #8 (waiting for the gate inside a transfer, untested live), #10 (a budget pause is not undone by the same budget), #13 (`fetch.throttle` as a module global);
+   - M9.1: #1, #2, #4, #6, #9–#12;
+   - M9.2: #2 (where the default 同时下载 lives), #4–#6, #9 (the gcid is recomputed on every re-run), #10 (links waiting for the pool can expire).
+
+Closed, with the answer: M9.2 #3 (a `done` row whose file is gone does not count: intended), #7 (`connections` counts open streams, `peak_connections` workers; documented in the code), #11 (the ask's price moves with the price: as designed), #12 (`docs/briefs/2026-10-01-m8.3-dispatch.md` is committed now, scrubbed); M9 deviations #5, #7, #9, #14 and M9.1 #3, #5, #8 (documented behaviour, nothing to decide).
+
+### What was done
+
+**A · Per-task controls** (`ops/control.py`, `ops/plans.py`, `ops/taskreq.py`, `ops/runs.py`, `ops/embed.py`, `tgmd/wms.py`, `tgmd/handlers.py`, `cli/main.py`)
+
+- Each file of a multi-file run has a state: `排队中 / 下载中 / 已暂停 / 已完成 / 已跳过 / 失败 / 已终止`, and three controls.
+  - **暂停**: the file's task stops transferring; `.part` and `.part.state` stay; its slot (`OUTBOUND_PARALLEL_FILES`) and its connections (the shared pool) are given back at once, so the others speed up. The plan does not finish while a file is paused. A queued file can be paused too (nothing is written for it).
+  - **开始**: a paused file goes back in the queue **at the front** and resumes from `.part.state` (the fetch is the same code a stop-and-resume uses; the test checks the next requests do not start at byte 0). A queued file jumps the queue (`Gate.promote`). A running file answers "cannot".
+  - **终止**: ends the file for this run (a `cancelled` row in `downloads`, queued and paused files included). `.part` stays and the file is still resumable later (`重试失败的`), **unless** `删除已下载部分` is pressed and confirmed (`确认删除` / `保留`), or `--delete-partial` is given on the CLI. The delete button is on the line of a stopped file and also on the plan's final message, so it is not lost when the last file ends the plan. The old `wms:cancel:<plan>:<n>` buttons already sent still work (same as 终止).
+- **Message.** One line per task, `3. name · 下载中 45% · 3.2 MiB/s`, running first, then paused, queued, failed, stopped, done, skipped; six per page as in M9.2. Buttons on the task's own row: `⏸ 暂停 3 name` or `▶ 开始 3 name`, plus `■ 终止 3`; a stopped file with a partial file gets `🗑 删除 3 name 已下载部分`. Plan row: `全部暂停`, `全部开始`, and `重试失败的` once something failed or was stopped. (Telegram cannot put a button inside the text line, so "on the same line" is: the button row sits under the page's lines in the same order, labelled with the number.) A one-file plan shows the same buttons for its one task.
+- **CLI.** `wms tasks [--plan N] [--json]` lists tasks and states (from what the running process reported in the last 30 s; for a plan nothing runs, as last saved). `wms task pause|start|stop <plan>:<n>` (`<n>` counts from 1, the number in the message; `<plan>:all` for pause and start), `wms task stop <plan>:<n> --delete-partial --yes`. The CLI writes a row in the **one request table** (`pikpak_wms/core/requests.py`, shared with `python -m tgmd.traffic ask-probe`); whichever process runs the plan (the bot, or a `wms apply` in a terminal) looks every 5 s (`taskreq.EVERY`), does it, and writes the answer back; the CLI waits up to 8 s and prints it (`done` / `refused: the task is paused` / "nothing has answered yet"). Requests older than 10 minutes are marked `expired` and never run.
+- **`wms apply` uses the downloader the plan was built with.** `wms outbound … --downloader local` now stores it in each action (`after.via`); `wms apply N` with no flag uses it. `--downloader` at apply time only fills in for plans built without one. The CLI path writes `downloads` rows (it always did through `make_deliver`; a test pins it) and takes controls as above.
+- **No signed URL anywhere** (`core/redact.py`). `https://host/path?query` becomes `https://host/…?<redacted>` in: `WmsError` messages and arguments (so in everything shown), plan results (`_failure`), the download log's `reason`, the `links` mode output (unless `--show-links` on `wms outbound` / `wms apply`), and every log record and traceback (`install_log_redaction`, a log-record factory installed by the bot and the CLI).
+
+**B · Cleanup**
+
+1. **Duplicate rows.** The audit backfill skips a file already logged at that destination (name, size, path), and every open merges existing `done` duplicates (same destination, name and size): the best-sourced row stays (a real attempt over a backfill over a scan) and takes what the others knew. This is the only place rows are deleted; failed, cancelled and skipped rows are never merged.
+2. **Backfill gaps.** Once (`meta` key `downloads:failed_backfilled`) every failed outbound in a plan's result becomes a `failed` row (`source=backfill`, the plan's last-updated time, the reason redacted, name and size from the plan body). Plan 66's four failures appear in `wms downloads --status failed` after the first start.
+3. **Gone files** are named in the summary: `源文件已不在网盘：a、b、c…` (first five, `ApplyReport.gone`, kept in `result.gone`).
+4. **Redundancy sweep.** One request-table module instead of two patterns (`probe_ask` is no longer written; its table stays in old files); one `SpeedMeter` instead of two copies of the speed window (`Run`, `FileTrack`); dead code removed (`freshness_line`, `describe_counts`, `ensure_folder`, `child_path`, three unused catalogue keys and the M9.2 cancel button text). I looked for settings nothing reads and found none among M8.3–M9.2 (the ones that look unread are read through methods or are deployment variables whose names cannot change). The mihomo reads already go through one client; the URL/host helpers had no real duplicate. `vulture` was used as the detector; its remaining findings are framework hooks and the CLI's decorated functions.
+5. **Omissions.** The open questions are triaged above. **`wms do` with the slow model host**: the rules layer now takes `<absolute date> <hh:mm> 之后入库` (and `今天/昨天/前天 hh:mm 之后`), so `下载 2026年10月2日 02:50 之后入库、还未下载过的视频` is a download plan with `created_after=2026-10-02T02:50+08:00` and `not_downloaded`, no model asked (an eval case was added). **The Mac's clock**: every time read in `pikpak_wms` names a zone from the configuration (`ZoneInfo`, `Asia/Shanghai` by default) or UTC; a test walks the source and fails on any bare `datetime.now()`, `date.today()`, `time.localtime` and the like. The NAS clock decides, not the Mac's.
+
+**C · Public repository** (`docs/security/`, `.gitleaks.toml`, `.github/workflows/ci.yml`, `scripts/public_audit.py`)
+
+- **Audit**: `docs/security/2026-10-03-public-audit.md` (values masked to ≤4 characters; per finding: file, first commit, category, in HEAD at the start and now). Headline: 0 tokens (gitleaks' four default findings are false positives, listed with reasons in `.gitleaks.toml`), 41 address findings, 20 device findings, 3 personal findings across history; 96 findings were in HEAD at the start, **0 are now**.
+- **Scrub**: docs, briefs, this file, tests, fixtures, `.env.example` and the compose example use placeholders (table in `docs/security/README.md`) or invented values (`10.0.0.x`, `-1001234567890`, `/volume9/x`). No code default holds a real address or id: `MODEL_HOST` is now `TRAFFIC_MODEL_HOST`.
+- **Prevent**: `.gitleaks.toml` (default rules + the project's address, id, path and device rules; patterns only), a `secrets` job in `ci.yml` (pinned, checksum-verified gitleaks; the image build already needs `checks`, so a finding stops the image), `.pre-commit-config.yaml` (optional), all documented in `docs/security/README.md`. `gitleaks dir .` is clean on this commit; `gitleaks git .` (history) is not, and is not meant to be: that is the audit.
+- **History**: `docs/security/history-rewrite-plan.md` (the replace-text patterns, the steps, what breaks, what to rotate whether or not). Not run.
+- **Image**: the Dockerfile already copied only code, example config and `tests/nl/`; `.dockerignore` now also leaves out docs, briefs, `.env*`, the real WMS config and token, `deploy`, `scripts`, CI files and every `*.md`; `tests/test_image_hygiene.py` pins both.
+- Where the real operational values went: **not into this repository.** They are in the NAS's `.env`, and in Saki's private `Asukamadoka/skill-builder` hub or the vault (the NAS's LAN address, the model host's, the share and volume names, the Funnel host, the cache channel's id, the owner's id).
+
+### Environment variables (all optional; the old compose starts unchanged)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TRAFFIC_MODEL_HOST` | empty | `host` or `host:port` of the LAN model host, for the route-leak alert; **set it on the NAS** (see open question 2) |
+
+### Migration notes
+
+- A `request` table is created in `wms.sqlite3` and in `traffic.sqlite3` (`CREATE TABLE IF NOT EXISTS`; nothing existing changes). `probe_ask` in `traffic.sqlite3` is no longer written; an older version of the bot reading the new file simply never sees the CLI's ask.
+- New `meta` keys: `downloads:failed_backfilled`, `tasks:<plan>` (a running plan's task snapshot, removed when it ends). New fields inside existing JSON: `plans.result.gone`, `after.via` in new outbound plan actions.
+- On the first start the failed attempts of old plans are added to `downloads`, and duplicate `done` rows are merged (the only deletion).
+
+### Deploy steps (Cowork)
+
+1. Set `TRAFFIC_MODEL_HOST=<MODEL_HOST>:11434` in the NAS's `.env` (the real address is in Saki's notes). Pull the image, restart `bot` only.
+2. `docker compose exec bot wms downloads --status failed` lists plan 66's four failures; `wms downloads --since 2026-10-01` has no file twice (abcd00123 part1/part2 in particular).
+3. Start a download plan of three files, then: `wms tasks` (live states), `wms task pause <plan>:2` (answers `done` within ~5 s; the file shows `已暂停`, its `.part` and `.part.state` are on disk, the others speed up), `wms task start <plan>:2` (it resumes, not from byte 0), `wms task stop <plan>:3` (the `.part` stays) and `wms task stop <plan>:3 --delete-partial --yes` on another. In Telegram: the same with the buttons, `全部暂停`, `全部开始`, and `删除已下载部分` with its confirm.
+4. `wms outbound <path> --downloader local` then `wms apply N` with no flag: it downloads, it does not print links. `wms outbound <path> --show-links` is the only way to see a signed link.
+5. `docker compose logs bot | grep -c "sign="` stays 0 after a 503 or a failed download.
+6. `/do 下载 2026年10月2日 02:50 之后入库、还未下载过的视频` answers at once, without the 30 s wait.
+7. Decide about the history rewrite and the old GHCR versions (open question 1).
+8. Rollback: previous image (`dd947d2`). The new table and keys are ignored by the old version; `TRAFFIC_MODEL_HOST` is ignored too.
+
+### Verification evidence
+
+- Tests: 1826 → 1877, Python 3.12, `ruff check .` clean. New files: `tests/test_wms_m93.py` (gate priority; pause frees the slot and the connections; pause then start resumes from the part; start puts a queued file first and a paused one ahead of the queue; a queued file can be paused; pause all / start all; a paused file does not end the plan and stop still works; stop with and without delete-partial; stopping a paused or queued file is logged; the request table picks up pause / stop+delete / pause-all / start-all while the plan runs and expires old requests, bad targets and verbs; a plan keeps its downloader and applies with it, with a `downloads` row; redaction in errors, the links mode, a network failure (result, summary, log table) and log records; duplicate merge, no double backfill, failed backfill once, gone names in the summary; the sentence with a clock time; no local-time reads in `pikpak_wms`), `tests/test_wms_m93_bot.py` (the lines and the buttons for every state, the presses, the delete confirm, the final message's delete button, old `取消`, pause/start all and retry, stale buttons), `tests/test_image_hygiene.py`.
+- Mutation checks (each turned a test red, then restored): a started paused file not going to the front; `--delete-partial` not deleting.
+- **Not verified here** (needs the NAS and the real services): the pause and start buttons on a real Telegram client (edit rate, how it feels with ten rows of buttons), pause under the real CDN (links that expire while paused: the existing relink handles it, not tested live), `wms task` between the bot's process and a second `docker compose exec` one (the table is plain SQLite shared by both; the busy timeout is sqlite's default 5 s), gitleaks on the NAS (it only runs in CI and on the Mac), the effect of `.dockerignore` on a local build (CI builds from a clean checkout).
+
+### Existing tests changed (red line 7; none removed)
+
+- `tests/test_wms_m92_bot.py`: the three tests that asserted the M9.2 layout (`✖ 取消 name` buttons, `▸` lines, the final message's single button) now assert the M9.3 one; the stale-button and 取消 flows are unchanged.
+- `tests/test_traffic.py`: the two model-host tests pass the host explicitly (`classify(..., model_host)`) and one new assertion says that without a configured host the address is a plain LAN one.
+- The test files with real addresses, ids and paths got invented ones (`test_config`, `test_tasks`, `test_traffic_nodes`, `test_wms_m8`, `test_wms_m83`, `test_wms_m83_nl`, `test_channel_*`): same assertions, other values.
+- `pyproject.toml` allows the imported fixtures' redefinition and full-width punctuation in the two new test files.
+
+### Deviations from the spec
+
+1. **"On the same line"**: Telegram cannot put buttons inside message text, so each task's buttons are one row of their own, in the same order and labelled with the task's number.
+2. **Task numbers in the CLI count from 1** (the number shown in the message); the buttons' callback data keeps the plan's own 0-based index, like the old `取消` buttons.
+3. **The audit's custom patterns are generic shapes** (a private address, a chat id, a volume path), not the specific values: writing the values into a pattern would publish them. Real names have no generic shape, so none are scanned for beyond home-directory paths, e-mail addresses and the NAS's make.
+4. **`wms task pause` for a plan that is not running anywhere** is not an error: it waits for 8 s, says nobody answered, and leaves the request to expire in 10 minutes.
+5. **The M9.3 spec file and the dispatch brief are committed with the feature commit; the M8.3 brief too (scrubbed).**

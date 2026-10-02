@@ -809,12 +809,12 @@ class TestMediaDirectory:
     async def test_the_reply_gives_a_path_to_paste(self, make, tmp_path):
         harness = await make(
             media_dir=tmp_path / "media",
-            local_url_prefix="smb://<LAN_IP>/media/",
+            local_url_prefix="smb://10.0.0.2/media/",
             resolver=FakeResolver([media_message(1, "Holiday 2026.mp4")]),
         )
         await harness.run(await harness.job("local"))
         assert (
-            "smb://<LAN_IP>/media/Some%20Channel/Holiday%202026.mp4"
+            "smb://10.0.0.2/media/Some%20Channel/Holiday%202026.mp4"
             in harness.bot.last_status
         )
 
@@ -833,14 +833,14 @@ class TestMediaDirectory:
         library = tmp_path / "lib"
         harness = await make(
             library_dir=library, media_dir=tmp_path / "media",
-            local_url_prefix="smb://<LAN_IP>/资源库/",
+            local_url_prefix="smb://10.0.0.2/资源库/",
             resolver=FakeResolver([media_message(1, "Holiday 2026.mp4")]),
         )
         await harness.run(await harness.job("local"))
         folder = library / "资源" / "整理" / "2026" / "2026.10" / "2026.10.1"
         assert (folder / "Holiday 2026.mp4").is_file()
         assert not (tmp_path / "media").exists()
-        assert ("smb://<LAN_IP>/资源库/%E8%B5%84%E6%BA%90/%E6%95%B4%E7%90%86/2026/2026.10/2026.10.1/"
+        assert ("smb://10.0.0.2/资源库/%E8%B5%84%E6%BA%90/%E6%95%B4%E7%90%86/2026/2026.10/2026.10.1/"
                 "Holiday%202026.mp4") in harness.bot.last_status
 
     async def test_flat_layout_keeps_the_media_directory_even_with_a_library(

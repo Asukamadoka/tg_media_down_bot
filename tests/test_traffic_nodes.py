@@ -647,8 +647,8 @@ def head(ms, *, tls=True, ok=True, error=""):
 class TestValidator:
     @pytest.mark.parametrize("host", [
         "telegram.org", "web.telegram.org", "t.me", "cdn.telegra.ph", "149.154.167.50",
-        "bujidao.cc", "sub.bujidao.cc", "api.bujidao.com", "nas.local", "<LAN_IP>",
-        "<LAN_IP>", "localhost", "", "no spaces.com", "a.com/path", "x",
+        "bujidao.cc", "sub.bujidao.cc", "api.bujidao.com", "nas.local", "192.168.0.5",
+        "10.0.0.1", "localhost", "", "no spaces.com", "a.com/path", "x",
     ])
     def test_these_are_never_routed_direct(self, host):
         assert validate_host(host) != ""

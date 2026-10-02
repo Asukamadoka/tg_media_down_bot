@@ -20,7 +20,7 @@
   - `proxy`：mihomo TUN 模式。NAS 直连不了 Telegram，所有 bot 出网都经它走 VLESS/Hysteria2 节点。
   - `bot`：`network_mode: "service:proxy"`，共享 proxy 的网络栈。
   - `tunnel`：cloudflared，待命（用户还没有域名，在申请 eu.org）。
-  - 公网入口：Tailscale Funnel `https://<NAS_HOSTNAME>.tail212e43.ts.net` → `127.0.0.1:8080`。
+  - 公网入口：Tailscale Funnel `https://<FUNNEL_HOST>` → `127.0.0.1:8080`。
   - 数据卷：`./data:/data`（`sessions/`、`db/tgmd.sqlite3`、`downloads/`），容器内 uid 10001。
 - 这套受限网络部署的来龙去脉见 `deploy/restricted-network/README.md`。
 
@@ -134,7 +134,7 @@ OK  dc4  2001:67c:4e8:f004::b:443          v6,media
   - 支持把下载目录映射到 NAS 共享文件夹。新增 `MEDIA_DIR`，默认值是现在的 `DOWNLOAD_DIR`，以保证向后兼容。
   - 文件名保留原文件名。
   - `delete_after_delivery` 对 local 模式永远不生效。
-  - 新增可选的 `LOCAL_URL_PREFIX`（比如 `smb://<LAN_IP>/<共享名>/`），回复里给出可以直接复制的路径。
+  - 新增可选的 `LOCAL_URL_PREFIX`（比如 `smb://<NAS_IP>/<共享名>/`），回复里给出可以直接复制的路径。
 - 媒体目录的宿主机路径由 Cowork 和用户确定，写进 HANDOFF 的待决问题，你不要猜。
 
 ### 2e. 流式与流水线
