@@ -58,6 +58,11 @@ class HeadResult:
     latency_ms: int | None = None
 
 
+BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+              "Chrome/120 Safari/537.36")
+"""Sent on every request: speed.cloudflare.com answers Python-urllib with 403 (error 1010)."""
+
+
 class UrllibNet:
     """The real thing: plain ``urllib`` / ``http.client`` through the listener."""
 
@@ -65,8 +70,10 @@ class UrllibNet:
         self._listener = listener
 
     def _opener(self) -> urllib.request.OpenerDirector:
-        return urllib.request.build_opener(
+        opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({"http": self._listener, "https": self._listener}))
+        opener.addheaders = [("User-Agent", BROWSER_UA)]
+        return opener
 
     def download(self, url, *, cap, seconds):
         started = time.monotonic()
@@ -95,7 +102,7 @@ class UrllibNet:
                 context=ssl.create_default_context())  # verifies the certificate
             conn.set_tunnel(host)
             target = urllib.parse.urlsplit(url).path or "/" if url else "/"
-            conn.request("HEAD", target, headers={"User-Agent": "tgmd-probe"})
+            conn.request("HEAD", target, headers={"User-Agent": BROWSER_UA})
             status = conn.getresponse().status
             conn.close()
         except ssl.SSLError as exc:
