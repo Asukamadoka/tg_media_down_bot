@@ -105,7 +105,8 @@ class FakeDownloader:
         self.downloaded: list[int] = []
         self.started = asyncio.Event()
 
-    async def download(self, message, destination: Path, *, progress=None, cancel=None):
+    async def download(self, message, destination: Path, *, progress=None, cancel=None,
+                       on_gated=None):
         self.started.set()
         if message.id in self.fail:
             raise self.fail[message.id]

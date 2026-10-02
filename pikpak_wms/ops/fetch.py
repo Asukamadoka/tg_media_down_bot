@@ -43,6 +43,11 @@ Progress = Callable[[int, int], None]
 
 UrlFor = Callable[[], Awaitable[str]]
 
+throttle: Callable[[int], Awaitable[None]] | None = None
+"""A hook the host application may set to hold downloads back, called with the
+size of each chunk before it is written. The bot sets it to wait while its
+direct-traffic cap is reached (TRAFFIC_DIRECT_DAILY_GB, docs/wms/M9 §D.1)."""
+
 
 class LinkExpired(Exception):
     """The direct link was refused (HTTP 403 / 410): ask for a new one."""
@@ -209,6 +214,8 @@ async def download(
                         chunk = chunk[: span.left]
                         if not chunk:
                             break
+                        if throttle is not None:
+                            await throttle(len(chunk))
                         await asyncio.to_thread(os.pwrite, fd, chunk, span.start + span.done)
                         span.done += len(chunk)
                         advance()
@@ -245,6 +252,8 @@ async def _plain(url_for: UrlFor, io: RangeIO, part: Path, progress: Progress | 
     written = 0
     with part.open("wb") as handle:
         async for chunk in io.stream(await url_for(), 0, None):
+            if throttle is not None:
+                await throttle(len(chunk))
             handle.write(chunk)
             written += len(chunk)
             if progress is not None:

@@ -599,13 +599,20 @@ class JobQueue:
             ),
             force=True,
         )
+        async def on_gated() -> None:
+            # The traffic gate is closed (docs/wms/M9 §D): the file waits, not fails.
+            await reporter.update(
+                t("job.gated", prefix=prefix, label=escape_html(label)), force=True
+            )
+
         path = await downloader.download(
-            message, destination, progress=on_download, cancel=job.cancel
+            message, destination, progress=on_download, cancel=job.cancel, on_gated=on_gated
         )
 
         try:
             result = await self._deliver(
-                job, mode, reporter, path, info, caption, key, prefix, keep_at
+                job, mode, reporter, path, info, caption, key, prefix, keep_at,
+                on_gated=on_gated,
             )
         except BaseException:
             # A failed delivery has no retry, so the file would sit on disk
@@ -636,7 +643,8 @@ class JobQueue:
             log.debug("could not remove %s: %s", path, exc)
 
     async def _deliver(
-        self, job, mode: str, reporter, path: Path, info, caption, key, prefix, keep_at: Path
+        self, job, mode: str, reporter, path: Path, info, caption, key, prefix, keep_at: Path,
+        on_gated=None,
     ):
         """Send the downloaded file to wherever ``mode`` points."""
         upload_tracker = RateTracker()
@@ -684,6 +692,7 @@ class JobQueue:
                 caption=caption,
                 cache_key=key if self._delivery.cache_enabled else None,
                 progress=on_upload,
+                on_gated=on_gated,
             )
         except TooLargeToUpload as exc:
             # Falling back is better than losing a download that already cost

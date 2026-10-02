@@ -37,6 +37,7 @@ from .parallel import (
     media_endpoints,
     telethon_sources,
 )
+from .traffic.gate import NullControl
 from .utils import human_rate, human_size, sanitize_component
 
 log = logging.getLogger(__name__)
@@ -210,8 +211,12 @@ class Downloader:
         endpoints: EndpointChooser = default_endpoints,
         route: MediaRoute | None = None,
         direct: DirectRouteV2 | None = None,
+        control=None,
     ) -> None:
         self._client = client
+        # The traffic gate and rate limit (docs/wms/M9 §D): downloads wait while
+        # the gate is closed and are paced by the media token bucket.
+        self._control = control or NullControl()
         self._connections = max(1, min(connections, MAX_CONNECTIONS))
         self._endpoints = endpoints
         # TG_DIRECT_MEDIA=auto: prefer media endpoints, which on the NAS are
@@ -229,8 +234,12 @@ class Downloader:
         *,
         progress: ProgressCallback | None = None,
         cancel: asyncio.Event | None = None,
+        on_gated: Callable[[], Awaitable[None] | None] | None = None,
     ) -> Path:
         """Download ``message``'s media to ``destination``.
+
+        ``on_gated`` is told once if the traffic gate is closed and the file
+        has to wait for it.
 
         Large documents go over several connections at once when that is
         configured; anything that cannot, falls back to one. Retries transient
@@ -241,6 +250,9 @@ class Downloader:
         info = describe_media(message)
         destination.parent.mkdir(parents=True, exist_ok=True)
         ensure_disk_space(destination.parent, info.size)
+
+        if not await self._control.before_file("download", notice=on_gated, cancel=cancel):
+            raise DownloadCancelled()
 
         started = time.monotonic()
         transfer = await self._parallel(message, info, destination, progress, cancel)
@@ -332,6 +344,7 @@ class Downloader:
                         cancel=cancel,
                         refresh=refresh,
                         flood_ceiling=_FLOOD_WAIT_CEILING,
+                        **self._hooks(cancel),
                     )
                     return Transfer(
                         size=size,
@@ -373,6 +386,7 @@ class Downloader:
                     cancel=cancel,
                     refresh=refresh,
                     flood_ceiling=_FLOOD_WAIT_CEILING,
+                    **self._hooks(cancel),
                 )
                 return Transfer(size=size, seconds=0.0, connections=len(sources),
                                 dc_id=dc_id, endpoint=label, route=DIRECT_ROUTE)
@@ -391,6 +405,18 @@ class Downloader:
             self._cleanup(destination)
             raise
         return None
+
+    def _hooks(self, cancel: asyncio.Event | None) -> dict:
+        """The traffic gate and rate limit, as ``download_parts`` takes them."""
+
+        async def gate() -> None:
+            if not await self._control.before_part("download", cancel=cancel):
+                raise DownloadCancelled()
+
+        async def pace(amount: int) -> None:
+            await self._control.pace("media", amount)
+
+        return {"before_part": gate, "pace": pace}
 
     async def _direct_route_to(self, dc_id: int) -> bool:
         """True when a direct media route to this DC is on and exists."""
@@ -412,7 +438,7 @@ class Downloader:
                 result = await self._client.download_media(
                     message,
                     file=str(destination),
-                    progress_callback=self._wrap_progress(progress, cancel),
+                    progress_callback=self._wrap_progress(progress, cancel, self._control),
                 )
             except BaseException as exc:
                 # Every way out of a failed attempt, retried or not, starts by
@@ -459,6 +485,9 @@ class Downloader:
             limit=chunks,
             file_size=document.size,
         ):
+            # A stream is a Telegram download too: the gate and limit apply.
+            await self._control.before_part("download")
+            await self._control.pace("media", len(chunk))
             if skip:
                 chunk = chunk[skip:]
                 skip = 0
@@ -470,18 +499,26 @@ class Downloader:
 
     @staticmethod
     def _wrap_progress(
-        progress: ProgressCallback | None, cancel: asyncio.Event | None
+        progress: ProgressCallback | None, cancel: asyncio.Event | None, control=None
     ):
         """Adapt our callback to Telethon's, and use it as a cancellation point.
 
         Telethon has no way to abort a transfer, but it does call the progress
         callback every chunk, so raising from there stops the download within
-        a chunk or two.
+        a chunk or two. The same hook is where the single-connection route
+        waits for the traffic gate and spends the rate limit.
         """
+        control = control or NullControl()
+        seen = 0
 
         async def callback(received: int, total: int) -> None:
+            nonlocal seen
             if cancel is not None and cancel.is_set():
                 raise DownloadCancelled()
+            if not await control.before_part("download", cancel=cancel):
+                raise DownloadCancelled()
+            await control.pace("media", max(0, received - seen))
+            seen = received
             if progress is None:
                 return
             result = progress(received, total)

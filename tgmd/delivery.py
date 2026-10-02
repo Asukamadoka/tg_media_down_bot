@@ -20,6 +20,7 @@ from .db import Database
 from .downloader import MediaInfo
 from .i18n import Explained, t
 from .pikpak import PikPakError, PikPakService
+from .traffic.gate import NullControl
 from .utils import escape_html, human_size, unique_path
 from .webserver import FileServer
 
@@ -59,7 +60,10 @@ class Delivery:
         db: Database,
         pikpak: PikPakService,
         file_server: FileServer,
+        control=None,
     ) -> None:
+        # The traffic gate and upload rate limit (docs/wms/M9 §D).
+        self._control = control or NullControl()
         self._bot = bot
         self._config = config
         self._db = db
@@ -110,12 +114,14 @@ class Delivery:
         if cache_chat_id is None:
             return
         try:
+            await self._control.before_file("upload")
             message = await self._bot.send_file(
                 cache_chat_id,
                 str(path),
                 caption=key,
                 attributes=self._attributes(info),
                 force_document=not (info.is_video or info.is_photo or info.is_audio),
+                progress_callback=self._wrap_progress(None),
             )
             await self._db.cache_store(
                 key, cache_chat_id, message.id, info.file_name, info.size
@@ -158,8 +164,12 @@ class Delivery:
         caption: str = "",
         cache_key: str | None = None,
         progress: ProgressCallback | None = None,
+        on_gated: Callable[[], Awaitable[None] | None] | None = None,
     ) -> DeliveryResult:
-        """Upload the file back to the requesting chat."""
+        """Upload the file back to the requesting chat.
+
+        ``on_gated`` is told once if the traffic gate is closed and the upload
+        has to wait for it."""
         size = path.stat().st_size if path.exists() else (info.size or 0)
         limit = self._config.delivery.max_upload_bytes
         if size > limit:
@@ -167,6 +177,7 @@ class Delivery:
                 key="err.delivery.too_large", size=human_size(size), limit=human_size(limit)
             )
 
+        await self._control.before_file("upload", notice=on_gated)
         try:
             await self._bot.send_file(
                 chat_id,
@@ -367,12 +378,18 @@ class Delivery:
 
     # ------------------------------------------------------------- internals
 
-    @staticmethod
-    def _wrap_progress(progress: ProgressCallback | None):
-        if progress is None:
-            return None
+    def _wrap_progress(self, progress: ProgressCallback | None):
+        """Telethon calls this after each uploaded part: where the upload waits
+        for the traffic gate and spends the upload rate limit."""
+        seen = 0
 
         async def callback(sent: int, total: int) -> None:
+            nonlocal seen
+            await self._control.before_part("upload")
+            await self._control.pace("upload", max(0, sent - seen))
+            seen = sent
+            if progress is None:
+                return
             result = progress(sent, total)
             if asyncio.iscoroutine(result):
                 await result

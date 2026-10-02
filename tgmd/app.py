@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
+from pikpak_wms.ops import fetch as wms_fetch
+
 from . import bootstrap, botconfig, i18n
 from .clients import start_clients
 from .config import Config, ConfigError, load_config, parse_direct_endpoints
@@ -29,6 +31,8 @@ from .portal import PikPakLoginPortal
 from .resolver import Resolver
 from .setup import USER_SESSION_KEY, SetupWizard, stored_user_session
 from .tasks import JobQueue
+from .traffic import TrafficControl, TrafficService
+from .traffic.store import TrafficStore
 from .utils import escape_html
 from .webserver import FileServer
 from .wms import WmsInBot
@@ -73,6 +77,8 @@ class Application:
         self.direct: DirectRouteV2 | None = None
         self.wms: WmsInBot | None = None
         self.wms_panel: WmsPanel | None = None
+        self.control: TrafficControl | None = None
+        self.traffic: TrafficService | None = None
         self.session_rejected: tuple[str, str] | None = None
         """(where the session came from, why Telegram refused it), at startup."""
         self._stopping = asyncio.Event()
@@ -87,6 +93,13 @@ class Application:
         # An admin claimed, or a cache channel chosen, on a previous run is
         # merged into the live config before anything reads it.
         await bootstrap.load_runtime_settings(self.db, config)
+
+        # The gate and rate limits come first: every download and upload below
+        # is handed them (docs/wms/M9 §D). Paused and the limits survive restarts.
+        self.control = TrafficControl(config.traffic, self.db)
+        await self.control.load()
+        # TRAFFIC_DIRECT_DAILY_GB holds back the WMS download from PikPak.
+        wms_fetch.throttle = self.control.before_direct
 
         # PikPak and its login portal come first: the portal registers its
         # routes on the same HTTP server that serves files to PikPak.
@@ -117,7 +130,9 @@ class Application:
         # chats it belongs to itself, which still covers some setups.
         reading_client = self.user or self.bot
 
-        delivery = Delivery(self.bot, config, self.db, self.pikpak, self.file_server)
+        delivery = Delivery(
+            self.bot, config, self.db, self.pikpak, self.file_server, control=self.control
+        )
         # TG_DIRECT_MEDIA=auto is refused (docs/wms/M7 §7.1): the direct media
         # connections reuse the main session's auth key, and seen from two IP
         # addresses at once (direct vs. proxy) Telegram answered with
@@ -152,12 +167,14 @@ class Application:
                 connections=config.download.connections,
                 route=self.route,
                 direct=self.direct,
+                control=self.control,
             ),
             bot_downloader=Downloader(
                 self.bot,
                 connections=config.download.connections,
                 route=self.route,
                 direct=self.direct,
+                control=self.control,
             ),
             delivery=delivery,
             pikpak=self.pikpak,
@@ -188,6 +205,7 @@ class Application:
         )
         self.handlers.attach_wizard(self.wizard)
         self.handlers.attach_wms(self.wms, self.wms_panel)
+        await self._start_traffic()
         self.handlers.register()
 
         self.wms.attach_notifier(self._send_html)
@@ -216,6 +234,30 @@ class Application:
             "on" if self.portal.unavailable_reason() is None else "off",
         )
         await self._tell_admins_session_rejected()
+
+    async def _start_traffic(self) -> None:
+        """The meter. Without it the gate and limits still work; it must never stop the bot."""
+        assert self.control is not None and self.handlers is not None
+        service = TrafficService(
+            self.config.traffic,
+            TrafficStore(self.config.download.traffic_db_path),
+            self.control,
+            notify=self._notify_admins,
+        )
+        try:
+            await service.start()
+        except Exception:
+            log.exception("the traffic meter could not start; the bot carries on without it")
+            return
+        self.traffic = service
+        self.handlers.attach_traffic(service)
+
+    async def _notify_admins(self, text: str) -> None:
+        for admin in self.config.access.admin_user_ids:
+            try:
+                await self._send_html(admin, text)
+            except Exception:  # noqa: BLE001 - an admin who never opened the chat cannot be messaged
+                log.warning("could not send a traffic message to admin %s", admin)
 
     async def _session_rejected(self, source: str, reason: str) -> None:
         """Telegram refused the reading account's session at startup (M7 §7.2).
@@ -300,6 +342,7 @@ class Application:
                     connections=self.config.download.connections,
                     route=self.route,
                     direct=self.direct,
+                    control=self.control,
                 ),
             )
         if self.handlers is not None:
@@ -324,6 +367,9 @@ class Application:
             await self.wms.stop()
         if self.queue is not None:
             await self.queue.stop()
+        if self.traffic is not None:
+            await self.traffic.stop()
+        wms_fetch.throttle = None
         if self.file_server is not None:
             await self.file_server.stop()
         for client in (self.user, self.bot):

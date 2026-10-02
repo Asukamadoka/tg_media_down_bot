@@ -185,7 +185,8 @@ CATALOG: dict[str, dict[str, str]] = {
                           '/setup — finish setup here: sign in a reading account or '
                           'PikPak\n'
                           '/cache — use a channel as the upload cache\n'
-                          "/verify — check the bot's identity and configuration"
+                          "/verify — check the bot's identity and configuration\n"
+                          '/traffic — proxy traffic, budgets, download gate and rate limits'
                       ),
         'help.unclaimed': (
                               '<b>This bot has no admin yet</b>\n'
@@ -1071,6 +1072,79 @@ CATALOG: dict[str, dict[str, str]] = {
             "The session came from TG_USER_SESSION: remove it from .env as well, or the dead one ke"
             "eps winning."
         ),
+        # ---- proxy traffic, budgets and the download gate (M9)
+        "menu.traffic": "Proxy traffic, budgets, download gate",
+        "job.gated": "⏸ {prefix}<code>{label}</code> paused (traffic gate)",
+        "traffic.period.today": "today",
+        "traffic.period.yesterday": "yesterday",
+        "traffic.period.week": "last 7 days",
+        "traffic.period.month": "this month",
+        "traffic.proxy.head": "Proxy traffic (billed)  {period} {size} ≈ {cost}",
+        "traffic.none": "nothing through the proxy",
+        "traffic.line.telegram": "Telegram down {down} · up {up}",
+        "traffic.cat.telegram": "Telegram",
+        "traffic.cat.pikpak": "PikPak",
+        "traffic.cat.model": "models",
+        "traffic.cat.lan": "LAN",
+        "traffic.cat.lan_model": "LAN/models",
+        "traffic.cat.proxy-sub": "subscription",
+        "traffic.cat.other": "other",
+        "traffic.cat.unattributed": "unattributed",
+        "traffic.direct.head": "Direct traffic (not billed)  {period} {size}",
+        "traffic.unattributed": "Unattributed {size}",
+        "traffic.budget.head": "Budget: ",
+        "traffic.budget.line_day": "today {used} / {limit}",
+        "traffic.budget.line_month": "month {used} / {limit}",
+        "traffic.budget.line_gb": "today's proxy {used} / {limit}",
+        "traffic.budget.daily_cny": "daily cost",
+        "traffic.budget.monthly_cny": "monthly cost",
+        "traffic.budget.daily_proxy_gb": "daily proxy volume",
+        "traffic.exit": "Current exit: {chain}",
+        "traffic.gate.head": "Download gate: ",
+        "traffic.gate.open": "open",
+        "traffic.gate.paused": "paused (by hand)",
+        "traffic.gate.over_budget": "paused (over budget: {budget})",
+        "traffic.gate.unlimited": "no rate limit",
+        "traffic.gate.state": "{state} ({limits})",
+        "traffic.top.node": " ({node})",
+        "traffic.gate.limit_down": "downloads {mbps} MB/s",
+        "traffic.gate.limit_up": "uploads {mbps} MB/s",
+        "traffic.top.head": "Top hosts through the proxy",
+        "traffic.consider_rule": "Unknown hosts over 100 MB through the proxy; consider a rule:",
+        "traffic.daily.head": "<b>Yesterday’s proxy traffic</b>",
+        "traffic.alert.budget": (
+            "⚠️ Traffic budget ({budget}) is at {percent}%: {used} of {limit}. {action}"
+        ),
+        "traffic.alert.action_paused": "Downloads are paused; press “Resume” in /traffic to go on.",
+        "traffic.alert.action_warn": "Warning only: downloads carry on.",
+        "traffic.alert.leak": (
+            "⚠️ Route leak: <code>{host}</code> ({category}) went through the proxy node "
+            "{node}, but should be direct. Check the mihomo rules."
+        ),
+        "traffic.alert.conn": (
+            "⚠️ One proxied connection has moved {size}: <code>{host}</code> ({category}, {node})."
+        ),
+        "traffic.alert.spike": (
+            "⚠️ Proxy traffic has stayed high: {rate} MB/s over the last minute, limit {limit} "
+            "MB/s, for 5 minutes. Biggest: <code>{host}</code> ({category}, {node})."
+        ),
+        "traffic.only_admin": "Only admins can see traffic.",
+        "traffic.off": "The traffic meter is not running.",
+        "traffic.btn.today": "Today",
+        "traffic.btn.week": "Week",
+        "traffic.btn.month": "Month",
+        "traffic.btn.pause": "Pause downloads",
+        "traffic.btn.resume": "Resume downloads",
+        "traffic.btn.rate": "Rate limit",
+        "traffic.btn.back": "Back",
+        "traffic.rate.head": "Rate limit (MB/s)",
+        "traffic.rate.down": "Download",
+        "traffic.rate.up": "Upload",
+        "traffic.rate.none": "No limit",
+        "traffic.ack.paused": "Downloads paused",
+        "traffic.ack.resumed": "Downloads resumed",
+        "traffic.ack.rate": "Rate limit set",
+        "traffic.failed": "Could not build the traffic report: {error}",
     },
     "zh": {
         'help.body': (
@@ -1107,7 +1181,8 @@ CATALOG: dict[str, dict[str, str]] = {
                           '\n'
                           '/setup — 在这里完成配置：登录读取账号或 PikPak\n'
                           '/cache — 指定一个频道作为上传缓存\n'
-                          '/verify — 检查机器人的身份和配置'
+                          '/verify — 检查机器人的身份和配置\n'
+                          '/traffic — 代理流量、预算、下载闸门和限速'
                       ),
         'help.unclaimed': (
                               '<b>这个机器人还没有管理员</b>\n'
@@ -1898,5 +1973,76 @@ CATALOG: dict[str, dict[str, str]] = {
         "session.rejected_env": (
             "这个会话来自 TG_USER_SESSION：请同时把它从 .env 里删掉，否则失效的那个会一直优先生效。"
         ),
+        # ---- 代理流量、预算与下载闸门 (M9)
+        "menu.traffic": "流量：用量、预算、闸门、限速",
+        "job.gated": "⏸ {prefix}<code>{label}</code> 已暂停（流量闸门）",
+        "traffic.period.today": "今天",
+        "traffic.period.yesterday": "昨天",
+        "traffic.period.week": "近 7 天",
+        "traffic.period.month": "本月",
+        "traffic.proxy.head": "代理流量（计费）  {period} {size} ≈ {cost}",
+        "traffic.none": "没有经过代理的流量",
+        "traffic.line.telegram": "Telegram 下载 {down} · 上传 {up}",
+        "traffic.cat.telegram": "Telegram",
+        "traffic.cat.pikpak": "PikPak",
+        "traffic.cat.model": "模型",
+        "traffic.cat.lan": "局域网",
+        "traffic.cat.lan_model": "局域网/模型",
+        "traffic.cat.proxy-sub": "订阅",
+        "traffic.cat.other": "其他",
+        "traffic.cat.unattributed": "未归属",
+        "traffic.direct.head": "直连流量（不计费）  {period} {size}",
+        "traffic.unattributed": "未归属 {size}",
+        "traffic.budget.head": "预算：",
+        "traffic.budget.line_day": "今日 {used} / {limit}",
+        "traffic.budget.line_month": "本月 {used} / {limit}",
+        "traffic.budget.line_gb": "今日代理 {used} / {limit}",
+        "traffic.budget.daily_cny": "每日费用",
+        "traffic.budget.monthly_cny": "每月费用",
+        "traffic.budget.daily_proxy_gb": "每日代理流量",
+        "traffic.exit": "当前出口：{chain}",
+        "traffic.gate.head": "下载闸门：",
+        "traffic.gate.open": "开启",
+        "traffic.gate.paused": "已暂停（手动）",
+        "traffic.gate.over_budget": "已暂停（超出预算：{budget}）",
+        "traffic.gate.unlimited": "不限速",
+        "traffic.gate.state": "{state}（{limits}）",
+        "traffic.top.node": "（{node}）",
+        "traffic.gate.limit_down": "下载限速 {mbps} MB/s",
+        "traffic.gate.limit_up": "上传限速 {mbps} MB/s",
+        "traffic.top.head": "代理流量最大的主机",
+        "traffic.consider_rule": "下面这些未知主机走代理超过 100 MB，可以考虑加规则：",
+        "traffic.daily.head": "<b>昨日代理流量</b>",
+        "traffic.alert.budget": "⚠️ 流量预算（{budget}）已用 {percent}%：{used} / {limit}。{action}",
+        "traffic.alert.action_paused": "下载已暂停，在 /traffic 里点「恢复下载」可以继续。",
+        "traffic.alert.action_warn": "仅提醒，下载照常进行。",
+        "traffic.alert.leak": (
+            "⚠️ 路由泄漏：<code>{host}</code>（{category}）走了代理节点 {node}，它应该直连。"
+            "请检查 mihomo 规则。"
+        ),
+        "traffic.alert.conn": (
+            "⚠️ 一个代理连接已经传了 {size}：<code>{host}</code>（{category}，{node}）。"
+        ),
+        "traffic.alert.spike": (
+            "⚠️ 代理流量持续偏高：最近一分钟平均 {rate} MB/s，阈值 {limit} MB/s，已持续 5 分钟。"
+            "最大的是 <code>{host}</code>（{category}，{node}）。"
+        ),
+        "traffic.only_admin": "只有管理员可以查看流量。",
+        "traffic.off": "流量统计没有运行。",
+        "traffic.btn.today": "今天",
+        "traffic.btn.week": "本周",
+        "traffic.btn.month": "本月",
+        "traffic.btn.pause": "暂停下载",
+        "traffic.btn.resume": "恢复下载",
+        "traffic.btn.rate": "限速",
+        "traffic.btn.back": "返回",
+        "traffic.rate.head": "限速（MB/s）",
+        "traffic.rate.down": "下载",
+        "traffic.rate.up": "上传",
+        "traffic.rate.none": "不限",
+        "traffic.ack.paused": "已暂停下载",
+        "traffic.ack.resumed": "已恢复下载",
+        "traffic.ack.rate": "已设置限速",
+        "traffic.failed": "生成流量报告失败：{error}",
     },
 }

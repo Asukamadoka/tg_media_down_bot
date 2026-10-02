@@ -116,8 +116,15 @@ async def download_parts(
     refresh: Refresh | None = None,
     flood_ceiling: int = 300,
     on_flood_wait: Callable[[int], None] | None = None,
+    before_part: Callable[[], Awaitable[None]] | None = None,
+    pace: Callable[[int], Awaitable[None]] | None = None,
 ) -> None:
     """Fetch ``size`` bytes into ``path``, spreading parts over ``sources``.
+
+    ``before_part`` runs before every attempt at a part (the traffic gate: it
+    waits while the gate is closed, docs/wms/M9 §D) and ``pace`` is told how
+    many bytes a part will cost before it is requested (the rate limit), once
+    per part.
 
     Raises :class:`ParallelUnavailable` when the caller should fall back,
     ``DownloadCancelled`` when ``cancel`` is set, and ``DownloadError`` for a
@@ -174,10 +181,14 @@ async def download_parts(
                 except asyncio.QueueEmpty:
                     return
                 failures = 0
+                if pace is not None:
+                    await pace(expected_length(offset))
                 while True:
                     if cancel is not None and cancel.is_set():
                         raise DownloadCancelled()
                     await resume.wait()
+                    if before_part is not None:
+                        await before_part()
                     seen = shared.generation
                     try:
                         data = await source.get(shared.location, offset, part_size)
