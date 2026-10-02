@@ -264,6 +264,8 @@ class TrafficConfig:
     # --- M9.1: node selection and direct-first routing (docs/wms/M9.1)
     probe_hours: float = 6.0
     """PROXY_PROBE_HOURS: how often every node's speed is measured; 0 is off."""
+    probe_confirm: bool = True
+    """PROXY_PROBE_CONFIRM: ask the admins before a scheduled probe spends proxy traffic."""
     probe_url: str = "https://speed.cloudflare.com/__down?bytes=8000000"
     probe_up_url: str = "https://speed.cloudflare.com/__up"
     probe_listener: str = "http://127.0.0.1:7899"
@@ -746,6 +748,7 @@ def load_config(path: Path | None = None) -> Config:
         timezone=_env_str(
             "TRAFFIC_TIMEZONE", str(_get(data, "traffic", "timezone", default="Asia/Shanghai"))),
         probe_hours=_env_float("PROXY_PROBE_HOURS", 6.0),
+        probe_confirm=parse_bool(os.environ.get("PROXY_PROBE_CONFIRM"), True),
         probe_url=_env_str("PROXY_PROBE_URL", TrafficConfig.probe_url),
         probe_up_url=_env_str("PROXY_PROBE_UP_URL", TrafficConfig.probe_up_url),
         probe_listener=_env_str("PROXY_PROBE_LISTENER", TrafficConfig.probe_listener),

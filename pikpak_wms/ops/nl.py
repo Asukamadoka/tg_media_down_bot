@@ -24,7 +24,7 @@ from ..nl.query import TIDY_INTENTS, Clarification, Query
 from ..nl.translator import OpenAITranslator, Translator, from_environment
 from ..rules.schema import Rule
 from ..rules.units import human_size
-from . import eventsync, organize, outbound, plans, rulesfile, tidy
+from . import downloads, eventsync, organize, outbound, plans, rulesfile, tidy
 from .context import Context
 from .stocktake import stocktake
 
@@ -166,14 +166,20 @@ async def _tidy_proposal(ctx: Context, query: Query, now: datetime) -> Proposal:
     return proposal
 
 
-async def make_proposal(ctx: Context, query: Query, *, now: datetime | None = None) -> Proposal:
-    """Refresh the index where the Query looks, then plan without changing anything."""
+async def make_proposal(ctx: Context, query: Query, *, now: datetime | None = None,
+                        user_id: int | None = None) -> Proposal:
+    """Refresh the index where the Query looks, then plan without changing anything.
+
+    The one thing written here is the download log: names the sentence said were
+    already downloaded (「X 下过了」) are remembered whether or not the plan is run."""
     tz = ctx.config.schedule.tz
     now = now or datetime.now(tz)
     if query.intent in TIDY_INTENTS:
         return await _tidy_proposal(ctx, query, now)
     fresh = _asks_about_arrival(query) or _under_entry_folder(ctx, query.scope.path)
     lead = await _sync(ctx, events=fresh, scope=query.scope.path)
+    if query.marked:
+        await downloads.mark(ctx, query.marked, user_id=user_id)  # after the sync: files known
 
     async def diagnosis() -> list[dict]:
         return await _diagnose_empty(ctx, now, with_freshness=not lead)
@@ -181,6 +187,11 @@ async def make_proposal(ctx: Context, query: Query, *, now: datetime | None = No
     proposal = await propose(ctx.store, query, ctx.config, now=now, tz=tz,
                              name=f"nl-{now:%Y%m%d-%H%M%S}", lead_notes=lead,
                              on_empty=diagnosis)
+    if proposal.plan is not None and query.intent == "download":
+        # What is already on the NAS is listed once and left out of the plan (M9.2 §B).
+        had = len(proposal.plan.notes)
+        await outbound.drop_present(ctx, proposal.plan, when=now)
+        proposal.notes += proposal.plan.notes[had:]
     if proposal.plan is not None and not proposal.plan.is_empty:
         outbound.annotate(ctx.config, proposal.plan, when=now)
         proposal.plan_id = await plans.save(ctx, proposal.plan)

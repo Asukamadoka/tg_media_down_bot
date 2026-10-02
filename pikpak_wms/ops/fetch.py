@@ -14,6 +14,13 @@ fetched at once, each written at its own offset of one ``.part`` file.
   from where that range stopped (at most :data:`MAX_RELINKS` times per file).
 * **No ranges, no problem.** A server that ignores Range gets one plain
   stream, from the start.
+* **A shared budget.** Every connection of every file being fetched at once
+  takes a slot from one :class:`ConnectionPool` (docs/wms/M9.2 §D.2), so many
+  files cannot open hundreds of connections and trigger the CDN's 503s.
+* **Trouble is not fatal.** With a retry window, HTTP 429/5xx and connection
+  errors back off (5 s doubling to 2 min), ask for fresh links after two
+  failed attempts, and keep going until the window has passed with no progress
+  at all (docs/wms/M9.2 §D.3).
 
 The network sits behind :class:`RangeIO`, so tests drive it with a fake.
 """
@@ -27,6 +34,7 @@ import json
 import os
 import re
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +53,9 @@ IDENTITY_BYTES = 256 * 1024
 """A range smaller than this is not worth a connection of its own."""
 MAX_RELINKS = 3
 RETRIES = 3
+BACKOFF_FIRST = 5.0
+BACKOFF_MAX = 120.0
+TRANSIENT_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 SAVE_EVERY = 8 * 1024 * 1024
 """How much progress passes between writes of the sidecar."""
 
@@ -57,6 +68,55 @@ throttle: Callable[[int], Awaitable[None]] | None = None
 """A hook the host application may set to hold downloads back, called with the
 size of each chunk before it is written. The bot sets it to wait while its
 direct-traffic cap is reached (TRAFFIC_DIRECT_DAILY_GB, docs/wms/M9 §D.1)."""
+
+
+class ConnectionPool:
+    """Connection slots shared by every file in flight (first come, first served).
+
+    A connection takes a slot for as long as one stream is open and gives it
+    back between ranges and while backing off, so files beyond the budget wait
+    for connections, not for each other."""
+
+    def __init__(self, capacity: int = 32) -> None:
+        self.capacity = capacity
+        self.used = 0
+        self._waiters: deque[asyncio.Future] = deque()
+
+    async def acquire(self) -> None:
+        if self.used < self.capacity and not self._waiters:
+            self.used += 1
+            return
+        waiter = asyncio.get_running_loop().create_future()
+        self._waiters.append(waiter)
+        try:
+            await waiter
+        except BaseException:
+            if waiter.done() and not waiter.cancelled():
+                self.release()  # granted just as it was cancelled: hand the slot on
+            else:
+                with contextlib.suppress(ValueError):
+                    self._waiters.remove(waiter)
+            raise
+
+    def release(self) -> None:
+        self.used = max(self.used - 1, 0)
+        self._wake()
+
+    def _wake(self) -> None:
+        while self._waiters and self.used < self.capacity:
+            waiter = self._waiters.popleft()
+            if not waiter.done():
+                self.used += 1
+                waiter.set_result(None)
+
+    def configure(self, capacity: int) -> None:
+        self.capacity = max(int(capacity), 1)
+        self._wake()
+
+
+POOL = ConnectionPool()
+"""The budget every download shares unless it is given its own (the bot sets the
+capacity from ``OUTBOUND_MAX_TOTAL_CONNECTIONS``)."""
 
 
 class LinkExpired(Exception):
@@ -258,12 +318,24 @@ def _status_of(exc: BaseException) -> int | None:
     return status if isinstance(status, int) else None
 
 
+def _transient(exc: BaseException) -> bool:
+    """Trouble that passes: the CDN saying 429/5xx, or the network failing to carry
+    the stream. A 404 and the like are not retried for half an hour."""
+    status = _status_of(exc)
+    if status is not None:
+        return status in TRANSIENT_STATUS
+    if isinstance(exc, ConnectionError | TimeoutError):
+        return True
+    return type(exc).__module__.split(".")[0] == "aiohttp"
+
+
 async def download(
     url_for: UrlFor, io: RangeIO, part: Path, *, connections: int = 8,
     progress: Progress | None = None, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     max_connections: int | None = None, stats: FetchStats | None = None,
     clock: Callable[[], float] = time.monotonic, rebalance_after: float = 20.0,
-    adapt_every: float = 20.0, tick: float = 1.0,
+    adapt_every: float = 20.0, tick: float = 1.0, pool: ConnectionPool | None = None,
+    retry_seconds: float = 0.0,
 ) -> int:
     """Fetch the file behind ``url_for()`` into ``part``; returns its size.
 
@@ -272,8 +344,13 @@ async def download(
     speed keeps rising, to ``max_connections``; they drop by 4 on HTTP 429/503
     or repeated resets. With two links, ranges not yet started go to the faster
     one. Cancelling (or failing) leaves ``part`` and its sidecar for the next run.
+
+    ``retry_seconds`` > 0 turns on the patient mode of docs/wms/M9.2 §D.3: CDN and
+    network trouble is retried with a growing pause until that long has passed
+    with no byte arriving; 0 keeps the short retry (:data:`RETRIES`).
     """
     stats = stats if stats is not None else FetchStats()
+    pool = pool if pool is not None else POOL
     ceiling = min(MAX_CONNECTIONS_HARD, max(max_connections or connections, connections))
     state: dict = {"urls": [], "generation": 0, "relinks": 0}
     relink_lock = asyncio.Lock()
@@ -284,13 +361,14 @@ async def download(
         stats.links = "web+origin" if len(state["urls"]) == 2 else "web"
         stats.hosts = [_host(u) for u in state["urls"]]
 
-    async def relink(seen: int) -> None:
+    async def relink(seen: int, *, expired: bool = True) -> None:
         async with relink_lock:
             if state["generation"] != seen:
                 return  # another range already got fresh links
-            if state["relinks"] >= MAX_RELINKS:
-                raise LinkExpired("the link kept expiring")
-            state["relinks"] += 1
+            if expired:
+                if state["relinks"] >= MAX_RELINKS:
+                    raise LinkExpired("the link kept expiring")
+                state["relinks"] += 1
             await refresh()  # both links are asked for again
             state["generation"] += 1
 
@@ -343,15 +421,20 @@ async def download(
         def next_range() -> _Range | None:
             return next((r for r in ranges if r.left > 0 and not r.busy), None)
 
+        trouble: dict = {"since": None}
+        """When the file last stopped making progress (patient mode), else None."""
+
         async def run(span: _Range) -> None:
-            failures = 0
+            failures = streak = 0
             while span.left > 0:
                 seen = state["generation"]
+                await pool.acquire()
                 index = pick_link()
                 urls = state["urls"]
                 url = urls[index % len(urls)]
                 link = index % len(urls)
                 link_conns[link] += 1
+                stats.connections = sum(link_conns)
                 try:
                     async for chunk in io.stream(url, span.start + span.done, span.end):
                         chunk = chunk[: span.left]
@@ -362,6 +445,8 @@ async def download(
                         await asyncio.to_thread(os.pwrite, fd, chunk, span.start + span.done)
                         span.done += len(chunk)
                         link_bytes[link] += len(chunk)
+                        trouble["since"] = None
+                        streak = 0
                         advance()
                     if span.left > 0:
                         raise OSError("the stream ended early")
@@ -378,16 +463,37 @@ async def download(
                             flags["resets"] = 0
                             flags["blocked"] = True
                             live["target"] = max(1, live["target"] - RAMP_STEP)
-                    if failures > RETRIES:
-                        raise
-                    await sleep(min(failures, 3))
-                finally:
+                    pause: float
+                    if retry_seconds > 0 and _transient(exc):
+                        now = clock()
+                        if trouble["since"] is None:
+                            trouble["since"] = now
+                        elif now - trouble["since"] >= retry_seconds:
+                            raise
+                        streak += 1
+                        pause = min(BACKOFF_MAX, BACKOFF_FIRST * 2 ** (streak - 1))
+                        if streak % 2 == 0:
+                            # Two attempts failed: the link itself may be the trouble.
+                            with contextlib.suppress(Exception):
+                                await relink(seen, expired=False)
+                    else:
+                        if failures > RETRIES:
+                            raise
+                        pause = min(failures, 3)
                     link_conns[link] -= 1
+                    stats.connections = sum(link_conns)
+                    pool.release()
+                    link = -1  # given back before the pause, not after it
+                    await sleep(pause)
+                finally:
+                    if link >= 0:
+                        link_conns[link] -= 1
+                        stats.connections = sum(link_conns)
+                        pool.release()
 
         async def worker() -> None:
             live["active"] += 1
             stats.peak_connections = max(stats.peak_connections, live["active"])
-            stats.connections = live["active"]
             try:
                 while live["active"] <= live["target"]:
                     span = next_range()
@@ -400,7 +506,6 @@ async def download(
                         span.busy = False
             finally:
                 live["active"] -= 1
-                stats.connections = live["active"]
 
         workers: list[asyncio.Task] = []
 

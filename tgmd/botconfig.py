@@ -42,6 +42,7 @@ COMMAND_NAMES: tuple[str, ...] = (
     "verify",
     "traffic",
     "proxy",
+    "downloads",
     "id",
 )
 

@@ -36,6 +36,8 @@ AUTO_TARGET = {"auto-latency": "AUTO-LATENCY", "auto-speed": "FAST"}
 HYSTERESIS = 1.25
 """An automatic switch needs the new node to be this much faster (or the old one dead)."""
 HEALTH_EVERY = 60.0
+REQUEST_EVERY = 30.0
+"""How often the bot looks for a probe ask left by ``python -m tgmd.traffic ask-probe``."""
 DEAD_RATIO = 0.8
 DEAD_FOR = 600.0
 FIRST_PROBE_DELAY = 300.0
@@ -85,6 +87,12 @@ class NodeManager:
         self._last_health = 0.0
         self._born = clock()
         self._probe_task: asyncio.Task | None = None
+        self.ask_pending = False
+        """The admins were asked whether to measure now and have not answered (M9.2 §F)."""
+        self.ask_next = 0.0
+        """After 「跳过本次」: not before this moment."""
+        self.ask_at = 0.0
+        self._last_request_check = 0.0
         self.last_error = ""
         self.alive_count: tuple[int, int] | None = None
         self.pick_lists: dict[str, list[str]] = {}
@@ -101,12 +109,16 @@ class NodeManager:
                           if g in GROUPS and m.get("mode") in MODES}
             self.last_auto_switch = float(data.get("last_auto_switch") or 0.0)
             self.incident = bool(data.get("incident"))
+            self.ask_pending = bool(data.get("ask_pending"))
+            self.ask_next = float(data.get("ask_next") or 0.0)
+            self.ask_at = float(data.get("ask_at") or 0.0)
 
     async def _save(self) -> None:
         if self._db is not None:
             await self._db.kv_set_json(STATE_KEY, {
                 "modes": self.modes, "last_auto_switch": self.last_auto_switch,
-                "incident": self.incident})
+                "incident": self.incident, "ask_pending": self.ask_pending,
+                "ask_next": self.ask_next, "ask_at": self.ask_at})
 
     def mode_of(self, group: str) -> tuple[str, str | None]:
         saved = self.modes.get(group)
@@ -225,16 +237,52 @@ class NodeManager:
 
     # ------------------------------------------------------------------ tick
 
+    async def ask_probe(self, now: float | None = None) -> bool:
+        """Ask the admins whether to measure the nodes now (it costs up to ~150 MB of proxy
+        traffic). Only one ask is open at a time; False when one already is, or when there is
+        nobody to ask (docs/wms/M9.2 §F)."""
+        if self.ask_pending or self._notify is None:
+            return False
+        from ..buttons import callback_buttons
+
+        buttons = callback_buttons([[(t("probe.ask.go"), "proxy:ask:go"),
+                                     (t("probe.ask.skip"), "proxy:ask:skip")]])
+        self.ask_pending, self.ask_at = True, now if now is not None else self._clock()
+        await self._save()
+        price = getattr(self._config, "default_price", 0.10)
+        await self._say(t("probe.ask.text", mb=f"{self._config.probe_max_mb:.0f}",
+                          cny=f"{self._config.probe_max_mb / 1024 * price:.2f}"), buttons)
+        return True
+
+    async def answer_ask(self, *, go: bool, now: float | None = None) -> None:
+        """``立即测速`` (the caller then runs the probe) or ``跳过本次`` (nothing until the
+        next schedule)."""
+        now = now if now is not None else self._clock()
+        self.ask_pending = False
+        if not go:
+            self.ask_next = now + max(self._config.probe_hours, 1.0) * 3600
+        await self._save()
+
     async def tick(self, now: float | None = None) -> None:
         now = now if now is not None else self._clock()
         if now - self._last_health >= HEALTH_EVERY:
             self._last_health = now
             await self.health(now)
+        if self.ask_pending and now - self.ask_at >= max(self._config.probe_hours, 1.0) * 3600:
+            self.ask_pending = False  # nobody answered for a whole interval: ask again next time
+        if now - self._last_request_check >= REQUEST_EVERY:
+            self._last_request_check = now
+            # ``python -m tgmd.traffic ask-probe`` leaves a row; the running bot sends the ask.
+            if await asyncio.to_thread(self._store.take_probe_ask, now):
+                await self.ask_probe(now)
         hours = self._config.probe_hours
         if hours > 0 and not self.probing and now - self._born >= FIRST_PROBE_DELAY:
             last = await asyncio.to_thread(self._store.last_probe)
             if now - last >= hours * 3600:
-                self._probe_task = asyncio.create_task(self.probe_now(), name="node-probe")
+                if not self._config.probe_confirm:
+                    self._probe_task = asyncio.create_task(self.probe_now(), name="node-probe")
+                elif not self.ask_pending and now >= self.ask_next:
+                    await self.ask_probe(now)
 
     async def stop(self) -> None:
         if self._probe_task is not None:

@@ -24,6 +24,7 @@ since M1), so "running", "interrupted" and "stopped" live in ``meta``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -35,12 +36,15 @@ from typing import Any
 from ..core.errors import WmsError
 from ..core.models import ActionType
 from ..rules.actions import Deliver
-from . import outbound, plans
+from . import downloads, outbound, plans
 from .context import Context
+from .control import Control, FileTrack
 
 log = logging.getLogger(__name__)
 
 RUNNING, INTERRUPTED, STOPPED = "running:", "interrupted:", "stopped:"
+PARALLEL, PARALLEL_DEFAULT = "parallel:", "outbound:parallel"
+"""``meta`` keys: files at once for one plan, and the default for all (M9.2 §D.1)."""
 WINDOW = 15.0
 """Seconds of download the speed is averaged over."""
 
@@ -67,6 +71,11 @@ class Run:
     """Connections open for the file being fetched, and the links they use."""
     links: str = ""
     file_started: float = field(default_factory=time.monotonic)
+    control: Control = field(default_factory=Control)
+    """The plan's files, one by one, and the dial for how many run at once."""
+
+    def track_for(self, file_id: str) -> FileTrack | None:
+        return self.control.track_for(file_id)
 
     def note_info(self, conns: int, links: str) -> None:
         self.conns, self.links = conns, links
@@ -139,11 +148,39 @@ class Runs:
 
     # ------------------------------------------------------------- starting
 
+    async def parallel_for(self, plan_id: int) -> int:
+        """Files at once for ``plan_id``: its own setting, else the default the owner
+        chose in the bot, else ``OUTBOUND_PARALLEL_FILES`` (0 is no limit)."""
+        store = self.ctx.store
+        for key in (f"{PARALLEL}{plan_id}", PARALLEL_DEFAULT):
+            value = await store.get_meta(key)
+            if value is not None:
+                with contextlib.suppress(ValueError):
+                    return max(int(value), 0)
+        return self.ctx.config.outbound.parallel_files
+
+    async def set_parallel(self, plan_id: int | None, limit: int) -> None:
+        """Change how many files fetch at once: for one plan (now, while it runs, and
+        on its next run) or, with ``plan_id=None``, the default for every plan."""
+        limit = max(int(limit), 0)
+        if plan_id is None:
+            await self.ctx.store.set_meta(PARALLEL_DEFAULT, str(limit))
+            return
+        await self.ctx.store.set_meta(f"{PARALLEL}{plan_id}", str(limit))
+        run = self._runs.get(plan_id)
+        if run is not None and run.active:
+            run.control.set_limit(limit)
+
+    def cancel_file(self, plan_id: int, index: int) -> bool:
+        """Stop one file of a running plan (docs/wms/M9.2 §D.5); False when it is not running."""
+        run = self._runs.get(plan_id)
+        return bool(run is not None and run.active and run.control.cancel(index))
+
     async def start(
         self, plan_id: int, *, deliver: Deliver | None = None,
         on_bytes: Callable[[str, int, int], None] | None = None,
         make_deliver: Callable[[outbound.Progress], Deliver] | None = None,
-        limit: int | None = None,
+        limit: int | None = None, user_id: int | None = None,
     ) -> Run:
         """Begin applying ``plan_id`` in the background; returns at once.
 
@@ -158,7 +195,8 @@ class Runs:
             raise WmsError(f"plan {plan_id} is {row['status']}", key="plan.closed",
                            id=plan_id, status=row["status"])
         total = len(row["plan"])
-        run = Run(plan_id, total=total, done=row["progress"])
+        run = Run(plan_id, total=total, done=row["progress"],
+                  control=Control(await self.parallel_for(plan_id)))
         # Registered before anything is awaited again: a second press finds it.
         self._runs[plan_id] = run
         try:
@@ -177,14 +215,19 @@ class Runs:
                 on_bytes(name, received, size)
 
         seen.info = run.note_info  # type: ignore[attr-defined]
+        seen.track = run.track_for  # type: ignore[attr-defined]
         has_outbound = any(a.type is ActionType.OUTBOUND for a in row["plan"].actions)
         if deliver is None and has_outbound and make_deliver is not None:
             deliver = make_deliver(seen)
         # Downloads change nothing on the drive, so they do not hold the lock
         # that keeps scheduled jobs and other writers waiting.
         needs_lock = any(a.type is not ActionType.OUTBOUND for a in row["plan"].actions)
-        run.task = asyncio.create_task(
-            self._run(run, deliver, needs_lock, limit), name=f"wms-run-{plan_id}")
+        who = downloads.current_user.set(user_id)  # the task inherits it, for the download log
+        try:
+            run.task = asyncio.create_task(
+                self._run(run, deliver, needs_lock, limit), name=f"wms-run-{plan_id}")
+        finally:
+            downloads.current_user.reset(who)
         # A task cancelled before its first step never reaches the ``finally`` below.
         run.task.add_done_callback(lambda _task: run.finished.set())
         return run
@@ -198,10 +241,12 @@ class Runs:
             if needs_lock:
                 async with self.lock:
                     run.report = await plans.apply(self.ctx, run.plan_id, limit=limit,
-                                                   deliver=deliver, on_step=step)
+                                                   deliver=deliver, on_step=step,
+                                                   control=run.control)
             else:
                 run.report = await plans.apply(self.ctx, run.plan_id, limit=limit,
-                                               deliver=deliver, on_step=step)
+                                               deliver=deliver, on_step=step,
+                                               control=run.control)
         except asyncio.CancelledError:
             run.stopped = True
             if not run.shutdown:

@@ -85,3 +85,30 @@ CREATE INDEX IF NOT EXISTS idx_plans_status ON plans (status);
 
 -- audit 在 M2 加了两列（plan_id、undo_of），由 db.py 的迁移补上：
 -- 旧库里已有的 audit 表不会被 CREATE TABLE IF NOT EXISTS 改动。
+
+-- 下载记录（M9.2）：每一次出库尝试一行。done 之外还有 failed / cancelled / skipped_exists，
+-- 以及 marked（主人说「X 下过了」，没有真的下载）。source：plan | manual | backfill | scan。
+-- 迁移时从 audit 和资源库目录回填一次（db.py）；之后由出库逐个写入。
+CREATE TABLE IF NOT EXISTS downloads (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id          TEXT NOT NULL DEFAULT '',
+    name             TEXT NOT NULL,
+    size             INTEGER NOT NULL DEFAULT 0,
+    hash             TEXT NOT NULL DEFAULT '',
+    dest_path        TEXT NOT NULL DEFAULT '',
+    plan_id          INTEGER,
+    status           TEXT NOT NULL,
+    reason           TEXT NOT NULL DEFAULT '',
+    started_at       TEXT,
+    finished_at      TEXT,
+    avg_mib_s        REAL,
+    links            TEXT NOT NULL DEFAULT '',
+    peak_connections INTEGER NOT NULL DEFAULT 0,
+    source           TEXT NOT NULL DEFAULT 'plan',
+    user_id          INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_downloads_file   ON downloads (file_id) WHERE file_id != '';
+CREATE INDEX IF NOT EXISTS idx_downloads_name   ON downloads (name, size);
+CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads (status);
+CREATE INDEX IF NOT EXISTS idx_downloads_done   ON downloads (finished_at);

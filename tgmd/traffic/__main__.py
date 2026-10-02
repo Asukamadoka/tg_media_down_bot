@@ -10,6 +10,7 @@ import argparse
 import json
 import sqlite3
 import sys
+import time
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -101,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     probe = sub.add_parser("probe", help="measure every node, like /proxy 立即测速")
     probe.add_argument("--apply", action="store_true", help="also point FAST at the best node")
     probe.add_argument("--json", action="store_true", help="machine-readable output")
+    sub.add_parser("ask-probe", help="ask the running bot to send the admins the probe question")
     direct = sub.add_parser("direct-test", help="test hosts direct vs. through the proxy")
     direct.add_argument("hosts", nargs="+", metavar="HOST")
     direct.add_argument("--json", action="store_true", help="machine-readable output")
@@ -114,6 +116,16 @@ def main(argv: list[str] | None = None) -> int:
     i18n.set_language(config.language)
     if args.command in ("probe", "direct-test"):
         return _live(args, config)
+    if args.command == "ask-probe":
+        # No network and no Telegram: a row the running bot picks up within 30 seconds.
+        store = TrafficStore(config.download.traffic_db_path)
+        store.open()
+        try:
+            store.request_probe_ask(time.time())
+        finally:
+            store.close()
+        print("asked: the bot sends the probe question within about 30 seconds")
+        return 0
 
     path = config.download.traffic_db_path
     if not path.exists():

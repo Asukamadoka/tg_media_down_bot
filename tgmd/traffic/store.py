@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS proxy_node (
     alive      INTEGER NOT NULL DEFAULT 0,
     tested_at  REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS probe_ask (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    requested_at REAL NOT NULL,
+    handled_at   REAL
+);
 CREATE TABLE IF NOT EXISTS direct_host (
     host        TEXT PRIMARY KEY,
     state       TEXT NOT NULL,
@@ -234,6 +239,22 @@ class TrafficStore:
         with self._lock:
             row = self._db.execute("SELECT MAX(tested_at) FROM proxy_node").fetchone()
         return float(row[0] or 0.0)
+
+    def request_probe_ask(self, now: float) -> int:
+        """``python -m tgmd.traffic ask-probe``: ask the running bot to send the probe ask."""
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT INTO probe_ask (requested_at) VALUES (?)", (now,))
+            self._db.commit()
+            return int(cursor.lastrowid or 0)
+
+    def take_probe_ask(self, now: float) -> bool:
+        """True once per batch of requests: they are all marked handled."""
+        with self._lock:
+            cursor = self._db.execute(
+                "UPDATE probe_ask SET handled_at = ? WHERE handled_at IS NULL", (now,))
+            self._db.commit()
+            return cursor.rowcount > 0
 
     def save_direct(self, host: str, *, state: str, reason: str = "", direct_ms=None,
                     proxy_ms=None, direct_mbps=None, proxy_mbps=None, now: float) -> None:

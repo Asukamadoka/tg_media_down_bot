@@ -39,7 +39,8 @@ from ..core.errors import WmsError
 from ..i18n import t
 from .guard import ground, guard
 from .hosts import BOARD, PROBE_TIMEOUT, Host, HostBoard, HostsConfigError, parse_hosts
-from .query import Clarification, Query, as_result, from_wire, normalize_wire, wire_schema
+from .query import Clarification, Query, Remark, as_result, from_wire, normalize_wire, wire_schema
+from .remarks import apply_remarks, only_remark
 from .rules_parser import RulesTranslator
 
 log = logging.getLogger(__name__)
@@ -119,6 +120,10 @@ sub-folder under the NAS media folder, or null. action_args.template: the naming
 for rename, with fields like {name}, {stem}, {ext}. action_args.part: organize_tree only, \
 "big" when the sentence is only about putting big files together, "slim" for only junk and \
 empty folders, "loose" for only the loose files; null otherwise.
+- filters.not_downloaded: true when the sentence asks only for files that are not on the \
+NAS yet (未下载, 还没下, 没下载过, 还未下载过); false otherwise. filters.exclude_names: \
+names to leave out (「X 下过了」, 「X 已经下了」, 「不要 X」, 「除了 X」, 「跳过 X」, \
+「X 不用」); a name that is only said to be done with is an exclusion, never a name to select.
 - schedule.cron: five-field cron in the given time zone when the sentence asks for a \
 recurring run (每天 = daily); null otherwise.
 - needs_clarification: null, unless the sentence cannot be turned into a query without \
@@ -149,12 +154,21 @@ value):
 month is two dates, not a duration like "1m".
 7. "以 sample 开头的文件" -> {"intent": "list", "filters": {"name_regex": "^sample"}}: starts \
 with is a regular expression anchored with ^, not name_contains.
+8. "把今天保存但还未下载过的视频下载，juvr00309 下过了" on 2026-10-02 -> {"intent": "download", \
+"filters": {"created_after": "2026-10-02T00:00:00+08:00", "kinds": ["video"], \
+"not_downloaded": true, "exclude_names": ["juvr00309"]}}: 下过了 after a name leaves that \
+name out; it never selects it.
+9. "下载今天的视频，除了 abc" -> {"intent": "download", "filters": {"created_after": \
+"2026-10-02T00:00:00+08:00", "kinds": ["video"], "exclude_names": ["abc"]}}
 
 Wrong answers, never write these:
 1. {"schedule": {"cron": "0 0 3 * * ?"}}: that is Quartz. cron has exactly five fields: \
 "0 3 * * *".
 2. {"schedule": "null", "needs_clarification": "null"}: the string "null" is not null. Write \
-JSON null."""
+JSON null.
+3. "juvr00309 下过了" -> {"intent": "download", "filters": {"name_contains": ["juvr00309"]}}: \
+a sentence that only says some files are already downloaded is not a request to download \
+them; write needs_clarification instead."""
 
 
 def user_message(text: str, now: datetime, tz: tzinfo) -> str:
@@ -599,7 +613,14 @@ class Chain:
         self.last_label = ""
         """Who understood the last sentence, for a person (docs/wms/M8.3 §I)."""
 
-    async def translate(self, text: str, now: datetime, tz: tzinfo) -> Query | Clarification | None:
+    async def translate(self, text: str, now: datetime, tz: tzinfo
+                        ) -> Query | Clarification | Remark | None:
+        # A sentence that only names files and says 下过了 / 不要 never reaches a model, so
+        # it can never come back as a download of those very files (docs/wms/M9.2 §C.2).
+        remark = only_remark(text)
+        if remark is not None:
+            self.last_used, self.last_label = "rules", t("nl.by.rules")
+            return remark
         failure: TranslationError | None = None
         for translator in self.translators:
             try:
@@ -612,6 +633,8 @@ class Chain:
                 # A model's time condition is checked against the words (M8.2 §C), and
                 # so is every condition it may have made up (M8.3 §C).
                 result = ground(text, guard(text, result, now=now, tz=tz))
+                if isinstance(result, Query):
+                    result = apply_remarks(text, result)
             if result is not None:
                 self.last_used = translator.name
                 self.last_label = _label(translator, result)

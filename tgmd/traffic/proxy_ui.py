@@ -116,6 +116,25 @@ async def render_picker(manager: NodeManager, group: str, page: int):
     return "\n".join(lines), callback_buttons(rows)
 
 
+def render_probe_table(run, error: str = "") -> str:
+    """The result of a probe, one line per node (the answer to 「立即测速」 in the ask)."""
+    if run is None:
+        return t("probe.ask.failed", error=html.escape(error or "?"))
+    lines = [f"<b>{t('probe.table.title')}</b>"]
+    rows = [f"{short_node(r.name)[:22]:22} {r.latency_ms if r.latency_ms is not None else '-':>5} "
+            f"{r.down_mbps:>6.0f} {r.up_mbps:>6.0f} "
+            f"{(f'{r.price:.2f}' if r.price is not None else '-'):>5}"
+            for r in run.results]
+    header = (f"{t('probe.table.node'):22} {'ms':>5} {'↓Mbps':>6} {'↑Mbps':>6} "
+              f"{t('probe.table.price'):>5}")
+    lines.append("<pre>" + html.escape("\n".join([header, *rows])) + "</pre>")
+    if run.skipped:
+        lines.append(t("probe.table.skipped", count=len(run.skipped)))
+    lines.append(t("proxy.probe_done", nodes=len(run.results),
+                   mb=f"{run.spent_bytes / (1024 * 1024):.0f}"))
+    return "\n".join(lines)
+
+
 _ICON = {"candidate": "✅", "failed": "❌", "applied": "🔀", "broken": "⚠️", "kept": "🔒"}
 
 
@@ -193,6 +212,24 @@ async def handle_button(event, manager: NodeManager, direct: DirectRouting | Non
                     text += "\n" + t("proxy.probe_done", nodes=len(run.results),
                                      mb=f"{run.spent_bytes / (1024 * 1024):.0f}")
                 await edit(text, buttons)
+        elif verb == "ask" and len(parts) >= 3 and parts[2] in ("go", "skip"):
+            if not manager.ask_pending:
+                # An old message, or a second press: the question was answered already, and a
+                # speed test costs proxy traffic.
+                await event.answer(t("probe.ask.stale"), alert=True)
+                return
+            if parts[2] == "skip":
+                await manager.answer_ask(go=False)
+                answer = t("probe.ask.skipped_ack")
+                await edit(t("probe.ask.skipped"), None)
+            elif manager.probing:
+                answer = t("proxy.probing_short")
+            else:
+                await manager.answer_ask(go=True)
+                await edit(t("proxy.probing"), None)
+                run = await manager.probe_now()
+                answer = t("proxy.ack.probe")
+                await edit(render_probe_table(run, manager.last_error), None)
         elif verb == "direct" and direct is not None:
             await edit(t("direct.testing"), None)
             await direct.run_checks()

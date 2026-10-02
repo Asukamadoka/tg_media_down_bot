@@ -16,6 +16,8 @@ Applying is resumable and idempotent (rule 5):
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -28,8 +30,9 @@ from ..core.models import Action, ActionType, Plan
 from ..i18n import t
 from ..rules.actions import BATCH_LIMIT, DUE, PRIMITIVES, Deliver, Refused, Runtime
 from ..rules.units import human_size
-from . import protect
+from . import downloads, protect
 from .context import Context
+from .control import CANCELLED, DONE, FAILED, SKIPPED, Control
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +80,57 @@ async def discard(ctx: Context, plan_id: int) -> None:
                        id=plan_id, status=row["status"])
     await ctx.store.update_plan(plan_id, status=DISCARDED, progress=row["progress"],
                                 result=row["result"])
+
+
+def _name_of(action: Action) -> str:
+    return str(action.before.get("name") or str(action.before.get("path") or "").rsplit("/", 1)[-1])
+
+
+def _refresh_notes(plan: Plan) -> None:
+    """What the plan says it matched, made true again after files were taken out."""
+    names = [_name_of(a) for a in plan.actions]
+    size = sum(int(a.before.get("size") or 0) for a in plan.actions)
+    for note in plan.notes:
+        if note.get("key") == "nl.explain.matched":
+            note["args"] = {**note["args"], "count": len(names), "size": human_size(size)}
+        elif note.get("key") == "nl.explain.examples":
+            note["args"] = {**note["args"], "names": names[:5]}
+
+
+async def remove_matching(ctx: Context, plan_id: int, fragments: list[str]) -> list[str]:
+    """Take the actions whose file name contains any of ``fragments`` out of an open
+    plan (「juvr00309 下过了」, docs/wms/M9.2 §C.2). Only actions not yet carried out are
+    touched. Returns the names removed; an emptied plan is discarded."""
+    row = await get(ctx, plan_id)
+    if row["status"] not in OPEN:
+        raise WmsError(f"plan {plan_id} is {row['status']}", key="plan.closed",
+                       id=plan_id, status=row["status"])
+    plan: Plan = row["plan"]
+    wanted = [f.casefold() for f in fragments if f.strip()]
+    start = row["progress"]
+    kept: list[Action] = []
+    gone: list[str] = []
+    renumber: dict[int, int] = {}
+    for index, action in enumerate(plan.actions):
+        name = _name_of(action)
+        if index >= start and any(fragment in name.casefold() for fragment in wanted):
+            gone.append(name)
+            continue
+        renumber[index] = len(kept)
+        kept.append(action)
+    if not gone:
+        return []
+    result = dict(row["result"] or {})
+    if result.get("settled"):
+        result["settled"] = {str(renumber[int(k)]): v for k, v in result["settled"].items()
+                             if int(k) in renumber}
+    plan.actions = kept
+    _refresh_notes(plan)
+    await ctx.store.rewrite_plan(plan_id, plan, fingerprint=fingerprint(plan))
+    await ctx.store.update_plan(plan_id, status=row["status"], progress=start, result=result)
+    if len(kept) <= start:
+        await ctx.store.update_plan(plan_id, status=DISCARDED, progress=start, result=result)
+    return gone
 
 
 async def supersede(ctx: Context, *, prefix: str, keep: set[int]) -> list[int]:
@@ -148,9 +202,14 @@ class ApplyReport:
     audit_ids: list[int] = field(default_factory=list)
     fetches: list[dict[str, Any]] = field(default_factory=list)
     """How each downloaded file went: ``path``, ``avg_mib_s``, ``links``, ``peak_connections``."""
+    cancelled: list[dict[str, Any]] = field(default_factory=list)
+    """Files stopped by hand (docs/wms/M9.2 §D.5); their ``.part`` is kept."""
+    settled: dict[int, str] = field(default_factory=dict)
+    """Downloads that finished ahead of an unfinished one: this run's action index → how
+    it ended. Saved with the plan so that a resume does not do them again."""
 
     def summary(self) -> str:
-        return t(
+        text = t(
             "apply.summary",
             id=self.plan_id if self.plan_id is not None else "-",
             applied=self.applied,
@@ -158,6 +217,9 @@ class ApplyReport:
             failed=len(self.failed),
             remaining=self.remaining,
         )
+        if self.cancelled:
+            text += t("apply.summary_cancelled", cancelled=len(self.cancelled))
+        return text
 
     def to_result(self) -> dict[str, Any]:
         return {
@@ -167,6 +229,7 @@ class ApplyReport:
             "stopped": self.stopped,
             "audit_ids": list(self.audit_ids),
             "fetches": list(self.fetches),
+            "cancelled": list(self.cancelled),
         }
 
 
@@ -185,6 +248,34 @@ CHECKPOINT_SKIPS = 50
 """Actions that are only skipped do not each write the plan: every this many do."""
 
 
+async def _record_done(
+    ctx: Context, report: ApplyReport, item: Action, extra: dict[str, Any],
+    output: Any, *, plan_id: int | None, undo_of: int | None = None,
+) -> None:
+    """One carried-out action: its outputs, its audit row, and whether it counts as
+    done or as skipped (a download that was already on the NAS)."""
+    if isinstance(extra.get("fetch"), dict):
+        report.fetches.append({"path": item.before.get("path"), **extra["fetch"]})
+    if output:
+        report.outputs.append(str(output))
+    if extra.get("share_url"):
+        report.outputs.append(f"{item.before.get('path')}: {extra['share_url']}")
+    audit_id = await ctx.store.record(
+        replace(item, after={**item.after, **extra}),
+        dry_run=False, plan_id=plan_id, undo_of=undo_of,
+    )
+    report.audit_ids.append(audit_id)
+    if extra.get("skipped"):
+        report.skipped["exists"] = report.skipped.get("exists", 0) + 1
+    else:
+        report.applied += 1
+
+
+def _failure(item: Action, error: str, **more: Any) -> dict[str, Any]:
+    return {"path": item.before.get("path") or item.after.get("path"),
+            "action": str(item.type), "error": error, "file_id": item.file_id, **more}
+
+
 async def execute(
     ctx: Context,
     actions: list[Action],
@@ -195,13 +286,23 @@ async def execute(
     undo_of: int | None = None,
     protection: protect.Protection | None = None,
     checkpoint: Checkpoint | None = None,
+    control: Control | None = None,
+    settled: dict[int, str] | None = None,
 ) -> tuple[int, ApplyReport]:
     """Carry out ``actions`` in order, at most ``budget`` of them.
 
     Returns how many were handled (applied, skipped or failed) and the report.
     With ``protection``, an action touching protected content is skipped
-    (something may have been shared since the plan was made).
+    (something may have been shared since the plan was made). With ``control``,
+    a plan made only of downloads fetches several files at once and each file can
+    be cancelled on its own (docs/wms/M9.2 §D).
     """
+    if control is not None and undo_of is None and actions and all(
+            a.type is ActionType.OUTBOUND for a in actions):
+        return await _execute_outbound(
+            ctx, actions, budget=budget, plan_id=plan_id, deliver=deliver,
+            protection=protection, checkpoint=checkpoint, control=control,
+            settled=settled or {})
     rt = Runtime(client=ctx.client, store=ctx.store, deliver=deliver)
     report = ApplyReport(plan_id=plan_id)
     failed_files: set[str] = set()
@@ -254,10 +355,7 @@ async def execute(
             break
         except WmsError as exc:
             for item in batch:
-                report.failed.append(
-                    {"path": item.before.get("path") or item.after.get("path"),
-                     "action": str(item.type), "error": exc.display()}
-                )
+                report.failed.append(_failure(item, exc.display()))
                 if item.file_id:
                     failed_files.add(item.file_id)
             index = end
@@ -267,21 +365,124 @@ async def execute(
         for item, extra in zip(batch, extras, strict=True):
             extra = dict(extra)
             output = extra.pop("_output", None)
-            if isinstance(extra.get("fetch"), dict):
-                report.fetches.append({"path": item.before.get("path"), **extra["fetch"]})
-            if output:
-                report.outputs.append(str(output))
-            if extra.get("share_url"):
-                report.outputs.append(f"{item.before.get('path')}: {extra['share_url']}")
-            audit_id = await ctx.store.record(
-                replace(item, after={**item.after, **extra}),
-                dry_run=False, plan_id=plan_id, undo_of=undo_of,
-            )
-            report.audit_ids.append(audit_id)
-        report.applied += len(batch)
+            await _record_done(ctx, report, item, extra, output, plan_id=plan_id, undo_of=undo_of)
         index = end
         handled += len(batch)
     return index, report
+
+
+async def _execute_outbound(
+    ctx: Context, actions: list[Action], *, budget: int, plan_id: int | None,
+    deliver: Deliver | None, protection: protect.Protection | None,
+    checkpoint: Checkpoint | None, control: Control, settled: dict[int, str],
+) -> tuple[int, ApplyReport]:
+    """The downloads of a plan, several at once.
+
+    Every action that is due becomes a task; the control's gate lets as many run
+    as it currently allows (0: all), and the connection budget shared through
+    :mod:`pikpak_wms.ops.fetch` decides how many connections they get. The plan's
+    progress is the first action not yet handled, so a stop or a restart carries
+    on from there; files finished beyond it are skipped as already present.
+    """
+    rt = Runtime(client=ctx.client, store=ctx.store, deliver=deliver)
+    report = ApplyReport(plan_id=plan_id)
+    todo = actions[:budget]
+    primitive = PRIMITIVES[ActionType.OUTBOUND]
+    handled: set[int] = set()
+    halt: dict[str, str] = {}
+    failed_files: set[str] = set()
+    last: dict[str, asyncio.Task] = {}
+    tasks: list[asyncio.Task] = []
+    # What the tasks inherit: who the downloads are for, in the download log.
+    downloads.current_plan.set(plan_id)
+
+    def prefix() -> int:
+        return next((i for i in range(len(todo)) if i not in handled), len(todo))
+
+    async def told() -> None:
+        if checkpoint is not None:
+            edge = prefix()
+            report.settled = {i: control.tracks[i].state for i in handled if i > edge}
+            await checkpoint(edge, report)
+
+    async def finish(i: int, state: str) -> None:
+        control.tracks[i].state = state
+        handled.add(i)
+        await told()
+
+    async def run_one(i: int, action: Action, before: asyncio.Task | None) -> None:
+        track = control.tracks[i]
+        item = action
+        try:
+            if before is not None:
+                await asyncio.wait({before})
+            async with control.gate:
+                if halt or (action.file_id and action.file_id in failed_files):
+                    if not halt:
+                        report.skipped["after_failure"] = report.skipped.get("after_failure", 0) + 1
+                        await finish(i, SKIPPED)
+                    return  # halted: not done, the next run takes it up
+                track.begin()
+                try:
+                    (extra,) = await primitive.apply([action], rt)
+                except (RateLimitedError, AuthError) as exc:
+                    halt["reason"] = exc.display()
+                    track.state = "queued"
+                    return
+                except WmsError as exc:
+                    report.failed.append(_failure(item, exc.display()))
+                    if action.file_id:
+                        failed_files.add(action.file_id)
+                    await finish(i, FAILED)
+                    return
+                extra = dict(extra)
+                output = extra.pop("_output", None)
+                await _record_done(ctx, report, item, extra, output, plan_id=plan_id)
+                await finish(i, SKIPPED if extra.get("skipped") else DONE)
+        except asyncio.CancelledError:
+            if not track.cancel_requested:
+                raise
+            # This file only: its .part and .part.state stay, the others go on.
+            report.cancelled.append(_failure(item, "cancelled", cancelled=True))
+            await finish(i, CANCELLED)
+
+    try:
+        for i, action in enumerate(todo):
+            node = await ctx.store.node(action.file_id)
+            name = (node.name if node else None) or str(
+                action.before.get("name") or action.before.get("path") or "").rsplit("/", 1)[-1]
+            size = int((node.size if node else 0) or action.before.get("size") or 0)
+            control.add(i, action.file_id, name, size)
+            if i in settled:
+                # Done, failed or cancelled before the last stop: not done again.
+                control.tracks[i].state = settled[i]
+                handled.add(i)
+                continue
+            state = await primitive.check(action, ctx.store)
+            if state == DUE and protection is not None and protection.touches(action):
+                state = "protected"
+            if state != DUE:
+                report.skipped[state] = report.skipped.get(state, 0) + 1
+                control.tracks[i].state = SKIPPED
+                handled.add(i)
+                continue
+            task = asyncio.create_task(run_one(i, action, last.get(action.file_id)),
+                                       name=f"outbound-{plan_id}-{i}")
+            control.tracks[i].task = task
+            if action.file_id:
+                last[action.file_id] = task
+            tasks.append(task)
+        if tasks:
+            await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        with contextlib.suppress(Exception):
+            await told()
+        raise
+    report.stopped = halt.get("reason", "")
+    return prefix(), report
 
 
 async def apply(
@@ -292,6 +493,7 @@ async def apply(
     allow_forever: bool = False,
     deliver: Deliver | None = None,
     on_step: Callable[[int, int], Awaitable[None]] | None = None,
+    control: Control | None = None,
 ) -> ApplyReport:
     """Apply a stored plan, or the next part of one (see the module docstring).
 
@@ -313,27 +515,36 @@ async def apply(
         budget = min(budget, max(limit, 0))
     previous = row["result"] or {}
 
-    def merged(report: ApplyReport) -> dict[str, Any]:
+    def merged(report: ApplyReport, index: int | None = None) -> dict[str, Any]:
         result = report.to_result()
+        if index is not None and report.settled:
+            result["settled"] = {str(start + i): state for i, state in report.settled.items()
+                                 if i > index}
         result["applied"] += int(previous.get("applied", 0))
         for state, count in (previous.get("skipped") or {}).items():
             result["skipped"][state] = result["skipped"].get(state, 0) + count
         result["failed"] = list(previous.get("failed") or []) + result["failed"]
+        result["cancelled"] = list(previous.get("cancelled") or []) + result["cancelled"]
         result["audit_ids"] = list(previous.get("audit_ids") or []) + result["audit_ids"]
         return result
 
     async def checkpoint(index: int, report: ApplyReport) -> None:
         await ctx.store.update_plan(plan_id, status=PARTIAL, progress=start + index,
-                                    result=merged(report))
+                                    result=merged(report, index))
         if on_step is not None:
             await on_step(start + index, len(plan.actions))
 
+    if control is None and todo and all(a.type is ActionType.OUTBOUND for a in todo):
+        control = Control(ctx.config.outbound.parallel_files)
+    before = {int(k) - start: v for k, v in (previous.get("settled") or {}).items()
+              if int(k) >= start}
     handled, report = await execute(ctx, todo, budget=budget, plan_id=plan_id, deliver=deliver,
-                                    protection=await protect.load(ctx), checkpoint=checkpoint)
+                                    protection=await protect.load(ctx), checkpoint=checkpoint,
+                                    control=control, settled=before)
 
     progress = start + handled
     report.remaining = len(plan.actions) - progress
-    result = merged(report)
+    result = merged(report, handled)
     if on_step is not None:
         await on_step(progress, len(plan.actions))
     status = APPLIED if report.remaining == 0 else PARTIAL

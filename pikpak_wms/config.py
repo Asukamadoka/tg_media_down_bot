@@ -27,6 +27,13 @@ def data_dir() -> Path:
     return Path(os.environ.get("DATA_DIR", "").strip() or "data")
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
 class RuntimeConfig(BaseModel):
     dry_run: bool = True
     """Rule 1: writes only produce a plan unless ``--apply`` is given."""
@@ -201,6 +208,30 @@ class OutboundConfig(BaseModel):
         except ValueError:
             wanted = 16
         return min(max(wanted, self.parallel), 32)
+
+    @property
+    def parallel_files(self) -> int:
+        """Files a plan fetches at once (``OUTBOUND_PARALLEL_FILES``); 0 is no limit."""
+        return max(_env_int("OUTBOUND_PARALLEL_FILES", 0), 0)
+
+    @property
+    def max_total_connections(self) -> int:
+        """Connections all files share (``OUTBOUND_MAX_TOTAL_CONNECTIONS``, 32)."""
+        return max(_env_int("OUTBOUND_MAX_TOTAL_CONNECTIONS", 32), 1)
+
+    @property
+    def retry_minutes(self) -> float:
+        """How long a file keeps retrying CDN / network trouble before it fails."""
+        try:
+            return max(float(os.environ.get("OUTBOUND_RETRY_MINUTES", "") or 30), 0.0)
+        except ValueError:
+            return 30.0
+
+    @property
+    def skip_known(self) -> bool:
+        """``OUTBOUND_SKIP_KNOWN=false`` turns off skipping files the download log knows."""
+        return os.environ.get("OUTBOUND_SKIP_KNOWN", "").strip().lower() not in (
+            "0", "false", "no", "off")
 
     @property
     def verify_mode(self) -> str:

@@ -121,6 +121,7 @@ class BotHandlers:
         add(self.on_verify, events.NewMessage(pattern=r"^/verify\b"))
         add(self.on_wms, events.NewMessage(pattern=r"^/wms\b"))
         add(self.on_do, events.NewMessage(pattern=r"^/do\b"))
+        add(self.on_downloads, events.NewMessage(pattern=r"^/downloads\b"))
         add(self.on_traffic, events.NewMessage(pattern=r"^/traffic\b"))
         add(self.handle_traffic_button, events.CallbackQuery(pattern=rb"^traffic:"))
         add(self.on_proxy, events.NewMessage(pattern=r"^/proxy\b"))
@@ -867,7 +868,7 @@ class BotHandlers:
         callback is answered at once, the message becomes a progress display with
         a [stop] button, and the result replaces it when the run ends."""
         try:
-            run = await embedded.start_apply(plan_id)
+            run = await embedded.start_apply(plan_id, user_id=event.sender_id)
         except WmsError as exc:
             await event.answer(exc.display()[:190], alert=True)
             return
@@ -965,6 +966,67 @@ class BotHandlers:
             return
         await self._nl(event, sentence)
 
+    async def on_downloads(self, event) -> None:
+        """/downloads [name]: the download log, today's by default (docs/wms/M9.2 §A.4)."""
+        if await self._wms_for(event) is None:
+            return
+        name = (event.raw_text or "").partition(" ")[2].strip() or None
+        text, buttons = await self._wms.downloads_message(name=name)
+        await event.reply(text, parse_mode="html", buttons=buttons)
+
+    async def _download_button(self, event) -> None:
+        """今天 / 近7天 / 失败的 on /downloads."""
+        view = event.data.decode(errors="replace").rsplit(":", 1)[-1]
+        text, buttons = await self._wms.downloads_message(view)
+        await event.answer()
+        await event.edit(text, parse_mode="html", buttons=buttons)
+
+    async def _file_button(self, event, embedded) -> None:
+        """wms:cancel:<plan>:<index> / wms:par:<plan>:<n> / wms:page:<plan>:<page> /
+        wms:retry:<plan>: the buttons of a running plan's message (docs/wms/M9.2 §D)."""
+        try:
+            _prefix, verb, *rest = event.data.decode().split(":")
+            numbers = [int(part) for part in rest]
+        except (UnicodeDecodeError, ValueError):
+            await event.answer()
+            return
+        plan_id = numbers[0] if numbers else 0
+        if verb == "cancel" and len(numbers) == 2:
+            run = embedded.run_of(plan_id)
+            track = run.control.tracks.get(numbers[1]) if run is not None else None
+            if track is None or not embedded.cancel_file(plan_id, numbers[1]):
+                await event.answer(t("wms.run.file_gone"), alert=True)
+                return
+            await event.answer(t("wms.run.file_cancelled", name=track.name[:40]))
+        elif verb == "par" and len(numbers) == 2:
+            limit = numbers[1]
+            await embedded.set_parallel(limit, plan_id or None)
+            await event.answer(t("wms.parallel.set", n=self._wms._parallel_label(limit)))  # noqa: SLF001
+            if plan_id == 0:  # the default for every plan, set from /downloads
+                text, buttons = await self._wms.downloads_message()
+                await event.edit(text, parse_mode="html", buttons=buttons)
+        elif verb == "page" and len(numbers) == 2:
+            run = embedded.run_of(plan_id)
+            if run is None or not run.active:
+                await event.answer(t("wms.run.not_running"), alert=True)
+                return
+            run.control.page = numbers[1]
+            await event.answer()
+            await event.edit(self._wms.progress_text(run), parse_mode="html",
+                             buttons=self._wms.run_buttons(run))
+        elif verb == "retry":
+            try:
+                again = await embedded.retry_failed(plan_id)
+            except WmsError as exc:
+                await event.answer(exc.display()[:190], alert=True)
+                return
+            if again is None:
+                await event.answer(t("wms.retry.none"), alert=True)
+                return
+            await self._start_run(event, embedded, again, in_place=True)
+        else:
+            await event.answer()
+
     async def _nl(self, event, sentence: str) -> None:
         text, buttons = await self._wms.nl_message(event.sender_id, sentence)
         await event.reply(text, parse_mode="html", buttons=buttons)
@@ -999,6 +1061,12 @@ class BotHandlers:
             return
         if event.data.startswith(b"wms:stop:"):
             await self._stop_button(event, embedded)
+            return
+        if event.data.startswith(b"wms:dl:"):
+            await self._download_button(event)
+            return
+        if event.data.startswith((b"wms:cancel:", b"wms:par:", b"wms:page:", b"wms:retry:")):
+            await self._file_button(event, embedded)
             return
         try:
             _prefix, verb, raw = event.data.decode().split(":", 2)

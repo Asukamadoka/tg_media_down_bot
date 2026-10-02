@@ -26,7 +26,8 @@ from typing import Any
 from pydantic import ValidationError
 
 from ..rules.schema import CATEGORIES
-from .query import Clarification, Query, as_result
+from .query import Clarification, Query, Remark, as_result
+from .remarks import lift, only_remark
 
 _DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
            "六": 6, "七": 7, "八": 8, "九": 9}
@@ -79,7 +80,7 @@ _FILLER = re.compile(
         "里面的", "里面", "里的", "中的", "目录下的", "下面的", "之内", "以内",
         "的", "文件夹", "文件", "东西", "内容", "资源", "那些", "这些", "些", "都", "和", "与",
         "及", "并且", "并", "然后", "再", "之后", "一共", "个", "有", "是", "到", "进", "去",
-        "里", "中", "内", "所", "给", "它们", "他们", "掉", "了", "吗", "下来",
+        "里", "中", "内", "所", "给", "它们", "他们", "掉", "了", "吗", "下来", "但是", "但",
     ], key=len, reverse=True)),
     re.IGNORECASE,
 )
@@ -178,11 +179,22 @@ _QUOTA = re.compile(
 class RulesTranslator:
     name = "rules"
 
-    async def translate(self, text: str, now: datetime, tz: tzinfo) -> Query | Clarification | None:
+    async def translate(self, text: str, now: datetime, tz: tzinfo
+                        ) -> Query | Clarification | Remark | None:
         return self.parse(text, now, tz)
 
-    def parse(self, text: str, now: datetime, tz: tzinfo) -> Query | Clarification | None:
-        # A whole file name is lifted out first, exactly as typed: normalizing it would
+    def parse(self, text: str, now: datetime, tz: tzinfo
+              ) -> Query | Clarification | Remark | None:
+        # 「juvr00309 下过了」, on its own, is a remark about files: never a plan (M9.2 §C.2).
+        remark = only_remark(text)
+        if remark is not None:
+            return remark
+        # In a request, what it says about files already on the NAS is lifted out first:
+        # a name told to be skipped must not be read as the file to fetch.
+        lifted = lift(text)
+        if lifted.found:
+            text = lifted.text
+        # A whole file name is lifted out next, exactly as typed: normalizing it would
         # change characters that are really in the name (full-width brackets, digits).
         found = _FILENAME.search(text)
         filename = found.group(0) if found else None
@@ -254,7 +266,15 @@ class RulesTranslator:
             s.need("nl.ask.rename_how")
         if intent == "archive" and "created_before" not in s.filters:
             s.need("nl.ask.archive_age")
-        if (intent in ("trash", "download", "move", "rename") and not s.filters
+        if lifted.not_downloaded:
+            s.filters["not_downloaded"] = True
+        if lifted.exclude:
+            s.filters["exclude_names"] = list(lifted.exclude)
+        if lifted.downloaded:
+            data["marked"] = list(lifted.downloaded)
+        conditions = {k: v for k, v in s.filters.items()
+                      if k not in ("not_downloaded", "exclude_names")}
+        if (intent in ("trash", "download", "move", "rename") and not conditions
                 and scope.get("path", "/") == "/"):
             s.need(f"nl.ask.{intent}_all")
         if intent == "list" and data.get("schedule"):
@@ -576,6 +596,8 @@ def _arrival(s: _State) -> None:
     s.take(r"新(?:下载|转存|入库|增加?|加入?|上传|存入?|进)?(?:的)?", lambda _m: _set_new(s))
     s.take(r"(?:离线下载|转存|入库|存进|存入|保存到网盘|保存进网盘|添加|加入|上传|下载到网盘|"
            r"下载进网盘|进网盘|放进网盘)(?:到网盘|进网盘|到云盘)?(?:的)?")
+    # 「今天保存的视频」: saved to the drive (not 「保存到本地」, which is a download).
+    s.take(r"保存(?:了|的)?(?![到回])")
     # 「昨天下载的图片」: 下载的 describes when files arrived, it is not a command.
     s.take(r"下载(?:好|完)?的")
 

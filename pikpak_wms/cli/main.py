@@ -25,6 +25,7 @@ from ..core.auth import StandaloneAuth, read_token
 from ..core.errors import WmsError
 from ..core.models import ActionType, Plan
 from ..i18n import t
+from ..ops import downloads as downloads_ops
 from ..ops import eventsync, listing, organize, plans, protect, tidy
 from ..ops import inbound as inbound_ops
 from ..ops import outbound as outbound_ops
@@ -250,6 +251,43 @@ def list_path(path: str = typer.Argument("/", help="a path in the drive")) -> No
             (node.modified_time or "")[:19].replace("T", " "),
         )
     console.print(table)
+
+
+@app.command(name="downloads")
+def downloads_cmd(
+    today: bool = typer.Option(False, "--today", help="only today's (in the WMS time zone)"),
+    since: str = typer.Option(None, "--since", help="from this date (2026-10-01) or 7d"),
+    name: str = typer.Option(None, "--name", help="the name contains this"),
+    status: str = typer.Option(
+        None, "--status", help="done, failed, cancelled, skipped_exists or marked (comma list)"),
+    limit: int = typer.Option(50, "--limit", help="how many rows"),
+    rescan: bool = typer.Option(
+        False, "--rescan", help="first log the library files the index knows (source=scan)"),
+    as_json: bool = typer.Option(False, "--json", help="machine-readable output"),
+) -> None:
+    """The download log: what was taken out of the drive, and what was said to be on the NAS."""
+
+    async def work(ctx: Context) -> tuple[int, list[dict]]:
+        added = await downloads_ops.scan_library(ctx) if rescan else 0
+        rows = await ctx.store.downloads(
+            since=downloads_ops.since_for(ctx, today=today, since=since), name=name,
+            status=[s.strip() for s in status.split(",") if s.strip()] if status else None,
+            limit=limit)
+        return added, [{**row, "line": downloads_ops.row_line(ctx, row)} for row in rows]
+
+    added, rows = _run(work)
+    if as_json:
+        console.print_json(json.dumps(
+            {"scanned": added, "downloads": [{k: v for k, v in row.items() if k != "line"}
+                                             for row in rows]}, ensure_ascii=False))
+        return
+    if rescan:
+        console.print(t("cli.downloads.scanned", count=added))
+    if not rows:
+        console.print(t("cli.downloads.none"))
+        return
+    for row in rows:
+        console.print(row["line"], markup=False, highlight=False)
 
 
 @app.command(name="bench-fetch")

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import threading
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from importlib import resources
@@ -31,6 +32,39 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if column not in present:
             # Names come from the constant above, never from input.
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+
+
+AUDIT_BACKFILLED = "downloads:audit_backfilled"
+
+KNOWN_STATUSES = ("done", "marked", "skipped_exists")
+"""A file with a row in one of these is already on the NAS (or was said to be)."""
+
+
+def _backfill_audit(conn: sqlite3.Connection) -> None:
+    """Once: every applied local outbound in the audit becomes a ``done`` row
+    (source ``backfill``). The meta flag makes a second open do nothing."""
+    if conn.execute("SELECT 1 FROM meta WHERE key = ?", (AUDIT_BACKFILLED,)).fetchone():
+        return
+    rows = conn.execute(
+        "SELECT file_id, before, after, at, plan_id FROM audit "
+        "WHERE action = 'outbound' AND dry_run = 0 ORDER BY id"
+    ).fetchall()
+    for row in rows:
+        before, after = json.loads(row["before"] or "{}"), json.loads(row["after"] or "{}")
+        path = str(after.get("path") or "")
+        if not path:
+            continue  # links shown, or handed to aria2: nothing landed here
+        name = str(before.get("name") or path.rsplit("/", 1)[-1])
+        fetch = after.get("fetch") if isinstance(after.get("fetch"), dict) else {}
+        conn.execute(
+            "INSERT INTO downloads (file_id, name, size, hash, dest_path, plan_id, status, "
+            "finished_at, avg_mib_s, links, peak_connections, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'done', ?, ?, ?, ?, 'backfill')",
+            (row["file_id"], name, int(before.get("size") or 0), str(before.get("hash") or ""),
+             path, row["plan_id"], row["at"], fetch.get("avg_mib_s"), fetch.get("links", ""),
+             int(fetch.get("peak_connections") or 0)),
+        )
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (AUDIT_BACKFILLED, "1"))
 
 
 def now_iso() -> str:
@@ -58,6 +92,9 @@ class Store:
         self._path = path
         self._conn: sqlite3.Connection | None = None
         self._lock = asyncio.Lock()
+        # One connection, used from worker threads: several files downloading at once
+        # read and write together, and sqlite3 does not take that from one connection.
+        self._thread_lock = threading.Lock()
 
     # ------------------------------------------------------------ lifecycle
 
@@ -72,6 +109,8 @@ class Store:
         schema = resources.files("pikpak_wms.store").joinpath("schema.sql").read_text("utf-8")
         conn.executescript(schema)
         _migrate(conn)
+        with conn:
+            _backfill_audit(conn)
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.commit()
         return conn
@@ -93,15 +132,19 @@ class Store:
             raise RuntimeError("Store.open() has not been awaited")
         return self._conn
 
+    def _query(self, sql: str, params: tuple) -> list[sqlite3.Row]:
+        with self._thread_lock:
+            return list(self.conn.execute(sql, params))
+
     async def _read(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
-        return await asyncio.to_thread(lambda: list(self.conn.execute(sql, tuple(params))))
+        return await asyncio.to_thread(self._query, sql, tuple(params))
 
     async def _write(self, work) -> Any:
         async with self._lock:
             return await asyncio.to_thread(self._in_transaction, work)
 
     def _in_transaction(self, work) -> Any:
-        with self.conn:
+        with self._thread_lock, self.conn:
             return work(self.conn)
 
     # ---------------------------------------------------------------- files
@@ -404,6 +447,110 @@ class Store:
                 (status, progress, json.dumps(result, ensure_ascii=False), now_iso(), plan_id),
             )
         )
+
+    async def rewrite_plan(self, plan_id: int, plan: Plan, *, fingerprint: str) -> None:
+        """Replace a plan's actions (an exclusion removed some, M9.2 §C.2)."""
+        await self._write(
+            lambda conn: conn.execute(
+                "UPDATE plans SET body = ?, fingerprint = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(plan.to_dict(), ensure_ascii=False), fingerprint, now_iso(), plan_id),
+            )
+        )
+
+    # ------------------------------------------------------------ downloads
+
+    async def add_download(
+        self, *, name: str, status: str, file_id: str = "", size: int = 0, hash: str = "",
+        dest_path: str = "", plan_id: int | None = None, reason: str = "",
+        started_at: str | None = None, finished_at: str | None = None,
+        avg_mib_s: float | None = None, links: str = "", peak_connections: int = 0,
+        source: str = "plan", user_id: int | None = None,
+    ) -> int:
+        """One outbound attempt (M9.2 §A). Returns the row id."""
+
+        def work(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
+                "INSERT INTO downloads (file_id, name, size, hash, dest_path, plan_id, status, "
+                "reason, started_at, finished_at, avg_mib_s, links, peak_connections, source, "
+                "user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (file_id, name, size, hash, dest_path, plan_id, status, reason, started_at,
+                 finished_at or now_iso(), avg_mib_s, links, peak_connections, source, user_id),
+            )
+            return int(cursor.lastrowid or 0)
+
+        return await self._write(work)
+
+    async def downloads(
+        self, *, since: str | None = None, name: str | None = None,
+        status: list[str] | None = None, limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Newest first. ``since`` is an ISO time compared with ``finished_at``;
+        ``name`` is a case-insensitive substring."""
+        clauses, params = [], []
+        if since:
+            clauses.append("finished_at >= ?")
+            params.append(since)
+        if name:
+            clauses.append("name LIKE ? ESCAPE '\\'")
+            params.append("%" + _like_prefix(name) + "%")
+        if status:
+            clauses.append("status IN (" + ",".join("?" for _ in status) + ")")
+            params.extend(status)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = await self._read(
+            # `where` is built from fixed strings; values are parameters.
+            f"SELECT * FROM downloads {where} ORDER BY finished_at DESC, id DESC LIMIT ?",
+            (*params, limit),
+        )
+        return [dict(row) for row in rows]
+
+    async def downloads_with(self, name: str, size: int) -> list[dict[str, Any]]:
+        """Rows that say this name and size is on the NAS (done, marked, skipped)."""
+        marks = ",".join("?" for _ in KNOWN_STATUSES)
+        rows = await self._read(
+            f"SELECT * FROM downloads WHERE name = ? AND size = ? AND status IN ({marks}) "
+            "ORDER BY id DESC",
+            (name, size, *KNOWN_STATUSES),
+        )
+        return [dict(row) for row in rows]
+
+    async def known_downloads(self) -> tuple[set[str], set[tuple[str, int]], list[str]]:
+        """What is already on the NAS, for 「还没下载过的」: the file ids, the
+        (name, size) pairs, and the name fragments the owner said were downloaded
+        (``marked`` rows no file in the index matched)."""
+        marks = ",".join("?" for _ in KNOWN_STATUSES)
+        rows = await self._read(
+            f"SELECT file_id, name, size FROM downloads WHERE status IN ({marks})",
+            KNOWN_STATUSES,
+        )
+        ids = {row["file_id"] for row in rows if row["file_id"]}
+        pairs = {(row["name"], int(row["size"])) for row in rows if row["size"]}
+        fragments = [row["name"].casefold() for row in rows if not row["file_id"]]
+        return ids, pairs, fragments
+
+    async def download_exists(self, dest_path: str,
+                              statuses: tuple[str, ...] = ("done",)) -> bool:
+        marks = ",".join("?" for _ in statuses)
+        rows = await self._read(
+            f"SELECT 1 FROM downloads WHERE dest_path = ? AND status IN ({marks}) LIMIT 1",
+            (dest_path, *statuses),
+        )
+        return bool(rows)
+
+    async def file_identities(self) -> dict[tuple[str, int], tuple[str, str]]:
+        """(name, size) → (file_id, hash) for every file in the index."""
+        rows = await self._read(
+            "SELECT name, size, file_id, hash FROM files WHERE kind != 'folder'")
+        return {(row["name"], int(row["size"])): (row["file_id"], row["hash"]) for row in rows}
+
+    async def files_named(self, fragment: str) -> list[FileNode]:
+        """Files whose name contains ``fragment`` (any case)."""
+        rows = await self._read(
+            "SELECT * FROM files WHERE kind != 'folder' AND name LIKE ? ESCAPE '\\' "
+            "ORDER BY path",
+            ("%" + _like_prefix(fragment) + "%",),
+        )
+        return [_node(row) for row in rows]
 
     # ---------------------------------------------------------------- tasks
 
