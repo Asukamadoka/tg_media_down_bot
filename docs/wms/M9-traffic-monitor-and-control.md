@@ -36,7 +36,7 @@ So the traffic that costs money is Telegram media (download and upload) plus any
    - **category**, first match wins:
      - `telegram`: rule target or group is `TG`/`TG-*`, or the host/IP is in a Telegram CIDR or domain;
      - `pikpak`: host ends with `mypikpak.com` or `mypikpak.net`;
-     - `model`: host is `ollama.com`, `ollama.ai` or `*.r2.cloudflarestorage.com`, or the destination is the Mac model host `10.10.10.1:11434`;
+     - `model`: host is `ollama.com`, `ollama.ai` or `*.r2.cloudflarestorage.com`, or the destination is the Mac model host `<MODEL_HOST>:11434`;
      - `lan`: RFC1918 or loopback;
      - `proxy-sub`: `bujidao.cc`;
      - `other`.

@@ -341,7 +341,7 @@ class OllamaTranslator:
 class OpenAITranslator:
     """Any OpenAI-compatible ``/chat/completions`` endpoint (docs/wms/M7 §7.3).
 
-    ``NL_OPENAI_BASE_URL`` (e.g. ``http://192.168.1.10:1234/v1``),
+    ``NL_OPENAI_BASE_URL`` (e.g. ``http://<LAN_IP>:1234/v1``),
     ``NL_OPENAI_MODEL``, and ``NL_OPENAI_API_KEY`` (may be empty for a local
     server). The schema goes in ``response_format``; when the server refuses
     that (HTTP 400/404/415/422, as DeepSeek does), the request is repeated

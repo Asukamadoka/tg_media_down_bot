@@ -261,6 +261,9 @@ class TrafficConfig:
     upload_rate_mbps: float = 0.0
     """TG_MEDIA_RATE_LIMIT_MBPS / TG_UPLOAD_RATE_LIMIT_MBPS, megabytes per second."""
     timezone: str = "Asia/Shanghai"
+    model_host: str = ""
+    """TRAFFIC_MODEL_HOST (``host`` or ``host:port``): the LAN machine that serves the models.
+    Empty: none; a connection to it is then not classed as a model connection."""
     # --- M9.1: node selection and direct-first routing (docs/wms/M9.1)
     probe_hours: float = 6.0
     """PROXY_PROBE_HOURS: how often every node's speed is measured; 0 is off."""
@@ -747,6 +750,8 @@ def load_config(path: Path | None = None) -> Config:
             float(_get(data, "traffic", "upload_rate_mbps", default=0.0) or 0.0)),
         timezone=_env_str(
             "TRAFFIC_TIMEZONE", str(_get(data, "traffic", "timezone", default="Asia/Shanghai"))),
+        model_host=_env_str("TRAFFIC_MODEL_HOST", str(_get(
+            data, "traffic", "model_host", default="") or "")),
         probe_hours=_env_float("PROXY_PROBE_HOURS", 6.0),
         probe_confirm=parse_bool(os.environ.get("PROXY_PROBE_CONFIRM"), True),
         probe_url=_env_str("PROXY_PROBE_URL", TrafficConfig.probe_url),

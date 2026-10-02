@@ -23,3 +23,22 @@ README.md
 Dockerfile
 docker-compose.yml
 requirements-dev.txt
+
+# The image is public (docs/security/README.md). The Dockerfile copies only tgmd/, pikpak_wms/,
+# config/ and tests/nl/, and these keep everything else out of the build context as well:
+# documents and briefs, tests, deployment notes, CI, every env file, the real WMS config and token.
+.env*
+.cloudflared.env
+config/wms.yaml
+config/rules.yaml
+wms-token.json
+docs
+deploy
+scripts
+.github
+.gitleaks.toml
+.pre-commit-config.yaml
+*.md
+app.json
+render.yaml
+docker-compose.ghcr.yml

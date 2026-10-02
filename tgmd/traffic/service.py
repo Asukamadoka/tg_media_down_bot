@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from ..i18n import t
+from .classify import parse_model_host
 from .gate import TrafficControl
 from .meter import Delta, Meter, Step
 from .mihomo import TG_GROUP, MihomoClient
@@ -83,7 +84,7 @@ class TrafficService:
         self._client = client or MihomoClient(config.mihomo_api)
         self._clock = clock
         self._tz = ZoneInfo(config.timezone)
-        self._meter = Meter()
+        self._meter = Meter(parse_model_host(config.model_host))
         self._spend = Spend()
         self._hours: dict[HourKey, list[float]] = {}
         self._host_total: dict[HostKey, int] = {}

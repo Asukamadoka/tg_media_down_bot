@@ -184,7 +184,7 @@ rebuilding the image loses nothing.
 - **`local`** — the file is kept on the server, under `MEDIA_DIR` with its
   original name (`{chat}/{name}` by default, `MEDIA_TEMPLATE` to change it),
   and the bot replies with where to find it. Kept files are never deleted.
-  Set `LOCAL_URL_PREFIX` (say `smb://10.10.10.2/media/`) and the reply is a
+  Set `LOCAL_URL_PREFIX` (say `smb://<NAS_IP>/media/`) and the reply is a
   path you can paste straight into a file manager.
 - **`pikpak`** — the file is transferred into PikPak. See below.
 - **`auto`** — whatever can be forwarded comes back through Telegram, in

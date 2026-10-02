@@ -30,7 +30,7 @@ DEFAULT_LAYOUT = "资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}"
 
 # A first segment that names a place in the container or on the NAS itself,
 # not a folder of the library. "/电影/日剧" is a library path; "/etc/x" or
-# "/volume3/x" is somebody reaching for the outside, and is refused rather
+# "/volumeN/x" is somebody reaching for the outside, and is refused rather
 # than quietly filed under the library.
 _OUTSIDE_ROOTS = frozenset({
     "etc", "usr", "var", "tmp", "root", "home", "proc", "sys", "dev", "bin", "sbin", "opt",

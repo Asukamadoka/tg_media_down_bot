@@ -26,6 +26,7 @@ from tgmd.traffic.store import TrafficStore, hour_of, period_for
 
 SH = ZoneInfo("Asia/Shanghai")
 TG_NODE = "😈英格兰002｜0.09元/G｜hy2｜"
+MODEL_IP = "10.0.0.1"  # a placeholder LAN model host
 JP_NODE = "🖤东京京X06｜0.01元/G｜Reality｜"
 MB = 1024 * 1024
 
@@ -111,17 +112,20 @@ class TestClassify:
         pull = classify(conn("1", "registry.ollama.ai", chains=[JP_NODE, "PROXY"]))
         assert (pull.category, pull.leak) == ("model", False)  # a billed pull, not a leak
         assert classify(conn("2", "x.r2.cloudflarestorage.com")).category == "model"
-        mac = classify(conn("3", "", ip="10.10.10.1", port="11434"))
+        mac = classify(conn("3", "", ip=MODEL_IP, port="11434"), (MODEL_IP, 11434))
         assert (mac.category, mac.outbound) == ("model", "direct")
+        # With no model host configured, nothing is built in: the address is just a LAN one.
+        assert classify(conn("3", "", ip=MODEL_IP, port="11434")).category == "lan"
 
     def test_the_mac_through_the_proxy_is_a_route_leak(self):
-        mac = classify(conn("3", "", ip="10.10.10.1", port="11434", chains=[JP_NODE, "PROXY"]))
+        mac = classify(conn("3", "", ip=MODEL_IP, port="11434", chains=[JP_NODE, "PROXY"]),
+                       (MODEL_IP, 11434))
         assert mac.leak is True
 
     def test_lan_and_loopback(self):
-        assert classify(conn("1", "", ip="192.168.1.5")).category == "lan"
+        assert classify(conn("1", "", ip="192.168.0.5")).category == "lan"
         assert classify(conn("2", "", ip="127.0.0.1")).category == "lan"
-        assert classify(conn("3", "", ip="192.168.1.5", chains=["PROXY", JP_NODE])).leak is True
+        assert classify(conn("3", "", ip="192.168.0.5", chains=["PROXY", JP_NODE])).leak is True
 
     def test_the_subscription_host(self):
         assert classify(conn("1", "bujidao.cc")).category == "proxy-sub"

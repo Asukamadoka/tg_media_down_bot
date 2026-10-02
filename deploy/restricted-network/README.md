@@ -1,6 +1,6 @@
 # 受限网络环境部署
 
-部署机连不上 Telegram 时用这一套。已在 UGREEN DXP4800（Debian 12 / x86_64 /
+部署机连不上 Telegram 时用这一套。已在 <NAS_MODEL>（Debian 12 / x86_64 /
 Docker 29.4.3）上跑通。
 
 ## 症状

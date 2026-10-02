@@ -65,7 +65,7 @@ services:
       # 局域网里的 Mac / PC 当模型主机（不是 7×24 开机，M8）：按优先级写多个，
       # 每个先问 GET /models（1.5 秒，60 秒内不重复问），第一个在线的接活；全部离线时马上回复。
       # NL_BACKEND: "openai"
-      # NL_OPENAI_BASE_URL: "http://10.10.10.1:11434/v1,http://192.168.0.50:11434/v1"
+      # NL_OPENAI_BASE_URL: "http://<MODEL_HOST>:11434/v1,http://192.168.0.50:11434/v1"
       # NL_OPENAI_MODEL: "qwen2.5:7b-instruct"
       # 直连媒体线路 v2（独立 auth key，docs/wms/M7.1 §B）：off（默认）| v2
       # 打开前先做 README.md「直连媒体线路 v2」里的检查。

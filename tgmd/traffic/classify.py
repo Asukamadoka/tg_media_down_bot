@@ -48,7 +48,7 @@ TELEGRAM_DOMAINS = (
 PIKPAK_DOMAINS = ("mypikpak.com", "mypikpak.net")
 MODEL_DOMAINS = ("ollama.com", "ollama.ai", "r2.cloudflarestorage.com")
 SUBSCRIPTION_DOMAINS = ("bujidao.cc",)
-MODEL_HOST = ("10.10.10.1", 11434)
+DEFAULT_MODEL_PORT = 11434
 
 _TG_GROUP = re.compile(r"^TG(-.*)?$", re.IGNORECASE)
 
@@ -95,8 +95,23 @@ def split_chains(chains: list[str]) -> tuple[str, str]:
     return chains[-1], chains[0]
 
 
-def classify(connection: dict) -> Classified:
-    """Outbound, category and the facts alerts need, for one connection."""
+def parse_model_host(text: str) -> tuple[str, int] | None:
+    """``TRAFFIC_MODEL_HOST``: ``host`` or ``host:port`` of the machine that serves the
+    models (the LAN model host). Empty or unusable: there is none, and nothing is
+    classed as it (no address is built into the code)."""
+    text = text.strip()
+    if not text:
+        return None
+    host, _, port = text.rpartition(":") if ":" in text else (text, "", "")
+    try:
+        return host, int(port) if port else DEFAULT_MODEL_PORT
+    except ValueError:
+        return None
+
+
+def classify(connection: dict, model_host: tuple[str, int] | None = None) -> Classified:
+    """Outbound, category and the facts alerts need, for one connection. ``model_host`` is
+    the LAN model host's ``(address, port)``, when the owner has one."""
     metadata = connection.get("metadata") or {}
     chains = [str(name) for name in (connection.get("chains") or [])]
     host = str(metadata.get("host") or "").strip().lower()
@@ -113,7 +128,8 @@ def classify(connection: dict) -> Classified:
         node, group = split_chains(chains)
 
     on_tg_group = any(_TG_GROUP.match(name) for name in chains)
-    is_mac = dest_ip == MODEL_HOST[0] and (not dest_port or dest_port == str(MODEL_HOST[1]))
+    is_mac = model_host is not None and dest_ip == model_host[0] and (
+        not dest_port or dest_port == str(model_host[1]))
 
     if str(metadata.get("inboundName") or "") == PROBE_LISTENER:
         category = "probe"

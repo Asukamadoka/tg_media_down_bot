@@ -397,7 +397,7 @@ class TestAFullFileName:
 
 class TestWhoUnderstood:
     async def test_names_per_host_and_the_display(self, clock):
-        hosts = parse_hosts("http://10.10.10.1:11434/v1,http://192.168.0.50:11434/v1",
+        hosts = parse_hosts("http://10.0.0.1:11434/v1,http://192.168.0.50:11434/v1",
                             "qwen3.6-35b-a3b", "Mac,WinPC")
         assert [h.display for h in hosts] == ["Mac", "WinPC"]
         assert parse_hosts("http://192.168.0.50:11434/v1", "m")[0].display == "192.168.0.50"

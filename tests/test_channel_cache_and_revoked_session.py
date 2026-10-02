@@ -19,7 +19,7 @@ from tgmd.config import Config
 from tgmd.handlers import BotHandlers
 
 ADMIN = 4242
-CHANNEL = -1003729105427
+CHANNEL = -1001234567890
 
 
 class Rights:
