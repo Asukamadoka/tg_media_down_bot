@@ -31,12 +31,79 @@ def _persisted_state(path) -> dict:
         return {}
 
 
+def _live(args, config) -> int:
+    """``probe`` and ``direct-test``: real measurements through mihomo. They write only
+    what the bot's own buttons write (PROBE, and FAST with ``--apply``), never the
+    rules file."""
+    import asyncio
+
+    from .direct import DirectRouting
+    from .gate import TrafficControl
+    from .nodes import NodeManager
+    from .probe import Prober, UrllibNet
+
+    settings = config.traffic
+    client = MihomoClient(settings.mihomo_api)
+    net = UrllibNet(settings.probe_listener)
+    store = TrafficStore(config.download.traffic_db_path)
+    store.open()
+    try:
+        if args.command == "direct-test":
+            routing = DirectRouting(settings, client, net, store, None)
+            verdicts = [routing.check(host) for host in args.hosts]
+            rows = [{"host": v.host, "ok": v.ok, "reason": v.reason, "direct_ms": v.direct_ms,
+                     "proxy_ms": v.proxy_ms, "direct_mbps": v.direct_mbps,
+                     "proxy_mbps": v.proxy_mbps} for v in verdicts]
+            if args.json:
+                print(json.dumps(rows, ensure_ascii=False, indent=2))
+            else:
+                for r in rows:
+                    print(f"{'ok  ' if r['ok'] else 'FAIL'} {r['host']}  direct "
+                          f"{r['direct_ms']} ms, proxy {r['proxy_ms']} ms"
+                          + (f"  ({r['reason']})" if r["reason"] else ""))
+            return 0
+        prober = Prober(settings, client, net, store)
+        run = prober.run()
+        switched = False
+        if args.apply:
+            manager = NodeManager(settings, client, store, None, TrafficControl(settings),
+                                  prober)
+            switched = asyncio.run(manager._update_fast(force=True))  # noqa: SLF001
+        rows = [{"node": r.name, "latency_ms": r.latency_ms, "down_mbps": round(r.down_mbps, 1),
+                 "up_mbps": round(r.up_mbps, 1), "price": r.price, "alive": r.alive}
+                for r in run.results]
+        rows += [{"node": name, "skipped": reason} for name, reason in run.skipped]
+        if args.json:
+            print(json.dumps({"nodes": rows, "spent_bytes": run.spent_bytes,
+                              "fast_switched": switched}, ensure_ascii=False, indent=2))
+        else:
+            print(f"{'node':40} {'ms':>6} {'down':>8} {'up':>8} {'price':>6} alive")
+            for r in rows:
+                if "skipped" in r:
+                    print(f"{r['node'][:40]:40} skipped ({r['skipped']})")
+                else:
+                    print(f"{r['node'][:40]:40} {r['latency_ms'] or '-':>6} "
+                          f"{r['down_mbps']:>8} {r['up_mbps']:>8} {r['price'] or '-':>6} "
+                          f"{'yes' if r['alive'] else 'no'}")
+            print(f"used {run.spent_bytes / (1024 * 1024):.0f} MB"
+                  + ("; FAST switched" if switched else ""))
+        return 0
+    finally:
+        store.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m tgmd.traffic")
     sub = parser.add_subparsers(dest="command", required=True)
     report = sub.add_parser("report", help="print the traffic report")
     report.add_argument("--period", choices=("today", "7d", "month"), default="today")
     report.add_argument("--json", action="store_true", help="machine-readable output")
+    probe = sub.add_parser("probe", help="measure every node, like /proxy 立即测速")
+    probe.add_argument("--apply", action="store_true", help="also point FAST at the best node")
+    probe.add_argument("--json", action="store_true", help="machine-readable output")
+    direct = sub.add_parser("direct-test", help="test hosts direct vs. through the proxy")
+    direct.add_argument("hosts", nargs="+", metavar="HOST")
+    direct.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(argv)
 
     try:
@@ -45,6 +112,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
     i18n.set_language(config.language)
+    if args.command in ("probe", "direct-test"):
+        return _live(args, config)
+
     path = config.download.traffic_db_path
     if not path.exists():
         print(f"no traffic data yet ({path} does not exist)", file=sys.stderr)

@@ -95,7 +95,10 @@ class MihomoClient:
               timeout_ms: int = 5000) -> int | None:
         """Latency in ms through ``node``, or None when it did not answer."""
         query = urllib.parse.urlencode({"url": url, "timeout": timeout_ms})
-        path = f"{self._base}/proxies/{urllib.parse.quote(node, safe='')}/delay?{query}"
+        # Provider nodes are not in /proxies (mihomo 1.19 answers 404 there); the
+        # provider's own health check is the read-only way to time one.
+        path = (f"{self._base}/providers/proxies/{NODE_PROVIDER}/"
+                f"{urllib.parse.quote(node, safe='')}/healthcheck?{query}")
         try:
             value = self._fetch(path).get("delay")
         except (urllib.error.URLError, OSError, ValueError):

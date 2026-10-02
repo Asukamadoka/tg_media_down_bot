@@ -4,6 +4,7 @@ direct-first routing (docs/wms/M9.1 §A, §B, §D)."""
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import threading
 import urllib.error
@@ -60,16 +61,16 @@ class Controller:
         path = urlsplit(url).path
         if path == "/connections":
             return {"connections": list(self.connections)}
-        if path.startswith("/providers/proxies/"):
-            if self.provider_error is not None:
-                raise self.provider_error
-            return {"proxies": self.nodes}
-        if path.endswith("/delay"):
-            name = unquote(path[len("/proxies/"):-len("/delay")])
+        if path.endswith("/healthcheck"):
+            name = unquote(path[len("/providers/proxies/main/"):-len("/healthcheck")])
             delay = self.delays.get(name)
             if not delay:
                 raise urllib.error.URLError("timeout")
             return {"delay": delay}
+        if path.startswith("/providers/proxies/"):
+            if self.provider_error is not None:
+                raise self.provider_error
+            return {"proxies": self.nodes}
         if path.startswith("/proxies/"):
             name = unquote(path[len("/proxies/"):])
             return {"now": self.groups[name]} if name in self.groups else {"type": "Vless"}
@@ -867,3 +868,133 @@ class TestSettings:
         assert t.direct_auto_apply is True and t.direct_probe_hosts == ("a.com", "b.org")
         assert t.direct_test_urls == {"a.com": "https://a.com/x.bin", "b.org": "https://b.org/y"}
         assert t.direct_rules_file == "/tmp/r.txt"
+
+
+class TestLiveFixes:
+    def test_latency_uses_the_provider_healthcheck_not_proxies_delay(self):
+        seen = []
+
+        def fetch(url):
+            seen.append(url)
+            return {"delay": 993}
+
+        client = MihomoClient("http://m", fetch=fetch)
+        assert client.delay("🖤东京01｜0.01元/G｜") == 993
+        assert seen[0].startswith("http://m/providers/proxies/main/")
+        assert "/healthcheck?" in seen[0] and "timeout=5000" in seen[0]
+        assert "/proxies/🖤" not in seen[0]
+        assert "%F0%9F%96%A4" in seen[0]                     # the node name is URL-quoted
+
+    def test_a_node_that_does_not_answer_is_none(self):
+        def fetch(url):
+            raise urllib.error.HTTPError(url, 504, "timeout", {}, None)
+
+        assert MihomoClient("http://m", fetch=fetch).delay("n") is None
+
+    def test_every_request_carries_a_browser_user_agent(self, monkeypatch):
+        import urllib.request
+
+        from tgmd.traffic.probe import BROWSER_UA, UrllibNet
+
+        agents = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n=-1):
+                return b""
+
+        def fake_open(self, req, data=None, timeout=None):
+            found = {k.lower(): v for k, v in
+                     [*self.addheaders, *getattr(req, "headers", {}).items()]}
+            agents.append(found.get("user-agent"))
+            return Response()
+
+        monkeypatch.setattr(urllib.request.OpenerDirector, "open", fake_open)
+        net = UrllibNet("http://127.0.0.1:7899")
+        net.download("https://speed.example/down", cap=10, seconds=1)
+        net.upload("https://speed.example/up", size=10, seconds=1)
+        assert agents == [BROWSER_UA, BROWSER_UA]
+        assert BROWSER_UA == ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                              "Chrome/120 Safari/537.36")
+
+    def test_head_requests_carry_it_too(self, monkeypatch):
+        import http.client
+
+        from tgmd.traffic.probe import BROWSER_UA, UrllibNet
+
+        sent = {}
+
+        class Conn:
+            def __init__(self, *a, **k):
+                pass
+
+            def set_tunnel(self, host):
+                sent["tunnel"] = host
+
+            def request(self, method, path, headers=None):
+                sent["headers"] = headers
+
+            def getresponse(self):
+                return SimpleNamespace(status=200)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(http.client, "HTTPSConnection", Conn)
+        result = UrllibNet("http://127.0.0.1:7899").head("a.example.org", url=None, seconds=1)
+        assert result.reachable and sent["headers"]["User-Agent"] == BROWSER_UA
+
+
+class TestCli:
+    def setup(self, tmp_path, monkeypatch, controller):
+        from tgmd.traffic import __main__ as cli
+
+        monkeypatch.setenv("DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("DIRECT_RULES_FILE", str(tmp_path / "rules" / "direct-auto.txt"))
+        monkeypatch.setattr(cli, "MihomoClient", lambda base: controller.client())
+        net = FakeNet(controller, dict(SPEEDS))
+        monkeypatch.setattr("tgmd.traffic.probe.UrllibNet", lambda listener: net)
+        return cli, net
+
+    def test_probe_saves_results_prints_a_table_and_leaves_fast_alone(
+            self, tmp_path, monkeypatch, capsys):
+        controller = Controller()
+        cli, _ = self.setup(tmp_path, monkeypatch, controller)
+        assert cli.main(["probe"]) == 0
+        out = capsys.readouterr().out
+        assert "node" in out and "東京" not in out and "东京01" in out and "skipped (price)" in out
+        assert controller.groups["FAST"] == "unprobed-node"
+        assert controller.groups["PROBE"] == "DIRECT"
+        store = TrafficStore(tmp_path / "traffic.sqlite3")
+        store.open()
+        assert {r["name"] for r in store.nodes()} >= {CHEAP_FAST, MID, DEAR}
+        store.close()
+
+    def test_probe_apply_switches_fast_and_json_is_machine_readable(
+            self, tmp_path, monkeypatch, capsys):
+        controller = Controller()
+        cli, _ = self.setup(tmp_path, monkeypatch, controller)
+        assert cli.main(["probe", "--apply", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["fast_switched"] is True and controller.groups["FAST"] == CHEAP_FAST
+        row = next(r for r in data["nodes"] if r["node"] == CHEAP_FAST)
+        assert set(row) == {"node", "latency_ms", "down_mbps", "up_mbps", "price", "alive"}
+
+    def test_direct_test_prints_verdicts_and_never_writes_the_rules_file(
+            self, tmp_path, monkeypatch, capsys):
+        controller = Controller()
+        cli, net = self.setup(tmp_path, monkeypatch, controller)
+        net.heads["bad.example.com|DIRECT"] = head(None, tls=False, ok=False, error="TLS: X")
+        assert cli.main(["direct-test", "good.example.com", "bad.example.com",
+                         "web.telegram.org"]) == 0
+        out = capsys.readouterr().out
+        assert "ok   good.example.com" in out and "FAIL bad.example.com" in out
+        assert "FAIL web.telegram.org" in out and "(Telegram)" in out
+        assert not (tmp_path / "rules").exists() and controller.reloads == 0
+        assert cli.main(["direct-test", "good.example.com", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)[0]["ok"] is True

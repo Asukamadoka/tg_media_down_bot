@@ -2108,3 +2108,14 @@ Notes: remove the old `TG` group's members if it still lists `TG-OTHER`/`TG-TOKY
 10. **`bench-fetch` and the origin link** have only run against fakes here. The aiohttp transport is unchanged (still `# pragma: no cover`).
 11. `DIRECT_RULES_FILE` is a `domain`/`text` provider written as `+.host`; if mihomo wants plain hosts for an exact match, tell me.
 12. The first scheduled probe happens 5 minutes after start when no result exists, so a fresh deploy spends up to 150 MB by itself. `PROXY_PROBE_HOURS=0` prevents that.
+
+### M9.1a: live fixes after the first NAS run
+
+Found on the NAS (mihomo v1.19.31); tests 1715 → 1722, ruff clean.
+
+1. **Latency** used `GET /proxies/<node>/delay`, which answers 404 for provider nodes, so the first automatic probe marked every node dead. It now reads `GET /providers/proxies/main/<url-quoted node>/healthcheck?url=…&timeout=5000` → `{"delay": ms}`. Still a read-only GET; the write whitelist is unchanged.
+2. **Browser User-Agent** on every request `UrllibNet` makes (download, upload, and the HEAD of the direct tests): `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36`. speed.cloudflare.com answers `Python-urllib` with 403 / error 1010.
+3. **CLI**, run inside the container, text by default, `--json` optional:
+   - `python -m tgmd.traffic probe [--apply] [--json]` runs one probe exactly like `立即测速`, saves the results to `proxy_node`, prints node / latency / down and up Mbps / price / alive (skipped nodes with the reason) and the MB used. It points `FAST` at the best node only with `--apply`.
+   - `python -m tgmd.traffic direct-test HOST [HOST...] [--json]` runs the direct-vs-proxy test and prints a verdict per host. It never writes the rules file, reloads the provider or stores a verdict (it only moves `PROBE`, and puts it back on `DIRECT`). Telegram, bujidao, LAN and IPs are refused as in the bot.
+4. **After deploying**: the nodes the first probe stored as dead are overwritten by the next probe; run `python -m tgmd.traffic probe` (or `/proxy` → `立即测速`) once to refresh them, and note it spends the probe's bytes (≤ 150 MB).
