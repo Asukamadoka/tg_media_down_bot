@@ -24,7 +24,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
-from .query import Query, Remark
+from .query import Prioritize, Query, Remark
 
 # --------------------------------------------------------------------- names
 
@@ -149,6 +149,31 @@ def only_remark(text: str) -> Remark | None:
     if _SPARE_WORDS.sub("", _PUNCTUATION.sub("", lifted.text)):
         return None
     return Remark(names=lifted.exclude, downloaded=bool(lifted.downloaded))
+
+
+# --------------------------------------------------------------- priority
+
+_PRIORITY_VERB = r"(?:先\s*下载|先\s*下|优先\s*下载|优先\s*下|优先)"
+_TOP_VERB = r"置顶"
+_PRIORITY_BEFORE = re.compile(rf"(?:把\s*)?{_PRIORITY_VERB}\s*(?P<names>{_NAMES})", re.IGNORECASE)
+_TOP_BEFORE = re.compile(rf"(?:把\s*)?{_TOP_VERB}\s*(?P<names>{_NAMES})", re.IGNORECASE)
+_TOP_AFTER = re.compile(rf"(?:把\s*)?(?P<names>{_NAMES})\s*(?:给\s*)?{_TOP_VERB}", re.IGNORECASE)
+
+
+def only_priority(text: str) -> Prioritize | None:
+    """「先下 X」「优先下载 X」「X 置顶」 on their own: files to move up the line. They
+    never become a plan (a sentence that names a file and says 下载 must not fetch it)."""
+    text = unicodedata.normalize("NFKC", text)
+    for pattern, level in ((_TOP_AFTER, "top"), (_TOP_BEFORE, "top"),
+                           (_PRIORITY_BEFORE, "high")):
+        match = pattern.search(text)
+        if match is None:
+            continue
+        names = _split(match.group("names"))
+        rest = text[:match.start()] + " " + text[match.end():]
+        if names and not _SPARE_WORDS.sub("", _PUNCTUATION.sub("", rest)):
+            return Prioritize(names=names, level=level)
+    return None
 
 
 # ------------------------------------------------------------ a model's answer

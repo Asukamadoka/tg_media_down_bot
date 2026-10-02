@@ -35,9 +35,9 @@ from typing import Any
 from ..core.errors import WmsError
 from ..core.models import ActionType
 from ..rules.actions import Deliver
-from . import downloads, outbound, plans
+from . import downloads, outbound, plans, priority
 from .context import Context
-from .control import Control, FileTrack, SpeedMeter
+from .control import QUEUED, Control, FileTrack, SpeedMeter
 
 log = logging.getLogger(__name__)
 
@@ -175,6 +175,41 @@ class Runs:
     def pause_file(self, plan_id: int, index: int) -> bool:
         control = self.control_of(plan_id)
         return bool(control and control.pause(index))
+
+    async def set_priority(self, plan_id: int, index: int, level: int) -> bool:
+        """优先 for one task of a running plan: now, and in the plan, so a restart keeps it."""
+        control = self.control_of(plan_id)
+        if control is None or not control.set_priority(index, level):
+            return False
+        await priority.set_task(self.ctx, plan_id, control.base + index, level)
+        return True
+
+    async def set_plan_priority(self, plan_id: int, level: int) -> int:
+        """整组优先: the plan and every task of it, running or not. Returns the tasks changed
+        in a running plan."""
+        control = self.control_of(plan_id)
+        changed = control.set_plan_priority(level) if control is not None else 0
+        await priority.set_plan(self.ctx, plan_id, level)
+        return changed
+
+    async def prioritize_names(self, fragments: list[str], level: int) -> list[str]:
+        """「先下 X」: tasks whose file name contains a fragment, in running and in waiting
+        plans. Returns the names found."""
+        found = await priority.set_named(self.ctx, fragments, level)
+        wanted = [f.casefold() for f in fragments if f.strip()]
+        for run in self.active():
+            for track in run.control.tracks.values():
+                if track.pending and any(w in track.name.casefold() for w in wanted):
+                    track.priority = level
+                    if track.name not in found:
+                        found.append(track.name)
+        return found
+
+    def queue(self) -> list[tuple[int, FileTrack]]:
+        """Every queued task of every running plan, in the order they will start."""
+        queued = [(run.plan_id, track) for run in self.active()
+                  for track in run.control.tracks.values() if track.state == QUEUED]
+        return sorted(queued, key=lambda item: item[1].key)
 
     def start_file(self, plan_id: int, index: int) -> bool:
         control = self.control_of(plan_id)

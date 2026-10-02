@@ -603,3 +603,66 @@ def test_nothing_in_the_warehouse_reads_the_machines_local_time():
                         owner == "time" and name in ("strftime", "mktime")):
                 offenders.append(f"{path.name}:{node.lineno} {owner}.{name}()")
     assert offenders == []
+
+
+class TestDedupeSpellings:
+    """Live: `wms downloads --name abcd00123` showed part1 and part2 twice after M9.3."""
+
+    async def test_the_same_file_from_the_container_and_from_the_host_is_merged(self, tmp_path):
+        from pikpak_wms.store.db import Store
+
+        path = tmp_path / "wms.sqlite3"
+        day = "资源/整理/2026/2026.10/2026.10.2"
+        async with Store(path) as store:
+            for name, size in (("a.part1.mp4", 10615381232), ("a.part2.mp4", 7256590320)):
+                kw = {"name": name, "size": size, "status": "done",
+                      "finished_at": "2026-10-02T02:10:00+00:00"}
+                await store.add_download(dest_path=f"/library/{day}/{name}", source="backfill",
+                                         file_id="F" + name, plan_id=60, **kw)
+                await store.add_download(dest_path=f"/volume9/Share/{day}/{name}",
+                                         source="scan", **kw)
+                # another spelling of the first: doubled and trailing slashes
+                await store.add_download(dest_path=f"/library//{day}//{name}", source="scan",
+                                         **kw)
+        async with Store(path) as store:
+            rows = await store.downloads(name="a.part", limit=50)
+        assert sorted(r["name"] for r in rows) == ["a.part1.mp4", "a.part2.mp4"]
+        assert {r["source"] for r in rows} == {"backfill"} and {r["plan_id"] for r in rows} == {60}
+
+    async def test_different_folders_and_other_sizes_are_not_merged(self, tmp_path):
+        from pikpak_wms.store.db import Store, same_place
+
+        assert not same_place("/library/2026/10/1/x.mp4", "/library/2026/10/2/x.mp4")
+        assert not same_place("", "/a/b/c/d/x.mp4")
+        assert same_place("/library/资源/整理/2026/2026.10/2026.10.2/x",
+                          "/vol/资源/整理/2026/2026.10/2026.10.2/x")
+        path = tmp_path / "wms.sqlite3"
+        async with Store(path) as store:
+            for size, folder in ((5, "c"), (5, "d"), (6, "c")):
+                await store.add_download(name="x.mp4", size=size, status="done",
+                                         dest_path=f"/l/a/b/{folder}/x.mp4")
+        async with Store(path) as store:
+            assert len(await store.downloads(limit=10)) == 3
+
+    async def test_a_row_without_a_path_joins_the_one_place(self, tmp_path):
+        from pikpak_wms.store.db import Store
+
+        path = tmp_path / "wms.sqlite3"
+        async with Store(path) as store:
+            await store.add_download(name="x.mp4", size=5, status="done", source="scan",
+                                     dest_path="/l/a/b/c/x.mp4")
+            await store.add_download(name="x.mp4", size=5, status="done", source="manual")
+        async with Store(path) as store:
+            (row,) = await store.downloads(limit=10)
+        assert row["dest_path"] == "/l/a/b/c/x.mp4"
+
+    async def test_a_scan_does_not_log_what_the_audit_logged_under_another_spelling(
+            self, tmp_path):
+        from pikpak_wms.store.db import Store
+
+        async with Store(tmp_path / "w.sqlite3") as store:
+            await store.add_download(name="x.mp4", size=5, status="done", source="backfill",
+                                     dest_path="/library/资源/整理/2026/2026.10/2026.10.2/x.mp4")
+            assert await store.download_placed(
+                "/host/Share/资源/整理/2026/2026.10/2026.10.2/x.mp4", "x.mp4", 5)
+            assert not await store.download_placed("/host/other/x.mp4", "x.mp4", 5)

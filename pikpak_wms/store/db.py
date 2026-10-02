@@ -11,6 +11,7 @@ import asyncio
 import json
 import sqlite3
 import threading
+import unicodedata
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from importlib import resources
@@ -58,9 +59,9 @@ def _backfill_audit(conn: sqlite3.Connection) -> None:
             continue  # links shown, or handed to aria2: nothing landed here
         name = str(before.get("name") or path.rsplit("/", 1)[-1])
         size = int(before.get("size") or 0)
-        if conn.execute(
-                "SELECT 1 FROM downloads WHERE status = 'done' AND dest_path = ? AND name = ? "
-                "AND size = ?", (path, name, size)).fetchone():
+        if any(same_place(path, r["dest_path"]) for r in conn.execute(
+                "SELECT dest_path FROM downloads WHERE status = 'done' AND name = ? AND size = ?",
+                (name, size))):
             continue  # already logged (by a scan, or by the attempt itself)
         fetch = after.get("fetch") if isinstance(after.get("fetch"), dict) else {}
         conn.execute(
@@ -81,34 +82,72 @@ _MERGED = ("file_id", "hash", "plan_id", "started_at", "avg_mib_s", "links", "pe
            "user_id")
 
 
+def _parts(path: str) -> list[str]:
+    return [p for p in unicodedata.normalize("NFC", path).replace("\\", "/").split("/") if p]
+
+
+def same_place(a: str, b: str) -> bool:
+    """Do two destination paths name one place? The same path however it is spelled (a
+    doubled or trailing slash, NFD or NFC), or the same place seen from the container
+    (``/library/…``) and from the host (``/volume…/…``): one is the end of the other, or
+    they share the last four parts (the file and the three day folders). An empty path
+    knows nothing, so it is never the same place here (see :func:`_dedupe_downloads`)."""
+    x, y = _parts(a), _parts(b)
+    if not x or not y:
+        return False
+    if x == y or x[-len(y):] == y or y[-len(x):] == x:
+        return True
+    return len(x) >= 4 and len(y) >= 4 and x[-4:] == y[-4:]
+
+
 def _dedupe_downloads(conn: sqlite3.Connection) -> int:
-    """Merge the ``done`` rows that say the same thing twice: one file (name and size)
-    at one destination. The best-sourced row stays (a real attempt over a backfill over
-    a scan) and takes what the others knew that it did not. Returns the rows removed."""
-    groups = conn.execute(
-        "SELECT dest_path, name, size FROM downloads WHERE status = 'done' AND dest_path != '' "
-        "GROUP BY dest_path, name, size HAVING COUNT(*) > 1").fetchall()
+    """Merge the ``done`` rows that say the same thing twice: one file (name and size) at one
+    destination, however the path is spelled (:func:`same_place`). A row with no path joins
+    the group when the file has exactly one place. The best-sourced row stays (a real
+    attempt over a backfill over a scan) and takes what the others knew that it did not.
+    Returns the rows removed."""
+    pairs = conn.execute(
+        "SELECT name, size FROM downloads WHERE status = 'done' GROUP BY name, size "
+        "HAVING COUNT(*) > 1").fetchall()
     removed = 0
-    for group in groups:
+    for pair in pairs:
         rows = conn.execute(
-            "SELECT * FROM downloads WHERE status = 'done' AND dest_path = ? AND name = ? "
-            "AND size = ?", tuple(group)).fetchall()
-        rows.sort(key=lambda r: (_SOURCE_RANK.get(r["source"], 9), r["id"]))
-        keeper, others = rows[0], rows[1:]
-        fill = {}
-        for column in _MERGED:
-            if keeper[column] in (None, "", 0):
-                value = next((o[column] for o in others if o[column] not in (None, "", 0)), None)
-                if value is not None:
-                    fill[column] = value
-        if fill:
-            # Column names come from the constant above, never from input.
-            conn.execute(
-                "UPDATE downloads SET " + ", ".join(f"{c} = ?" for c in fill) + " WHERE id = ?",
-                (*fill.values(), keeper["id"]))
-        for other in others:
-            conn.execute("DELETE FROM downloads WHERE id = ?", (other["id"],))
-            removed += 1
+            "SELECT * FROM downloads WHERE status = 'done' AND name = ? AND size = ? "
+            "ORDER BY id", tuple(pair)).fetchall()
+        groups: list[list[sqlite3.Row]] = []
+        for row in rows:
+            if row["dest_path"]:
+                for group in groups:
+                    if any(same_place(row["dest_path"], m["dest_path"]) for m in group):
+                        group.append(row)
+                        break
+                else:
+                    groups.append([row])
+        pathless = [r for r in rows if not r["dest_path"]]
+        if pathless and len(groups) == 1:
+            groups[0].extend(pathless)
+        elif pathless and not groups:
+            groups.append(pathless)
+        for group in groups:
+            if len(group) < 2:
+                continue
+            group.sort(key=lambda r: (_SOURCE_RANK.get(r["source"], 9), r["id"]))
+            keeper, others = group[0], group[1:]
+            fill = {}
+            for column in ("dest_path", *_MERGED):
+                if keeper[column] in (None, "", 0):
+                    value = next((o[column] for o in others
+                                  if o[column] not in (None, "", 0)), None)
+                    if value is not None:
+                        fill[column] = value
+            if fill:
+                # Column names come from the constants above, never from input.
+                conn.execute(
+                    "UPDATE downloads SET " + ", ".join(f"{c} = ?" for c in fill)
+                    + " WHERE id = ?", (*fill.values(), keeper["id"]))
+            for other in others:
+                conn.execute("DELETE FROM downloads WHERE id = ?", (other["id"],))
+                removed += 1
     return removed
 
 
@@ -640,6 +679,14 @@ class Store:
             (dest_path, *statuses),
         )
         return bool(rows)
+
+    async def download_placed(self, dest_path: str, name: str, size: int) -> bool:
+        """Is this file at this place already in the log (``done`` or ``skipped_exists``),
+        however the path is spelled (:func:`same_place`)?"""
+        rows = await self._read(
+            "SELECT dest_path FROM downloads WHERE name = ? AND size = ? "
+            "AND status IN ('done', 'skipped_exists')", (name, size))
+        return any(same_place(dest_path, row["dest_path"]) for row in rows)
 
     async def file_identities(self) -> dict[tuple[str, int], tuple[str, str]]:
         """(name, size) → (file_id, hash) for every file in the index."""

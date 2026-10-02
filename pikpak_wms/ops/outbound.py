@@ -292,7 +292,9 @@ def make_deliver(
             written = await ranged.download(
                 url_for, io or ranged.AiohttpIO(), part, connections=config.parallel,
                 max_connections=config.max_parallel, progress=report, stats=stats,
-                pool=pool, retry_seconds=config.retry_minutes * 60, **kwargs,
+                pool=pool, retry_seconds=config.retry_minutes * 60,
+                priority=(lambda: track.priority) if track is not None else 0,
+                order=track.order if track is not None else (), **kwargs,
             )
         if config.verify_mode != "off" and node.size and written != node.size:
             part.unlink(missing_ok=True)

@@ -38,8 +38,8 @@ async def log_attempt(
     """One row in the download log; a failure to write it never fails the download."""
     info = fetch_info or {}
     try:
-        if status == "skipped_exists" and path and await ctx.store.download_exists(
-                path, ("done", "skipped_exists")):
+        if status == "skipped_exists" and path and await ctx.store.download_placed(
+                path, node.name, node.size):
             return  # a re-run over what was already logged
         plan = plan_id if plan_id is not None else current_plan.get()
         await ctx.store.add_download(
@@ -91,7 +91,7 @@ async def scan_library(ctx: Context) -> int:
             continue
         for path, size, mtime in await asyncio.to_thread(_walk, base):
             known = identities.get((path.name, size))
-            if known is None or await store.download_exists(str(path)):
+            if known is None or await store.download_placed(str(path), path.name, size):
                 continue
             file_id, digest = known
             when = datetime.fromtimestamp(mtime, UTC).isoformat(timespec="seconds")

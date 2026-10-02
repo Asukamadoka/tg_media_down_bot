@@ -997,7 +997,27 @@ class BotHandlers:
             return
         plan_id = numbers[0] if numbers else 0
         wms = self._wms
-        if verb in ("tp", "ts", "tx", "cancel", "td", "ty", "tn") and len(numbers) == 2:
+        if verb == "tr" and len(numbers) == 2:
+            run = embedded.run_of(plan_id)
+            track = run.control.tracks.get(numbers[1]) if run is not None else None
+            if track is None or not track.pending:
+                await event.answer(t("wms.run.file_gone"), alert=True)
+                return
+            level = (track.priority + 1) % 3
+            await embedded.set_task_priority(plan_id, numbers[1], level)
+            await event.answer(t("wms.priority.set", n=track.number,
+                                 level=t(f"wms.priority.level.{level}")))
+            await self._show_run(event, run)
+        elif verb == "pr":
+            run = embedded.run_of(plan_id)
+            if run is None or not run.active:
+                await event.answer(t("wms.run.not_running"), alert=True)
+                return
+            level = (run.control.plan_priority + 1) % 3
+            await embedded.set_plan_priority(plan_id, level)
+            await event.answer(t("wms.priority.plan_set", level=t(f"wms.priority.level.{level}")))
+            await self._show_run(event, run)
+        elif verb in ("tp", "ts", "tx", "cancel", "td", "ty", "tn") and len(numbers) == 2:
             run = embedded.run_of(plan_id)
             track = run.control.tracks.get(numbers[1]) if run is not None else None
             if track is None:
@@ -1117,7 +1137,8 @@ class BotHandlers:
             return
         if event.data.startswith((b"wms:cancel:", b"wms:par:", b"wms:page:", b"wms:retry:",
                                   b"wms:tp:", b"wms:ts:", b"wms:tx:", b"wms:td:", b"wms:ty:",
-                                  b"wms:tn:", b"wms:pall:", b"wms:sall:")):
+                                  b"wms:tn:", b"wms:pall:", b"wms:sall:", b"wms:tr:",
+                                  b"wms:pr:")):
             await self._file_button(event, embedded)
             return
         try:

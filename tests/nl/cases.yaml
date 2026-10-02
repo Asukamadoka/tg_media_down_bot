@@ -427,3 +427,10 @@ cases:
     expect:
       intent: download
       filters: {created_after: "2026-10-02T02:50:00+08:00", kinds: [video], not_downloaded: true}
+  # ---------------- M9.4：优先，只改排队，不做计划 ----------------
+  - text: 先下 abcd00123
+    priority: {names: [abcd00123], level: high}
+  - text: 优先下载 abcd00123
+    priority: {names: [abcd00123], level: high}
+  - text: abcd00123 置顶
+    priority: {names: [abcd00123], level: top}

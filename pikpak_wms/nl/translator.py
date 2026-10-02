@@ -39,8 +39,17 @@ from ..core.errors import WmsError
 from ..i18n import t
 from .guard import ground, guard
 from .hosts import BOARD, PROBE_TIMEOUT, Host, HostBoard, HostsConfigError, parse_hosts
-from .query import Clarification, Query, Remark, as_result, from_wire, normalize_wire, wire_schema
-from .remarks import apply_remarks, only_remark
+from .query import (
+    Clarification,
+    Prioritize,
+    Query,
+    Remark,
+    as_result,
+    from_wire,
+    normalize_wire,
+    wire_schema,
+)
+from .remarks import apply_remarks, only_priority, only_remark
 from .rules_parser import RulesTranslator
 
 log = logging.getLogger(__name__)
@@ -614,10 +623,10 @@ class Chain:
         """Who understood the last sentence, for a person (docs/wms/M8.3 §I)."""
 
     async def translate(self, text: str, now: datetime, tz: tzinfo
-                        ) -> Query | Clarification | Remark | None:
+                        ) -> Query | Clarification | Remark | Prioritize | None:
         # A sentence that only names files and says 下过了 / 不要 never reaches a model, so
         # it can never come back as a download of those very files (docs/wms/M9.2 §C.2).
-        remark = only_remark(text)
+        remark = only_remark(text) or only_priority(text)
         if remark is not None:
             self.last_used, self.last_label = "rules", t("nl.by.rules")
             return remark

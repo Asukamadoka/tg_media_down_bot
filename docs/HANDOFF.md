@@ -2320,3 +2320,63 @@ Closed, with the answer: M9.2 #3 (a `done` row whose file is gone does not count
 3. **The audit's custom patterns are generic shapes** (a private address, a chat id, a volume path), not the specific values: writing the values into a pattern would publish them. Real names have no generic shape, so none are scanned for beyond home-directory paths, e-mail addresses and the NAS's make.
 4. **`wms task pause` for a plan that is not running anywhere** is not an error: it waits for 8 s, says nobody answered, and leaves the request to expire in 10 minutes.
 5. **The M9.3 spec file and the dispatch brief are committed with the feature commit; the M8.3 brief too (scrubbed).**
+
+---
+
+## Stage 3 · M9.4: download priority (and the dedupe fix found live after M9.3)
+
+Spec: `docs/wms/M9.4-download-priority.md` (baseline `1594fd5`). Sections A, B and C are done, plus the live finding below.
+
+### Live fix: `wms downloads --name abcd00123` showed part1/part2 twice
+
+The M9.3 merge compared the destination path as an exact string. The same file reached the log from the container (`/library/…`, the audit backfill) and from the host side (a scan, or another spelling), so the rows never matched. Now (`store/db.py`, `same_place`):
+
+- two `done` rows with the same name and size are one file when their paths are the same after normalizing (doubled or trailing slashes, NFC), **or** one path is the end of the other, **or** they share the last four parts (the file and the three day folders, `2026/2026.10/2026.10.2/name`), so `/library/…` and `<host path>/…` match;
+- a row with no path joins the file when it has exactly one place; the best-sourced row stays (plan over backfill over scan) and takes what the others knew;
+- the audit backfill and the library scan use the same test before adding a row (`download_placed`), so the duplicates do not come back;
+- different folders, other sizes and failed rows are never merged.
+
+It runs at every open, so the first start of this image cleans the NAS's database. The test has the exact shape (container path, host path, doubled slashes, same size, same time).
+
+### What was done (M9.4)
+
+**A · Model** (`ops/priority.py`, `ops/control.py`, `ops/fetch.py`, `core/models.py`)
+
+- Levels `0 normal / 1 high / 2 top` (`normal|high|top` on the CLI). A task's own level is kept in its action (`after.priority`), a plan's in the plan body (`Plan.priority`, default for tasks without their own). Both are stored with the plan, so they survive a restart, and a retry plan made from the actions keeps them. `整组优先` sets the plan's level and clears the tasks' own; a task set back to normal beats a high plan.
+- **Start order** `(-priority, plan created_at, item index)` (`FileTrack.key`): a plan's own queue (the `OUTBOUND_PARALLEL_FILES` gate) is served in that order, re-read at every free slot, so a level changed while a file waits counts. Across plans, the plans do not share slots (the limit is per plan), so the order shows in the connection pool and in `/downloads` (`Runs.queue()` sorts every running plan's queued tasks by the same key).
+- **Bandwidth.** The shared connection pool (`OUTBOUND_MAX_TOTAL_CONNECTIONS`) grants a free connection by classes taking turns in proportion to 1 : 2 : 4 (stride scheduling; a class joins at the level of the others, with no credit); inside a class, older plan and earlier item first. **Soft pre-emption**: nothing is taken from an open stream; a normal file hands its connection over when its current range ends, and its next request queues behind the heavier class. `.part` progress is untouched.
+- **Minimum one connection.** A file that holds no connection asks with `first=True` and is served before the weights, so a running file never stays at zero (a paused one holds none, as in M9.3). The pool-level test shows it cuts in front of a top task.
+- Task numbers are now the task's place in the plan (`base + index + 1`), the same in the message and in the CLI. Before, after a resume, the message counted from the first unfinished action while `wms tasks` for a saved plan counted from the start.
+
+**B · Controls**
+
+- Each task's row has `⬆ 优先 n` (normal → high → top → normal); its line shows `⬆` or `⬆⬆` before the name. Plan row: `整组优先` (cycles the same way). Both persist at once.
+- CLI: `wms task priority <plan>:<n> normal|high|top`, `wms plan priority <plan> normal|high|top`, through the request table; with nothing answering (the plan is not running) `task priority` keeps the level in the plan, `plan priority` always does. `wms plan 66` still shows plan 66 (`plan` is now a group; a plain number is routed to `wms plan show`).
+- Sentences: 「先下 X」「先下载 X」「优先下载 X」→ high; 「X 置顶」「置顶 X」「把 X 置顶」→ top (a new result type `Prioritize`, handled before any model, like a remark: the sentence must be only that, so 「优先下载今天的视频」 and 「先下载再整理」 are not caught). It sets the level of every queued, paused or running download of a running **or waiting** plan whose file name contains X. It never creates a plan; with no match: 「没有找到正在排队或下载的 X」. Decision: 先下/优先 = high, 置顶 = top (the spec lists the phrases but not their level).
+- `/downloads` has a section `排队中，按开始顺序（n）` with the queue, `⬆` marks and `计划 N, <task number>`.
+
+### Environment variables
+
+None new.
+
+### Migration notes
+
+No schema change. `Plan.priority` and `after.priority` are new JSON fields (older plans read as normal; an older version ignores them). The duplicate merge runs at open (it deletes duplicate `done` rows, as in M9.3).
+
+### Deploy steps (Cowork)
+
+1. Pull, restart `bot`. `wms downloads --name abcd00123` now lists part1 and part2 once each.
+2. Run a plan of several files with `OUTBOUND_PARALLEL_FILES=1`: press `⬆ 优先` on a queued file (it starts next), `整组优先`, send 「先下 <name>」 and 「<name> 置顶」 (no new plan appears), look at `/downloads`.
+3. `wms task priority <plan>:<n> top` and `wms plan priority <plan> high` against a running plan (answer within ~5 s) and against a waiting one (saved).
+4. With two plans running and `OUTBOUND_MAX_TOTAL_CONNECTIONS` small (say 4), set one file to top and watch `wms tasks`: its speed rises as the others finish their ranges; nobody drops to zero.
+5. Rollback: previous image (`1594fd5`); the new fields are ignored.
+
+### Verification evidence
+
+- Tests: 1877 → 1922, ruff clean, gitleaks clean. New: `tests/test_wms_m94.py` (pool order, weights 1:2:4, no starvation, soft pre-emption, the one-connection rule, a cancelled waiter, the download's own request; start order, a level set while waiting, order across plans; persistence in the plan, a new run reading it, the retry plan, whole-plan; request table; the phrases and what is not a phrase; a model is never asked; the command line; the dedupe fix in its live shape), `tests/test_wms_m94_bot.py` (the cycle, the arrow, the group button, stale buttons, the sentences make no plan, the no-match answer, a waiting plan, `/downloads` order). Existing tests changed: two assertions of button labels (the new `⬆ 优先` and `整组优先` buttons).
+- **Not verified here**: real throughput under contention (the weights are proven at the pool, not against the real CDN), and how Telegram shows three buttons per task row (width).
+
+### Deviations and open questions
+
+1. Level of the phrases (above). 2. `整组优先` clears tasks' own priorities (so it means the whole group). 3. A request for a task the plan does not have is not taken by anyone and expires after 10 minutes. 4. The fourth-part suffix rule in the dedupe could merge two different copies of one file in two day folders that happen to end in the same three folders under different roots; it needs the same name, size and ending, which is the same file by any reading of the log.
+
