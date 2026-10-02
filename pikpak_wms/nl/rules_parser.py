@@ -460,18 +460,28 @@ def _sizes(s: _State) -> None:
 def _date(s: _State, match: re.Match, prefix: str) -> datetime:
     year = match.group(prefix + "y")
     local_now = s.now.astimezone(s.tz)
+    hour, minute = match.group(prefix + "H"), match.group(prefix + "M")
     return datetime(int(year) if year else local_now.year, int(match.group(prefix + "m")),
-                    int(match.group(prefix + "d")), tzinfo=s.tz)
+                    int(match.group(prefix + "d")), int(hour or 0), int(minute or 0),
+                    tzinfo=s.tz)
+
+
+def _has_time(match: re.Match, prefix: str) -> bool:
+    return match.group(prefix + "H") is not None
 
 
 def _dates(s: _State) -> None:
     def date(p: str) -> str:
+        # A clock time may follow (「2026年10月2日 02:50」): to the minute, Asia/Shanghai.
         return (rf"(?:(?P<{p}y>\d{{4}})\s*[-/.年]\s*)?(?P<{p}m>\d{{1,2}})\s*[-/.月]\s*"
-                rf"(?P<{p}d>\d{{1,2}})\s*[日号]?")
+                rf"(?P<{p}d>\d{{1,2}})\s*[日号]?"
+                rf"(?:\s*(?P<{p}H>\d{{1,2}})\s*[:：]\s*(?P<{p}M>\d{{2}})(?:\s*[:：]\s*\d{{2}})?)?")
 
     def span(match: re.Match) -> None:
+        end = _date(s, match, "b")
         s.put("filters", "created_after", _iso(_date(s, match, "a")))
-        s.put("filters", "created_before", _iso(_date(s, match, "b") + timedelta(days=1)))
+        s.put("filters", "created_before",
+              _iso(end if _has_time(match, "b") else end + timedelta(days=1)))
 
     def since(match: re.Match) -> None:
         s.put("filters", "created_after", _iso(_date(s, match, "a")))
@@ -482,9 +492,17 @@ def _dates(s: _State) -> None:
     def one_day(match: re.Match) -> None:
         start = _date(s, match, "a")
         s.put("filters", "created_after", _iso(start))
-        s.put("filters", "created_before", _iso(start + timedelta(days=1)))
+        if not _has_time(match, "a"):  # 「10月2日 02:50」 alone means from then on
+            s.put("filters", "created_before", _iso(start + timedelta(days=1)))
+
+    def day_clock(match: re.Match) -> None:
+        offset = {"今天": 0, "今日": 0, "昨天": -1, "昨日": -1, "前天": -2}[match.group("rel")]
+        at = s.day(offset).replace(hour=int(match.group("H")), minute=int(match.group("M")))
+        s.put("filters", "created_after", _iso(at))
 
     try:
+        s.take(r"(?P<rel>今天|今日|昨天|昨日|前天)\s*(?P<H>\d{1,2})\s*[:：]\s*(?P<M>\d{2})"
+               r"\s*(?:之后|以后|以来|起|开始)", day_clock)
         s.take(r"(?:从)?\s*" + date("a") + r"\s*(?:到|至|~|—)\s*" + date("b")
                + r"\s*(?:之间|为止)?", span)
         s.take(date("a") + r"\s*(?:之后|以后|以来|起|开始)", since)

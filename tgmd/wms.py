@@ -94,7 +94,7 @@ MESSAGE_LIMIT = 3500
 """Telegram's limit is 4096; the plan is cut well before it."""
 
 FILES_PER_PAGE = 6
-"""Files shown (with a [cancel] button each) in one page of a running plan's message."""
+"""Tasks shown (each with its own buttons) in one page of a running plan's message."""
 
 PARALLEL_CHOICES = (1, 2, 4, 0)
 """The ``同时下载`` choices; 0 is no limit."""
@@ -518,14 +518,14 @@ class WmsInBot:
     def progress_text(self, run: Run) -> str:
         """⏳ Plan 58: 3/591 done · the current file, its percent, rate and time left.
 
-        With several files in flight: a summary line (done / failed / skipped / total,
-        the speed of all of them, time left, how many at once) and a line per file,
-        a page of them at a time."""
+        With several files: a summary line (done / failed / skipped / total, the speed
+        of all of them, time left, how many at once) and one line per task (its number,
+        name, state, percent, rate), a page of them at a time (docs/wms/M9.3 §A.4)."""
         control = run.control
         done = run.done
         if len(control.tracks) > 1:
             # The plan's own progress is the first file not done; with files running side by
-            # side, what is done is every one that is no longer queued or running.
+            # side, what is done is every one that is no longer queued, running or paused.
             counts = control.counts()
             finished = sum(counts[key] for key in ("done", "failed", "skipped", "cancelled"))
             done = max(done, run.total - len(control.tracks) + finished)
@@ -542,6 +542,9 @@ class WmsInBot:
                 if run.conns:
                     lines.append(t("wms.run.fetch", avg=f"{run.average / (1024 * 1024):.1f}",
                                    conns=run.conns, links=run.links or "web"))
+            for track in control.tracks.values():
+                if track.state in ("paused", "cancelled"):
+                    lines.append(self.task_line(track))
             return "\n".join(lines)
         counts = control.counts()
         lines.append(t(
@@ -550,23 +553,30 @@ class WmsInBot:
             rate=human_rate(control.speed), eta=human_duration(control.eta),
             parallel=self._parallel_label(control.limit))
             + (t("wms.run.summary_cancelled", cancelled=counts["cancelled"])
-               if counts["cancelled"] else ""))
-        listed = control.listing()
+               if counts["cancelled"] else "")
+            + (t("wms.run.summary_paused", paused=counts["paused"]) if counts["paused"] else ""))
+        listed = control.rows()
         pages = max(-(-len(listed) // FILES_PER_PAGE), 1)
         page = min(max(control.page, 0), pages - 1)
-        for track in listed[page * FILES_PER_PAGE:(page + 1) * FILES_PER_PAGE]:
-            name = escape_html(truncate(track.name, 40))
-            if track.state == "active":
-                fraction = track.fraction
-                lines.append(t(
-                    "wms.run.file_line", name=name,
-                    percent=f"{fraction * 100:.0f}" if fraction is not None else "?",
-                    rate=human_rate(track.speed), conns=track.conns))
-            else:
-                lines.append(t("wms.run.file_queued", name=name))
+        lines.extend(self.task_line(track)
+                     for track in listed[page * FILES_PER_PAGE:(page + 1) * FILES_PER_PAGE])
         if pages > 1:
             lines.append(t("wms.run.page", page=page + 1, pages=pages))
         return "\n".join(lines)
+
+    def task_line(self, track: Any) -> str:
+        """One task: ``3. name · 下载中 45% · 3.2 MB/s`` (docs/wms/M9.3 §A.4)."""
+        name = escape_html(truncate(track.name, 40))
+        fraction = track.fraction
+        percent = f"{fraction * 100:.0f}%" if fraction is not None else "?%"
+        label = t(f"wms.task.state.{track.state}")
+        if track.state == "active":
+            detail = f"{label} {percent} · {human_rate(track.speed)}"
+        elif track.state in ("paused", "cancelled") and fraction:
+            detail = f"{label} {percent}"
+        else:
+            detail = label
+        return t("wms.task.line", n=track.index + 1, name=name, detail=detail)
 
     @staticmethod
     def _parallel_label(limit: int) -> str:
@@ -578,25 +588,48 @@ class WmsInBot:
                    n=self._parallel_label(n)), f"wms:par:{plan_id}:{n}")
                 for n in PARALLEL_CHOICES]
 
+    def task_buttons(self, plan_id: int, track: Any) -> list[tuple[str, str]]:
+        """A task's buttons, on its own row: 开始 or 暂停, then 终止; a stopped task that
+        left a partial file offers 删除已下载部分."""
+        who = f"{plan_id}:{track.index}"
+        short = truncate(track.name, 12)
+        if track.state == "active":
+            return [(t("wms.button.task_pause", n=track.index + 1, name=short), f"wms:tp:{who}"),
+                    (t("wms.button.task_stop", n=track.index + 1), f"wms:tx:{who}")]
+        if track.state in ("queued", "paused"):
+            return [(t("wms.button.task_start", n=track.index + 1, name=short), f"wms:ts:{who}"),
+                    (t("wms.button.task_stop", n=track.index + 1), f"wms:tx:{who}")]
+        if track.state == "cancelled" and track.partial_files():
+            return [(t("wms.button.task_delete", n=track.index + 1, name=short),
+                     f"wms:td:{who}")]
+        return []
+
     def run_buttons(self, run: Run) -> Any:
-        """A running plan's buttons: [cancel] for each file shown, the page buttons, the
-        choice of how many at once, and [stop]."""
+        """A running plan's buttons: a row of 开始/暂停 and 终止 for each task shown, the page
+        buttons, 全部暂停 / 全部开始 / 重试失败的, the choice of how many at once, and 停止."""
         rows: list[list[tuple[str, str]]] = []
         control = run.control
-        listed = control.listing()
+        listed = control.rows()
         pages = max(-(-len(listed) // FILES_PER_PAGE), 1)
         page = min(max(control.page, 0), pages - 1)
+        for track in listed[page * FILES_PER_PAGE:(page + 1) * FILES_PER_PAGE]:
+            row = self.task_buttons(run.plan_id, track)
+            if row:
+                rows.append(row)
+        if pages > 1:
+            nav = []
+            if page > 0:
+                nav.append((t("wms.button.prev"), f"wms:page:{run.plan_id}:{page - 1}"))
+            if page < pages - 1:
+                nav.append((t("wms.button.next"), f"wms:page:{run.plan_id}:{page + 1}"))
+            rows.append(nav)
         if len(control.tracks) > 1:
-            for track in listed[page * FILES_PER_PAGE:(page + 1) * FILES_PER_PAGE]:
-                data = f"wms:cancel:{run.plan_id}:{track.index}"
-                rows.append([(t("wms.button.cancel_file", name=truncate(track.name, 24)), data)])
-            if pages > 1:
-                nav = []
-                if page > 0:
-                    nav.append((t("wms.button.prev"), f"wms:page:{run.plan_id}:{page - 1}"))
-                if page < pages - 1:
-                    nav.append((t("wms.button.next"), f"wms:page:{run.plan_id}:{page + 1}"))
-                rows.append(nav)
+            plan_row = [(t("wms.button.pause_all"), f"wms:pall:{run.plan_id}"),
+                        (t("wms.button.start_all"), f"wms:sall:{run.plan_id}")]
+            counts = control.counts()
+            if counts["failed"] or counts["cancelled"]:
+                plan_row.append((t("wms.button.retry_failed"), f"wms:retry:{run.plan_id}"))
+            rows.append(plan_row)
         if run.total > 1:
             rows.append(self.parallel_buttons(run.plan_id, control.limit))
         rows.append([(t("wms.button.stop"), f"wms:stop:{run.plan_id}")])
@@ -633,8 +666,10 @@ class WmsInBot:
             lines.append(t("wms.run.remaining", remaining=report.remaining))
             return "\n".join(lines), self._resume_buttons(run.plan_id)
         if report.failed or getattr(report, "cancelled", None):
-            return "\n".join(lines), callback_buttons(
-                [[(t("wms.button.retry_failed"), f"wms:retry:{run.plan_id}")]])
+            rows = [[(t("wms.button.retry_failed"), f"wms:retry:{run.plan_id}")]]
+            rows += [row for track in run.control.rows()
+                     if (row := self.task_buttons(run.plan_id, track))][:FILES_PER_PAGE]
+            return "\n".join(lines), callback_buttons(rows)
         return "\n".join(lines), None
 
     def watch(self, run: Run, edit: Edit) -> asyncio.Task:

@@ -153,10 +153,12 @@ class TestManyFiles:
             text = inbot.progress_text(run)
             assert f"⏳ 计划 {plan_id} 执行中：已完成 0/3" in text
             assert "完成 0 · 失败 0 · 跳过 0 · 共 3" in text and "同时下载 不限" in text
-            assert text.count("▸ ") == 3 and "a.mkv" in text and "连接" in text
+            assert text.count("下载中") == 3 and "1. a.mkv" in text
             labels = [label for label, _ in buttons_of({"buttons": inbot.run_buttons(run)})]
-            assert labels[:3] == ["✖ 取消 a.mkv", "✖ 取消 b.mkv", "✖ 取消 c.mkv"]
-            assert labels[3:] == ["同时 1", "同时 2", "同时 4", "✓ 同时 不限", "停止"]
+            assert labels[:6] == ["⏸ 暂停 1 a.mkv", "■ 终止 1", "⏸ 暂停 2 b.mkv", "■ 终止 2",
+                                  "⏸ 暂停 3 c.mkv", "■ 终止 3"]
+            assert labels[6:] == ["全部暂停", "全部开始", "同时 1", "同时 2", "同时 4",
+                                  "✓ 同时 不限", "停止"]
             # The watcher puts these buttons on the message by itself.
             await until(lambda: any(len(buttons_of(k)) > 1 for _, k in pressed.edits))
             io.gate.set()
@@ -178,12 +180,12 @@ class TestManyFiles:
             await until(lambda: len(io.begun) == 8)
             run = inbot.embedded.run_of(plan_id)
             first = inbot.progress_text(run)
-            assert "第 1/2 页" in first and first.count("▸ ") == 6 and "f07.mkv" not in first
+            assert "第 1/2 页" in first and first.count("下载中") == 6 and "f07.mkv" not in first
             nav = [label for label, _ in buttons_of({"buttons": inbot.run_buttons(run)})]
             assert "下一页 ▶" in nav and "◀ 上一页" not in nav
             turned = await press(handlers, f"wms:page:{plan_id}:1")
             assert "第 2/2 页" in turned.edits[0][0] and "f07.mkv" in turned.edits[0][0]
-            assert turned.edits[0][0].count("▸ ") == 2
+            assert turned.edits[0][0].count("下载中") == 2
             back = [label for label, _ in buttons_of(turned.edits[0][1])]
             assert "◀ 上一页" in back and "下一页 ▶" not in back
             io.gate.set()
@@ -205,14 +207,16 @@ class TestManyFiles:
             await until(lambda: len(io.begun) == 2)
             await asyncio.sleep(0.05)
             cancel = await press(handlers, f"wms:cancel:{plan_id}:0")
-            assert cancel.answers[0][0].startswith("已取消 a.mkv，已下载的部分保留")
+            assert cancel.answers[0][0].startswith("已终止 a.mkv，已下载的部分保留")
             again = await press(handlers, f"wms:cancel:{plan_id}:0")
             assert again.answers[0][0] == "这个文件已经不在下载了" and again.answers[0][1]["alert"]
             io.gate.set()
             await inbot.settle()
             text, kwargs = pressed.edits[-1]
             assert "已停止 1" in text
-            assert buttons_of(kwargs) == [("重试失败的", f"wms:retry:{plan_id}".encode())]
+            assert buttons_of(kwargs) == [
+                ("重试失败的", f"wms:retry:{plan_id}".encode()),
+                ("🗑 删除 1 a.mkv 已下载部分", f"wms:td:{plan_id}:0".encode())]
             media = rig.tmp_path / "media"
             assert (media / "a.mkv.part").exists() and (media / "b.mkv").exists()
             # 重试失败的: a new plan of the stopped file, shown in the same message.

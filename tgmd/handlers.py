@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import time
 
@@ -982,8 +984,11 @@ class BotHandlers:
         await event.edit(text, parse_mode="html", buttons=buttons)
 
     async def _file_button(self, event, embedded) -> None:
-        """wms:cancel:<plan>:<index> / wms:par:<plan>:<n> / wms:page:<plan>:<page> /
-        wms:retry:<plan>: the buttons of a running plan's message (docs/wms/M9.2 §D)."""
+        """The buttons of a running plan's message (docs/wms/M9.2 §D, M9.3 §A):
+        ``wms:tp|ts|tx:<plan>:<n>`` pause / start / end one task (``wms:cancel:`` is the
+        old name of ``tx``), ``wms:td|ty|tn:<plan>:<n>`` delete its partial file (ask,
+        yes, keep), ``wms:pall|sall:<plan>`` pause / start all, ``wms:par:`` how many at
+        once, ``wms:page:`` the page, ``wms:retry:`` the failed ones."""
         try:
             _prefix, verb, *rest = event.data.decode().split(":")
             numbers = [int(part) for part in rest]
@@ -991,19 +996,57 @@ class BotHandlers:
             await event.answer()
             return
         plan_id = numbers[0] if numbers else 0
-        if verb == "cancel" and len(numbers) == 2:
+        wms = self._wms
+        if verb in ("tp", "ts", "tx", "cancel", "td", "ty", "tn") and len(numbers) == 2:
             run = embedded.run_of(plan_id)
             track = run.control.tracks.get(numbers[1]) if run is not None else None
-            if track is None or not embedded.cancel_file(plan_id, numbers[1]):
+            if track is None:
                 await event.answer(t("wms.run.file_gone"), alert=True)
                 return
-            await event.answer(t("wms.run.file_cancelled", name=track.name[:40]))
+            name = track.name[:40]
+            if verb == "td":
+                await event.answer()
+                ask = t("wms.task.delete_ask", name=escape_html(name))
+                confirm = callback_buttons([[
+                    (t("wms.button.task_delete_yes"), f"wms:ty:{plan_id}:{numbers[1]}"),
+                    (t("wms.button.task_delete_no"), f"wms:tn:{plan_id}:{numbers[1]}")]])
+                await event.edit(wms.progress_text(run) + "\n" + ask, parse_mode="html",
+                                 buttons=confirm)
+                return
+            if verb == "ty":
+                removed = embedded.delete_partial(plan_id, numbers[1])
+                await event.answer(t("wms.task.deleted", name=name) if removed
+                                   else t("wms.task.nothing_to_delete"), alert=not removed)
+            elif verb == "tn":
+                await event.answer()
+            else:
+                if verb == "tp":
+                    done, said = embedded.pause_file(plan_id, numbers[1]), "wms.task.paused"
+                elif verb == "ts":
+                    done, said = embedded.start_file(plan_id, numbers[1]), "wms.task.started"
+                else:
+                    done, said = embedded.cancel_file(plan_id, numbers[1]), "wms.task.stopped"
+                if not done:
+                    await event.answer(t("wms.task.cannot" if track.pending
+                                         else "wms.run.file_gone"), alert=True)
+                    return
+                await event.answer(t(said, name=name))
+                await asyncio.sleep(0.2)  # let the task settle, so the edit shows the new state
+            await self._show_run(event, run)
+        elif verb in ("pall", "sall"):
+            count = embedded.pause_all(plan_id) if verb == "pall" else embedded.start_all(plan_id)
+            await event.answer(t("wms.task.all_paused" if verb == "pall"
+                                 else "wms.task.all_started", count=count))
+            await asyncio.sleep(0.2)
+            run = embedded.run_of(plan_id)
+            if run is not None:
+                await self._show_run(event, run)
         elif verb == "par" and len(numbers) == 2:
             limit = numbers[1]
             await embedded.set_parallel(limit, plan_id or None)
-            await event.answer(t("wms.parallel.set", n=self._wms._parallel_label(limit)))  # noqa: SLF001
+            await event.answer(t("wms.parallel.set", n=wms._parallel_label(limit)))  # noqa: SLF001
             if plan_id == 0:  # the default for every plan, set from /downloads
-                text, buttons = await self._wms.downloads_message()
+                text, buttons = await wms.downloads_message()
                 await event.edit(text, parse_mode="html", buttons=buttons)
         elif verb == "page" and len(numbers) == 2:
             run = embedded.run_of(plan_id)
@@ -1012,8 +1055,7 @@ class BotHandlers:
                 return
             run.control.page = numbers[1]
             await event.answer()
-            await event.edit(self._wms.progress_text(run), parse_mode="html",
-                             buttons=self._wms.run_buttons(run))
+            await self._show_run(event, run)
         elif verb == "retry":
             try:
                 again = await embedded.retry_failed(plan_id)
@@ -1023,9 +1065,17 @@ class BotHandlers:
             if again is None:
                 await event.answer(t("wms.retry.none"), alert=True)
                 return
-            await self._start_run(event, embedded, again, in_place=True)
+            old = embedded.run_of(plan_id)
+            await self._start_run(event, embedded, again, in_place=old is None or not old.active)
         else:
             await event.answer()
+
+    async def _show_run(self, event, run) -> None:
+        """Edit the message a button is on to show the run as it is now."""
+        text, buttons = (self._wms.progress_text(run), self._wms.run_buttons(run)) if run.active \
+            else self._wms.finished_message(run)
+        with contextlib.suppress(Exception):  # "not modified", a deleted message
+            await event.edit(text, parse_mode="html", buttons=buttons)
 
     async def _nl(self, event, sentence: str) -> None:
         text, buttons = await self._wms.nl_message(event.sender_id, sentence)
@@ -1065,7 +1115,9 @@ class BotHandlers:
         if event.data.startswith(b"wms:dl:"):
             await self._download_button(event)
             return
-        if event.data.startswith((b"wms:cancel:", b"wms:par:", b"wms:page:", b"wms:retry:")):
+        if event.data.startswith((b"wms:cancel:", b"wms:par:", b"wms:page:", b"wms:retry:",
+                                  b"wms:tp:", b"wms:ts:", b"wms:tx:", b"wms:td:", b"wms:ty:",
+                                  b"wms:tn:", b"wms:pall:", b"wms:sall:")):
             await self._file_button(event, embedded)
             return
         try:

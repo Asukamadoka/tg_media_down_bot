@@ -836,7 +836,3 @@ def sample_moves(plans: list[Plan], per_folder: int, *, seed: int = 7) -> list[d
                  "from": a.before.get("path", ""), "to": a.after.get("path", "")}
                 for a in sorted(chosen, key=lambda a: a.before.get("path", ""))]
     return out
-
-
-def describe_counts(counts: dict[str, Any]) -> dict[str, Any]:
-    return {key: counts.get(key, 0) for key in COUNT_KEYS}

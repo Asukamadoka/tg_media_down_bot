@@ -22,7 +22,7 @@ from typing import Any
 from pikpakapi.PikpakException import PikpakException
 
 from .errors import AuthError, NotFoundError, RateLimitedError, WmsError
-from .models import ROOT_ID, FileNode, Quota, join_path, normalize_path
+from .models import ROOT_ID, FileNode, Quota, normalize_path
 from .ratelimit import TokenBucket
 
 log = logging.getLogger(__name__)
@@ -203,10 +203,6 @@ class WmsClient:
         node.parent_id = parent_id
         return node
 
-    async def ensure_folder(self, path: str) -> str:
-        """The id of the folder at ``path``, creating any missing levels."""
-        chain = await self.ensure_folder_chain(path)
-        return chain[-1][1] if chain else ROOT_ID
 
     async def ensure_folder_chain(self, path: str) -> list[tuple[str, str]]:
         """``[(path, id), ...]`` for every level of ``path``, creating missing ones."""
@@ -281,7 +277,3 @@ class WmsClient:
             ],
         )
         return list(page.get("tasks") or [])
-
-
-def child_path(parent: str, name: str) -> str:
-    return join_path(parent, name)

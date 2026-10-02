@@ -422,3 +422,8 @@ cases:
     expect:
       intent: download
       filters: {kinds: [video], not_downloaded: true, exclude_names: [abc123]}
+  # ---------------- M9.3：具体日期加时刻，不经模型 ----------------
+  - text: 下载 2026年10月2日 02:50 之后入库、还未下载过的视频
+    expect:
+      intent: download
+      filters: {created_after: "2026-10-02T02:50:00+08:00", kinds: [video], not_downloaded: true}
