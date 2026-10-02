@@ -188,9 +188,33 @@ class EmbeddedWms:
             return int(value) if value is not None else self.config.outbound.parallel_files
         return await self.runs.parallel_for(plan_id)
 
-    def cancel_file(self, plan_id: int, index: int) -> bool:
-        """Stop one file of a running plan; its ``.part`` is kept (M9.2 §D.5)."""
-        return self.runs.cancel_file(plan_id, index) if self.runs is not None else False
+    def cancel_file(self, plan_id: int, index: int, *, delete_partial: bool = False) -> bool:
+        """終止 one file of a running plan; its ``.part`` is kept unless ``delete_partial``
+        (M9.2 §D.5, M9.3 §A.3)."""
+        return self.runs.cancel_file(plan_id, index, delete_partial=delete_partial) \
+            if self.runs is not None else False
+
+    def pause_file(self, plan_id: int, index: int) -> bool:
+        """暂停 one file: its ``.part`` and state stay, its connections are given back."""
+        return self.runs.pause_file(plan_id, index) if self.runs is not None else False
+
+    def start_file(self, plan_id: int, index: int) -> bool:
+        """开始 one file: a paused one resumes, a queued one goes first."""
+        return self.runs.start_file(plan_id, index) if self.runs is not None else False
+
+    def pause_all(self, plan_id: int) -> int:
+        control = self.runs.control_of(plan_id) if self.runs is not None else None
+        return control.pause_all() if control is not None else 0
+
+    def start_all(self, plan_id: int) -> int:
+        control = self.runs.control_of(plan_id) if self.runs is not None else None
+        return control.start_all() if control is not None else 0
+
+    def delete_partial(self, plan_id: int, index: int) -> int:
+        """Remove the ``.part`` and ``.part.state`` of a file that was stopped; returns
+        how many files went."""
+        run = self.run_of(plan_id)
+        return run.control.delete_partial(index) if run is not None else 0
 
     async def retry_failed(self, plan_id: int) -> int | None:
         """A new plan of the files that failed or were cancelled in ``plan_id``; None

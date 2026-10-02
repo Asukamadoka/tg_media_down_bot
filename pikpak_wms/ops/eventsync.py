@@ -388,12 +388,3 @@ async def note_freshness(ctx: Context, plans: list[Any]) -> None:
     clock, kind = found
     for plan in plans:
         plan.note("sync.updated", time=clock, kind={"key": f"sync.kind.{kind}", "args": {}})
-
-
-async def freshness_line(ctx: Context) -> str:
-    """"Index updated at 14:05 (event sync)" for a plan."""
-    found = await freshness(ctx)
-    if found is None:
-        return t("sync.unknown")
-    clock, kind = found
-    return t("sync.updated", time=clock, kind=t(f"sync.kind.{kind}"))

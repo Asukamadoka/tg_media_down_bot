@@ -7,6 +7,8 @@ know which SDK is underneath.
 
 from __future__ import annotations
 
+from .redact import redact
+
 
 class WmsError(RuntimeError):
     """A PikPak operation failed in a way worth telling the user about.
@@ -16,9 +18,9 @@ class WmsError(RuntimeError):
     """
 
     def __init__(self, message: str = "", *, key: str | None = None, **kwargs: object) -> None:
-        super().__init__(message or key or "")
+        super().__init__(redact(message or key or ""))
         self.key = key
-        self.kwargs = kwargs
+        self.kwargs = {k: redact(v) if isinstance(v, str) else v for k, v in kwargs.items()}
 
     def display(self) -> str:
         if self.key is None:

@@ -15,6 +15,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from pikpak_wms.ops import requests
+
 HOUR_RETENTION_DAYS = 400
 HOST_RETENTION_DAYS = 90
 HOST_MIN_BYTES = 1024 * 1024
@@ -52,11 +54,6 @@ CREATE TABLE IF NOT EXISTS proxy_node (
     alive      INTEGER NOT NULL DEFAULT 0,
     tested_at  REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS probe_ask (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    requested_at REAL NOT NULL,
-    handled_at   REAL
-);
 CREATE TABLE IF NOT EXISTS direct_host (
     host        TEXT PRIMARY KEY,
     state       TEXT NOT NULL,
@@ -69,6 +66,9 @@ CREATE TABLE IF NOT EXISTS direct_host (
     changed_at  REAL NOT NULL
 );
 """
+
+NODE_SCHEMA += requests.SCHEMA
+"""The shared request table; ``probe_ask`` (M9.1b, no longer written) stays in old files."""
 
 HourKey = tuple[int, str, str, str]
 """``(hour_utc, category, outbound, node)``."""
@@ -243,18 +243,12 @@ class TrafficStore:
     def request_probe_ask(self, now: float) -> int:
         """``python -m tgmd.traffic ask-probe``: ask the running bot to send the probe ask."""
         with self._lock:
-            cursor = self._db.execute(
-                "INSERT INTO probe_ask (requested_at) VALUES (?)", (now,))
-            self._db.commit()
-            return int(cursor.lastrowid or 0)
+            return requests.post(self._db, "probe_ask", now=now)
 
     def take_probe_ask(self, now: float) -> bool:
         """True once per batch of requests: they are all marked handled."""
         with self._lock:
-            cursor = self._db.execute(
-                "UPDATE probe_ask SET handled_at = ? WHERE handled_at IS NULL", (now,))
-            self._db.commit()
-            return cursor.rowcount > 0
+            return bool(requests.take(self._db, "probe_ask", now))
 
     def save_direct(self, host: str, *, state: str, reason: str = "", direct_ms=None,
                     proxy_ms=None, direct_mbps=None, proxy_mbps=None, now: float) -> None:

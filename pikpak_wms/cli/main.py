@@ -26,7 +26,7 @@ from ..core.errors import WmsError
 from ..core.models import ActionType, Plan
 from ..i18n import t
 from ..ops import downloads as downloads_ops
-from ..ops import eventsync, listing, organize, plans, protect, tidy
+from ..ops import eventsync, listing, organize, plans, protect, taskreq, tidy
 from ..ops import inbound as inbound_ops
 from ..ops import outbound as outbound_ops
 from ..ops import stocktake as stocktake_ops
@@ -357,9 +357,12 @@ def _wants_apply(flag: bool | None) -> bool:
     return (not state.config.runtime.dry_run) if flag is None else flag
 
 
-def _deliver_for(ctx: Context, plan: Plan, downloader: str | None = None):
+def _deliver_for(ctx: Context, plan: Plan, downloader: str | None = None,
+                 show_links: bool = False):
+    """The deliver function for a plan's downloads. Each action keeps the downloader its
+    plan was built with (``after.via``); ``downloader`` only fills in for older plans."""
     if any(a.type is ActionType.OUTBOUND for a in plan.actions):
-        return outbound_ops.make_deliver(ctx, downloader=downloader)
+        return outbound_ops.make_deliver(ctx, downloader=downloader, show_links=show_links)
     return None
 
 
@@ -392,6 +395,7 @@ def _plan_command(
     as_json: bool,
     allow_forever: bool = False,
     downloader: str | None = None,
+    show_links: bool = False,
 ) -> None:
     async def work(ctx: Context):
         plan = await build(ctx)
@@ -399,7 +403,7 @@ def _plan_command(
         report = None
         if apply_now and plan_id is not None:
             report = await plans.apply(ctx, plan_id, limit=limit, allow_forever=allow_forever,
-                                       deliver=_deliver_for(ctx, plan, downloader))
+                                       deliver=_deliver_for(ctx, plan, downloader, show_links))
         return plan, plan_id, report
 
     plan, plan_id, report = _run(work)
@@ -449,6 +453,7 @@ def rules(
 ApplyFlag = typer.Option(None, "--apply/--dry-run", help="apply now, or only plan (default: plan)")
 LimitFlag = typer.Option(None, "--limit", help="apply at most N actions this run")
 JsonFlag = typer.Option(False, "--json", help="machine-readable output")
+SHOW_LINKS_HELP = "print signed download links in full (they let anyone fetch the file)"
 
 
 @app.command(name="organize")
@@ -505,14 +510,16 @@ def outbound(
     paths: list[str] = typer.Argument(..., help="files or folders in the drive"),
     to: str = typer.Option("", "--to", help="sub-folder at the destination"),
     downloader: str = typer.Option(None, "--downloader", help="none | aria2 | local"),
+    show_links: bool = typer.Option(False, "--show-links", help=SHOW_LINKS_HELP),
     apply_flag: bool | None = ApplyFlag,
     limit: int | None = LimitFlag,
     as_json: bool = JsonFlag,
 ) -> None:
-    """Take files out of the drive: links, aria2, or into the local folder."""
-    _plan_command(lambda ctx: outbound_ops.plan_paths(ctx, paths, to=to),
+    """Take files out of the drive: links, aria2, or into the local folder. The plan
+    keeps the downloader, so `wms apply N` later uses the same one."""
+    _plan_command(lambda ctx: outbound_ops.plan_paths(ctx, paths, to=to, downloader=downloader),
                   apply_now=_wants_apply(apply_flag), limit=limit, as_json=as_json,
-                  downloader=downloader)
+                  downloader=downloader, show_links=show_links)
 
 
 @app.command()
@@ -720,18 +727,103 @@ def apply_plan(
     limit: int | None = LimitFlag,
     forever: bool = typer.Option(False, "--forever", help="allow permanent deletions in it"),
     yes: bool = typer.Option(False, "--yes", help="do not ask again for --forever"),
-    downloader: str = typer.Option(None, "--downloader", help="for outbound: none|aria2|local"),
+    downloader: str = typer.Option(
+        None, "--downloader", help="for outbound plans built without one: none|aria2|local"),
+    show_links: bool = typer.Option(False, "--show-links", help=SHOW_LINKS_HELP),
 ) -> None:
-    """Carry out a stored plan (or its next part)."""
+    """Carry out a stored plan (or its next part). A download plan uses the downloader
+    it was built with."""
     if forever:
         _confirm_forever(yes)
 
     async def work(ctx: Context):
         row = await plans.get(ctx, plan_id)
         return await plans.apply(ctx, plan_id, limit=limit, allow_forever=forever,
-                                 deliver=_deliver_for(ctx, row["plan"], downloader))
+                                 deliver=_deliver_for(ctx, row["plan"], downloader, show_links))
 
     _show_report(_run(work))
+
+
+@app.command(name="tasks")
+def tasks_cmd(
+    plan_id: int = typer.Option(None, "--plan", help="only this plan"),
+    as_json: bool = JsonFlag,
+) -> None:
+    """The tasks of the downloads that are running (or of one plan), and their states."""
+    found = _run(lambda ctx: taskreq.listing(ctx, plan_id))
+    if as_json:
+        console.print_json(json.dumps(found, ensure_ascii=False))
+        return
+    if not found:
+        console.print(t("cli.tasks.none"))
+        return
+    for plan in found:
+        console.print(t("cli.tasks.header", id=plan["plan"],
+                        live=t("cli.tasks.live" if plan["live"] else "cli.tasks.saved"),
+                        limit=plan.get("limit") or "∞"), markup=False)
+        for task in plan["tasks"]:
+            size = task.get("size") or 0
+            percent = f"{task['received'] / size * 100:.0f}%" if size and task.get(
+                "received") else "-"
+            rate = f"{task['mib_s']:.1f} MiB/s" if task.get("mib_s") else "-"
+            console.print(t("cli.tasks.line", target=f"{plan['plan']}:{task['n']}",
+                            state=t(f"state.{task['state']}"), percent=percent, rate=rate,
+                            name=task["name"]), markup=False, highlight=False)
+
+
+task_app = typer.Typer(help="Pause, start or stop one task of a running plan.",
+                       no_args_is_help=True)
+app.add_typer(task_app, name="task")
+
+
+def _task_request(verb: str, target: str, *, delete_partial: bool = False) -> None:
+    async def work(ctx: Context):
+        return await taskreq.request(ctx, verb, target, delete_partial=delete_partial,
+                                     wait=TASK_WAIT)
+
+    answered, result = _run(work)
+    if not answered:
+        console.print(t("cli.task.waiting", verb=verb, target=target,
+                        id=taskreq.parse_target(target)[0]), style="yellow")
+        raise typer.Exit(code=1)
+    if result.startswith("ok"):
+        console.print(t("cli.task.done", verb=verb, target=target))
+        if delete_partial:
+            console.print(t("cli.task.partial_deleted", target=target))
+        return
+    console.print(t("cli.task.refused", verb=verb, target=target, reason=result),
+                  style="red", markup=False)
+    raise typer.Exit(code=1)
+
+
+TASK_WAIT = 8.0
+"""Seconds ``wms task`` waits for the running process to answer (it looks every 5)."""
+
+
+@task_app.command(name="pause")
+def task_pause(target: str = typer.Argument(..., help="<plan>:<n>, or <plan>:all")) -> None:
+    """暂停: stop transferring now; the partial file stays and the connections go back."""
+    _task_request("pause", target)
+
+
+@task_app.command(name="start")
+def task_start(target: str = typer.Argument(..., help="<plan>:<n>, or <plan>:all")) -> None:
+    """开始: resume a paused task, or let a queued one go first."""
+    _task_request("start", target)
+
+
+@task_app.command(name="stop")
+def task_stop(
+    target: str = typer.Argument(..., help="<plan>:<n>"),
+    delete_partial: bool = typer.Option(False, "--delete-partial",
+                                        help="also remove the partial file (cannot be resumed)"),
+    yes: bool = typer.Option(False, "--yes", help="do not ask again for --delete-partial"),
+) -> None:
+    """终止: end this task for this run. The partial file stays unless --delete-partial."""
+    if delete_partial and not yes and not typer.confirm(
+            t("cli.task.confirm_delete", target=target)):
+        raise typer.Exit(code=1)
+    _task_request("stop", target, delete_partial=delete_partial)
 
 
 @app.command()

@@ -14,7 +14,6 @@ apply time and never written to the audit.
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import re
 from collections.abc import Awaitable, Callable
@@ -25,6 +24,7 @@ from typing import Any
 from ..config import Config
 from ..core.errors import WmsError
 from ..core.models import Action, ActionType, FileNode, Plan, normalize_path
+from ..core.redact import redact
 from ..rules.actions import Deliver
 from ..rules.units import human_size
 from ..store.db import now_iso
@@ -176,6 +176,7 @@ def make_deliver(
     progress: Progress | None = None, clock: Callable[[], datetime] | None = None,
     pool: ranged.ConnectionPool | None = None, sleep: Callable[[float], Awaitable[None]]
     | None = None, fetch_clock: Callable[[], float] | None = None, plan_id: int | None = None,
+    show_links: bool = False,
 ) -> Deliver:
     """One deliver function for a plan. Each action may name its own
     downloader (``via``); otherwise ``downloader``, else the config's.
@@ -186,6 +187,8 @@ def make_deliver(
     says what day it is *now*: the default folder is the day the download runs.
     Every ``local`` attempt is written to the download log (docs/wms/M9.2 §A):
     done, skipped because it is already there, failed, or cancelled by hand.
+    The links-only mode shows signed URLs only with ``show_links``; otherwise the query
+    is replaced (docs/wms/M9.3 §A.7).
     ``pool`` is the connection budget shared with every other download; ``sleep`` and
     ``fetch_clock`` (tests) stand in for the pauses and the time of its retries.
     """
@@ -198,7 +201,8 @@ def make_deliver(
 
     async def links(node: FileNode, to: str) -> dict[str, Any]:
         url = await ctx.client.download_url(node.file_id)
-        return {"downloader": "none", "_output": f"{node.path}\n  {url}"}
+        shown = url if show_links else redact(url)
+        return {"downloader": "none", "_output": f"{node.path}\n  {shown}"}
 
     async def aria2(node: FileNode, to: str) -> dict[str, Any]:
         url = await ctx.client.download_url(node.file_id)
@@ -245,6 +249,8 @@ def make_deliver(
             raise WmsError(f"no permission to write {where}", key="outbound.no_permission",
                            path=where) from exc
         part = target.with_name(target.name + ".part")
+        if track is not None:
+            track.part = part
 
         async def url_for():
             # The web link and the origin media link, from one API call.
@@ -305,23 +311,8 @@ def make_deliver(
 
     async def log(node: FileNode, status: str, started: str, *, path: str = "",
                   reason: str = "", fetch_info: dict | None = None) -> None:
-        """One row in the download log; a failure to write it never fails the download."""
-        info = fetch_info or {}
-        try:
-            if status == "skipped_exists" and path and await ctx.store.download_exists(
-                    path, ("done", "skipped_exists")):
-                return  # a re-run over what was already logged
-            plan = plan_id if plan_id is not None else downloads.current_plan.get()
-            await ctx.store.add_download(
-                name=node.name, size=node.size, file_id=node.file_id, hash=node.hash,
-                dest_path=path, plan_id=plan, status=status, reason=reason[:300],
-                started_at=started, finished_at=now_iso(), avg_mib_s=info.get("avg_mib_s"),
-                links=info.get("links", ""), peak_connections=int(
-                    info.get("peak_connections") or 0),
-                source="plan" if plan is not None else "manual",
-                user_id=downloads.current_user.get())
-        except Exception as exc:  # noqa: BLE001 - bookkeeping must not undo a download
-            logging.getLogger(__name__).warning("could not write the download log: %s", exc)
+        await downloads.log_attempt(ctx, node, status, started, plan_id=plan_id, path=path,
+                                    reason=reason, fetch_info=fetch_info)
 
     async def deliver(node: FileNode, to: str, via: str | None = None) -> dict[str, Any]:
         mode = via or default
@@ -333,6 +324,7 @@ def make_deliver(
         except asyncio.CancelledError:
             track = track_of(node)
             if mode == "local" and track is not None and track.cancel_requested:
+                track.logged_cancel = True
                 await log(node, "cancelled", started, reason="cancelled")
             raise
         except WmsError as exc:
@@ -341,10 +333,10 @@ def make_deliver(
             raise
         except Exception as exc:
             # One file that cannot be fetched fails that action, not the whole plan.
-            error = f"{type(exc).__name__}: {exc}"[:120]
+            error = redact(f"{type(exc).__name__}: {exc}")[:120]
             if mode == "local":
                 await log(node, "failed", started, reason=error)
-            raise WmsError(f"{node.path}: {type(exc).__name__}: {exc}", key="outbound.failed",
+            raise WmsError(f"{node.path}: {error}", key="outbound.failed",
                            path=node.path, error=error) from exc
         if mode == "local":
             skipped = result.get("skipped")
@@ -362,8 +354,12 @@ def make_deliver(
     return deliver
 
 
-async def plan_paths(ctx: Context, paths: list[str], *, to: str = "") -> Plan:
-    """An outbound plan for files, or every file under folders, from the index."""
+async def plan_paths(ctx: Context, paths: list[str], *, to: str = "",
+                     downloader: str | None = None) -> Plan:
+    """An outbound plan for files, or every file under folders, from the index.
+
+    ``downloader`` is kept in each action (``after.via``), so that applying the plan
+    later, from anywhere, uses the downloader it was built with (docs/wms/M9.3 §A.6)."""
     if ctx.config.outbound.library_path is not None and to.strip():
         library.resolve_user_path(to, library_dir=ctx.config.outbound.library_path)
     plan = Plan(source="outbound", generated_at=now().isoformat(timespec="seconds"))
@@ -384,7 +380,8 @@ async def plan_paths(ctx: Context, paths: list[str], *, to: str = "") -> Plan:
             seen.add(item.file_id)
             plan.actions.append(
                 Action(ActionType.OUTBOUND, item.file_id, before=item.snapshot(),
-                       after={"to": to.strip("/")}, rule_name="outbound")
+                       after={"to": to.strip("/"), **({"via": downloader} if downloader else {})},
+                       rule_name="outbound")
             )
     annotate(ctx.config, plan)
     return plan

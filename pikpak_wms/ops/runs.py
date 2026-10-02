@@ -28,7 +28,6 @@ import contextlib
 import json
 import logging
 import time
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -38,15 +37,13 @@ from ..core.models import ActionType
 from ..rules.actions import Deliver
 from . import downloads, outbound, plans
 from .context import Context
-from .control import Control, FileTrack
+from .control import Control, FileTrack, SpeedMeter
 
 log = logging.getLogger(__name__)
 
 RUNNING, INTERRUPTED, STOPPED = "running:", "interrupted:", "stopped:"
 PARALLEL, PARALLEL_DEFAULT = "parallel:", "outbound:parallel"
 """``meta`` keys: files at once for one plan, and the default for all (M9.2 §D.1)."""
-WINDOW = 15.0
-"""Seconds of download the speed is averaged over."""
 
 
 @dataclass
@@ -66,7 +63,7 @@ class Run:
     shutdown: bool = False
     """Stopped because the process is going away: left marked ``running`` so that
     the next start reports it as interrupted."""
-    _samples: deque = field(default_factory=lambda: deque(maxlen=64))
+    meter: SpeedMeter = field(default_factory=SpeedMeter)
     conns: int = 0
     """Connections open for the file being fetched, and the links they use."""
     links: str = ""
@@ -88,21 +85,16 @@ class Run:
 
     def note_bytes(self, name: str, received: int, size: int) -> None:
         if name != self.file:
-            self.file, self._samples = name, deque(maxlen=64)
+            self.file = name
+            self.meter.clear()
             self.file_started, self.conns, self.links = time.monotonic(), 0, ""
         self.received, self.size = received, size
-        self._samples.append((time.monotonic(), received))
+        self.meter.add(received)
 
     @property
     def speed(self) -> float:
         """Bytes per second of the file being fetched, over the last few seconds."""
-        if len(self._samples) < 2:
-            return 0.0
-        end_time, end_bytes = self._samples[-1]
-        start_time, start_bytes = next(
-            (s for s in self._samples if end_time - s[0] <= WINDOW), self._samples[0])
-        span = end_time - start_time
-        return max(end_bytes - start_bytes, 0) / span if span > 0 else 0.0
+        return self.meter.speed
 
     @property
     def eta(self) -> float | None:
@@ -171,10 +163,22 @@ class Runs:
         if run is not None and run.active:
             run.control.set_limit(limit)
 
-    def cancel_file(self, plan_id: int, index: int) -> bool:
-        """Stop one file of a running plan (docs/wms/M9.2 §D.5); False when it is not running."""
+    def control_of(self, plan_id: int) -> Control | None:
         run = self._runs.get(plan_id)
-        return bool(run is not None and run.active and run.control.cancel(index))
+        return run.control if run is not None and run.active else None
+
+    def cancel_file(self, plan_id: int, index: int, *, delete_partial: bool = False) -> bool:
+        """終止 one file of a running plan (docs/wms/M9.2 §D.5); False when it is not running."""
+        control = self.control_of(plan_id)
+        return bool(control and control.cancel(index, delete_partial=delete_partial))
+
+    def pause_file(self, plan_id: int, index: int) -> bool:
+        control = self.control_of(plan_id)
+        return bool(control and control.pause(index))
+
+    def start_file(self, plan_id: int, index: int) -> bool:
+        control = self.control_of(plan_id)
+        return bool(control and control.start(index))
 
     async def start(
         self, plan_id: int, *, deliver: Deliver | None = None,

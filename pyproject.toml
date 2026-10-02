@@ -59,6 +59,9 @@ select = [
 "tests/test_wms_m83_nl.py" = ["RUF001"]
 "tests/test_wms_m92.py" = ["RUF001", "RUF003"]
 "tests/test_wms_m92_bot.py" = ["RUF001", "RUF003"]
+# Fixtures imported from the M9.2 files are the names the tests take as arguments.
+"tests/test_wms_m93.py" = ["RUF001", "RUF003", "F811"]
+"tests/test_wms_m93_bot.py" = ["RUF001", "RUF003", "F811"]
 "tests/test_traffic_probe_ask.py" = ["RUF001", "RUF003"]
 # typer declares options as argument defaults; that is its API, not a bug.
 "pikpak_wms/cli/*" = ["B008"]

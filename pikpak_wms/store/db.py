@@ -17,7 +17,9 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from ..core import requests
 from ..core.models import Action, FileNode, Kind, Plan, normalize_path
+from ..core.redact import redact
 
 # Columns added after a table first shipped (red line 3: add, never rename).
 _ADDED_COLUMNS = (
@@ -55,16 +57,95 @@ def _backfill_audit(conn: sqlite3.Connection) -> None:
         if not path:
             continue  # links shown, or handed to aria2: nothing landed here
         name = str(before.get("name") or path.rsplit("/", 1)[-1])
+        size = int(before.get("size") or 0)
+        if conn.execute(
+                "SELECT 1 FROM downloads WHERE status = 'done' AND dest_path = ? AND name = ? "
+                "AND size = ?", (path, name, size)).fetchone():
+            continue  # already logged (by a scan, or by the attempt itself)
         fetch = after.get("fetch") if isinstance(after.get("fetch"), dict) else {}
         conn.execute(
             "INSERT INTO downloads (file_id, name, size, hash, dest_path, plan_id, status, "
             "finished_at, avg_mib_s, links, peak_connections, source) "
             "VALUES (?, ?, ?, ?, ?, ?, 'done', ?, ?, ?, ?, 'backfill')",
-            (row["file_id"], name, int(before.get("size") or 0), str(before.get("hash") or ""),
+            (row["file_id"], name, size, str(before.get("hash") or ""),
              path, row["plan_id"], row["at"], fetch.get("avg_mib_s"), fetch.get("links", ""),
              int(fetch.get("peak_connections") or 0)),
         )
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (AUDIT_BACKFILLED, "1"))
+
+
+FAILED_BACKFILLED = "downloads:failed_backfilled"
+
+_SOURCE_RANK = {"plan": 0, "manual": 1, "backfill": 2, "scan": 3}
+_MERGED = ("file_id", "hash", "plan_id", "started_at", "avg_mib_s", "links", "peak_connections",
+           "user_id")
+
+
+def _dedupe_downloads(conn: sqlite3.Connection) -> int:
+    """Merge the ``done`` rows that say the same thing twice: one file (name and size)
+    at one destination. The best-sourced row stays (a real attempt over a backfill over
+    a scan) and takes what the others knew that it did not. Returns the rows removed."""
+    groups = conn.execute(
+        "SELECT dest_path, name, size FROM downloads WHERE status = 'done' AND dest_path != '' "
+        "GROUP BY dest_path, name, size HAVING COUNT(*) > 1").fetchall()
+    removed = 0
+    for group in groups:
+        rows = conn.execute(
+            "SELECT * FROM downloads WHERE status = 'done' AND dest_path = ? AND name = ? "
+            "AND size = ?", tuple(group)).fetchall()
+        rows.sort(key=lambda r: (_SOURCE_RANK.get(r["source"], 9), r["id"]))
+        keeper, others = rows[0], rows[1:]
+        fill = {}
+        for column in _MERGED:
+            if keeper[column] in (None, "", 0):
+                value = next((o[column] for o in others if o[column] not in (None, "", 0)), None)
+                if value is not None:
+                    fill[column] = value
+        if fill:
+            # Column names come from the constant above, never from input.
+            conn.execute(
+                "UPDATE downloads SET " + ", ".join(f"{c} = ?" for c in fill) + " WHERE id = ?",
+                (*fill.values(), keeper["id"]))
+        for other in others:
+            conn.execute("DELETE FROM downloads WHERE id = ?", (other["id"],))
+            removed += 1
+    return removed
+
+
+def _backfill_failed(conn: sqlite3.Connection) -> None:
+    """Once: the files that failed in a plan's result become ``failed`` rows (source
+    ``backfill``). They were never in the log, because failures were recorded in the plan
+    only. A file already logged as failed for that plan is left alone."""
+    if conn.execute("SELECT 1 FROM meta WHERE key = ?", (FAILED_BACKFILLED,)).fetchone():
+        return
+    for plan in conn.execute("SELECT id, body, result, updated_at FROM plans").fetchall():
+        try:
+            failed = json.loads(plan["result"] or "{}").get("failed") or []
+            actions = json.loads(plan["body"] or "{}").get("actions") or []
+        except ValueError:
+            continue
+        for item in failed:
+            if item.get("action") != "outbound":
+                continue
+            path = str(item.get("path") or "")
+            action = next((a for a in actions if a.get("type") == "outbound" and (
+                (item.get("file_id") and a.get("file_id") == item["file_id"])
+                or (path and (a.get("before") or {}).get("path") == path))), None)
+            before = (action or {}).get("before") or {}
+            name = str(before.get("name") or path.rsplit("/", 1)[-1] or "?")
+            file_id = str((action or {}).get("file_id") or item.get("file_id") or "")
+            if conn.execute(
+                    "SELECT 1 FROM downloads WHERE plan_id = ? AND status = 'failed' AND "
+                    "(name = ? OR (file_id != '' AND file_id = ?))",
+                    (plan["id"], name, file_id)).fetchone():
+                continue
+            conn.execute(
+                "INSERT INTO downloads (file_id, name, size, hash, plan_id, status, reason, "
+                "finished_at, source) VALUES (?, ?, ?, ?, ?, 'failed', ?, ?, 'backfill')",
+                (file_id, name, int(before.get("size") or 0), str(before.get("hash") or ""),
+                 plan["id"], redact(str(item.get("error") or ""))[:300], plan["updated_at"]))
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                 (FAILED_BACKFILLED, "1"))
 
 
 def now_iso() -> str:
@@ -108,9 +189,12 @@ class Store:
         conn.row_factory = sqlite3.Row
         schema = resources.files("pikpak_wms.store").joinpath("schema.sql").read_text("utf-8")
         conn.executescript(schema)
+        conn.executescript(requests.SCHEMA)
         _migrate(conn)
         with conn:
             _backfill_audit(conn)
+            _backfill_failed(conn)
+            _dedupe_downloads(conn)
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.commit()
         return conn
@@ -456,6 +540,26 @@ class Store:
                 (json.dumps(plan.to_dict(), ensure_ascii=False), fingerprint, now_iso(), plan_id),
             )
         )
+
+    # ------------------------------------------------------------- requests
+
+    async def post_request(self, kind: str, target: str = "", arg: str = "") -> int:
+        """Ask the process running a plan to do something (``wms task``)."""
+        return await self._write(lambda conn: requests.post(conn, kind, target, arg))
+
+    async def take_requests(self, kind: str, targets: set[str], *, now: float | None = None
+                            ) -> list[tuple[int, str, str]]:
+        """Open requests of ``kind`` aimed at ``targets``: ``(id, target, arg)``. They stay
+        open until :meth:`finish_request`."""
+        rows = await self._write(
+            lambda conn: requests.take(conn, kind, now, targets=targets, result=None))
+        return [(int(row[0]), str(row[2]), str(row[3])) for row in rows]
+
+    async def finish_request(self, request_id: int, result: str) -> None:
+        await self._write(lambda conn: requests.finish(conn, request_id, result))
+
+    async def request_outcome(self, request_id: int) -> tuple[bool, str]:
+        return await self._write(lambda conn: requests.outcome(conn, request_id))
 
     # ------------------------------------------------------------ downloads
 

@@ -9,6 +9,7 @@ that are already in the library but were never logged (they came before the log)
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 from contextvars import ContextVar
@@ -19,6 +20,7 @@ from typing import Any
 from ..core.models import FileNode, parse_time
 from ..i18n import t
 from ..rules.units import human_size
+from ..store.db import now_iso
 from .context import Context
 
 SCANNED = "downloads:scanned"
@@ -27,6 +29,27 @@ current_plan: ContextVar[int | None] = ContextVar("downloads_plan", default=None
 current_user: ContextVar[int | None] = ContextVar("downloads_user", default=None)
 """Who asked for the downloads being made in this task, for the log."""
 SKIPPED_NAMES = (".part", ".part.state", ".part.state.tmp")
+
+
+async def log_attempt(
+    ctx: Context, node: FileNode, status: str, started: str, *, plan_id: int | None = None,
+    path: str = "", reason: str = "", fetch_info: dict | None = None,
+) -> None:
+    """One row in the download log; a failure to write it never fails the download."""
+    info = fetch_info or {}
+    try:
+        if status == "skipped_exists" and path and await ctx.store.download_exists(
+                path, ("done", "skipped_exists")):
+            return  # a re-run over what was already logged
+        plan = plan_id if plan_id is not None else current_plan.get()
+        await ctx.store.add_download(
+            name=node.name, size=node.size, file_id=node.file_id, hash=node.hash,
+            dest_path=path, plan_id=plan, status=status, reason=reason[:300],
+            started_at=started, finished_at=now_iso(), avg_mib_s=info.get("avg_mib_s"),
+            links=info.get("links", ""), peak_connections=int(info.get("peak_connections") or 0),
+            source="plan" if plan is not None else "manual", user_id=current_user.get())
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must not undo a download
+        logging.getLogger(__name__).warning("could not write the download log: %s", exc)
 
 
 def _library_roots(ctx: Context) -> list[Path]:

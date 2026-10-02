@@ -26,13 +26,15 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..core.errors import AuthError, NotFoundError, RateLimitedError, WmsError
-from ..core.models import Action, ActionType, Plan
+from ..core.models import Action, ActionType, FileNode, Plan
+from ..core.redact import redact
 from ..i18n import t
-from ..rules.actions import BATCH_LIMIT, DUE, PRIMITIVES, Deliver, Refused, Runtime
+from ..rules.actions import BATCH_LIMIT, DUE, GONE, PRIMITIVES, Deliver, Refused, Runtime
 from ..rules.units import human_size
-from . import downloads, protect
+from ..store.db import now_iso
+from . import downloads, protect, taskreq
 from .context import Context
-from .control import CANCELLED, DONE, FAILED, SKIPPED, Control
+from .control import CANCELLED, DONE, FAILED, PAUSED, SKIPPED, Control
 
 log = logging.getLogger(__name__)
 
@@ -204,6 +206,8 @@ class ApplyReport:
     """How each downloaded file went: ``path``, ``avg_mib_s``, ``links``, ``peak_connections``."""
     cancelled: list[dict[str, Any]] = field(default_factory=list)
     """Files stopped by hand (docs/wms/M9.2 §D.5); their ``.part`` is kept."""
+    gone: list[str] = field(default_factory=list)
+    """Names of the files whose source had vanished from the drive (skipped as ``gone``)."""
     settled: dict[int, str] = field(default_factory=dict)
     """Downloads that finished ahead of an unfinished one: this run's action index → how
     it ended. Saved with the plan so that a resume does not do them again."""
@@ -219,6 +223,9 @@ class ApplyReport:
         )
         if self.cancelled:
             text += t("apply.summary_cancelled", cancelled=len(self.cancelled))
+        if self.gone:
+            shown = "、".join(self.gone[:5]) + ("…" if len(self.gone) > 5 else "")
+            text += "\n" + t("apply.gone", names=shown)
         return text
 
     def to_result(self) -> dict[str, Any]:
@@ -230,6 +237,7 @@ class ApplyReport:
             "audit_ids": list(self.audit_ids),
             "fetches": list(self.fetches),
             "cancelled": list(self.cancelled),
+            "gone": list(self.gone),
         }
 
 
@@ -271,9 +279,16 @@ async def _record_done(
         report.applied += 1
 
 
+def _skip(report: ApplyReport, state: str, action: Action) -> None:
+    """One action left alone: counted by why, and named when its source has vanished."""
+    report.skipped[state] = report.skipped.get(state, 0) + 1
+    if state == GONE:
+        report.gone.append(_name_of(action))
+
+
 def _failure(item: Action, error: str, **more: Any) -> dict[str, Any]:
     return {"path": item.before.get("path") or item.after.get("path"),
-            "action": str(item.type), "error": error, "file_id": item.file_id, **more}
+            "action": str(item.type), "error": redact(error), "file_id": item.file_id, **more}
 
 
 async def execute(
@@ -324,7 +339,7 @@ async def execute(
         if state == DUE and protection is not None and protection.touches(action):
             state = "protected"
         if state != DUE:
-            report.skipped[state] = report.skipped.get(state, 0) + 1
+            _skip(report, state, action)
             index += 1
             handled += 1
             continue
@@ -416,35 +431,66 @@ async def _execute_outbound(
         try:
             if before is not None:
                 await asyncio.wait({before})
-            async with control.gate:
-                if halt or (action.file_id and action.file_id in failed_files):
-                    if not halt:
-                        report.skipped["after_failure"] = report.skipped.get("after_failure", 0) + 1
-                        await finish(i, SKIPPED)
-                    return  # halted: not done, the next run takes it up
-                track.begin()
+            front = False
+            while True:
                 try:
-                    (extra,) = await primitive.apply([action], rt)
-                except (RateLimitedError, AuthError) as exc:
-                    halt["reason"] = exc.display()
-                    track.state = "queued"
-                    return
-                except WmsError as exc:
-                    report.failed.append(_failure(item, exc.display()))
-                    if action.file_id:
-                        failed_files.add(action.file_id)
-                    await finish(i, FAILED)
-                    return
-                extra = dict(extra)
-                output = extra.pop("_output", None)
-                await _record_done(ctx, report, item, extra, output, plan_id=plan_id)
-                await finish(i, SKIPPED if extra.get("skipped") else DONE)
+                    if track.paused:
+                        # 已暂停: nothing is held, not a slot and not a connection.
+                        await track.resume.wait()
+                        track.paused, front = False, True  # a started file goes first
+                    await control.gate.acquire(i, front=front)
+                    try:
+                        if halt or (action.file_id and action.file_id in failed_files):
+                            if not halt:
+                                report.skipped["after_failure"] = report.skipped.get(
+                                    "after_failure", 0) + 1
+                                await finish(i, SKIPPED)
+                            return  # halted: not done, the next run takes it up
+                        track.begin()
+                        try:
+                            (extra,) = await primitive.apply([action], rt)
+                        except (RateLimitedError, AuthError) as exc:
+                            halt["reason"] = exc.display()
+                            track.state = "queued"
+                            return
+                        except WmsError as exc:
+                            report.failed.append(_failure(item, exc.display()))
+                            if action.file_id:
+                                failed_files.add(action.file_id)
+                            await finish(i, FAILED)
+                            return
+                        track.settling = True  # too late to pause or stop: it is done
+                        extra = dict(extra)
+                        output = extra.pop("_output", None)
+                        await _record_done(ctx, report, item, extra, output, plan_id=plan_id)
+                        await finish(i, SKIPPED if extra.get("skipped") else DONE)
+                        return
+                    finally:
+                        control.gate.release()
+                except asyncio.CancelledError:
+                    if not track.pause_requested or track.cancel_requested:
+                        raise
+                    # 暂停: this file only. Its .part and .part.state stay for 开始.
+                    track.pause_requested = False
+                    track.paused, track.state, track.conns = True, PAUSED, 0
+                    track.resume.clear()
+                    task = asyncio.current_task()
+                    if task is not None:
+                        task.uncancel()
         except asyncio.CancelledError:
             if not track.cancel_requested:
                 raise
-            # This file only: its .part and .part.state stay, the others go on.
+            # 终止, this file only: the others go on. The .part stays unless asked.
             report.cancelled.append(_failure(item, "cancelled", cancelled=True))
+            if not track.logged_cancel:
+                track.logged_cancel = True
+                node = await ctx.store.node(action.file_id) or FileNode.from_snapshot(
+                    action.before)
+                await asyncio.shield(downloads.log_attempt(
+                    ctx, node, "cancelled", now_iso(), plan_id=plan_id, reason="cancelled"))
             await finish(i, CANCELLED)
+            if track.delete_partial:
+                control.delete_partial(i)
 
     try:
         for i, action in enumerate(todo):
@@ -462,7 +508,7 @@ async def _execute_outbound(
             if state == DUE and protection is not None and protection.touches(action):
                 state = "protected"
             if state != DUE:
-                report.skipped[state] = report.skipped.get(state, 0) + 1
+                _skip(report, state, action)
                 control.tracks[i].state = SKIPPED
                 handled.add(i)
                 continue
@@ -525,6 +571,7 @@ async def apply(
             result["skipped"][state] = result["skipped"].get(state, 0) + count
         result["failed"] = list(previous.get("failed") or []) + result["failed"]
         result["cancelled"] = list(previous.get("cancelled") or []) + result["cancelled"]
+        result["gone"] = list(previous.get("gone") or []) + result["gone"]
         result["audit_ids"] = list(previous.get("audit_ids") or []) + result["audit_ids"]
         return result
 
@@ -538,9 +585,18 @@ async def apply(
         control = Control(ctx.config.outbound.parallel_files)
     before = {int(k) - start: v for k, v in (previous.get("settled") or {}).items()
               if int(k) >= start}
-    handled, report = await execute(ctx, todo, budget=budget, plan_id=plan_id, deliver=deliver,
-                                    protection=await protect.load(ctx), checkpoint=checkpoint,
-                                    control=control, settled=before)
+    # Whoever runs the plan also answers ``wms task`` requests for it (M9.3 §A.5).
+    server = (asyncio.create_task(taskreq.serve(ctx, control, plan_id), name=f"taskreq-{plan_id}")
+              if control is not None else None)
+    try:
+        handled, report = await execute(
+            ctx, todo, budget=budget, plan_id=plan_id, deliver=deliver,
+            protection=await protect.load(ctx), checkpoint=checkpoint, control=control,
+            settled=before)
+    finally:
+        if server is not None:
+            server.cancel()
+            await asyncio.gather(server, return_exceptions=True)
 
     progress = start + handled
     report.remaining = len(plan.actions) - progress
