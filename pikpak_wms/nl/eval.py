@@ -50,7 +50,7 @@ import yaml
 from ..rules.schema import CATEGORIES
 from ..rules.units import parse_moment
 from .hosts import BOARD
-from .query import Clarification, Query, Remark, period_start
+from .query import Clarification, Prioritize, Query, Remark, period_start
 from .rules_parser import RulesTranslator
 from .translator import Chain, OpenAITranslator, Translator, build
 
@@ -258,6 +258,14 @@ def verdict(case: dict[str, Any], result: Query | Clarification | Remark | None,
     """``right``, ``equivalent``, ``wrong`` or ``declined``."""
     if result is None:
         return "declined"
+    if case.get("priority"):
+        # Only a priority is right: it must never become a plan (M9.4 §B.3).
+        want = case["priority"]
+        ok = (isinstance(result, Prioritize) and result.names == want["names"]
+              and result.level == want["level"])
+        return "right" if ok else "wrong"
+    if isinstance(result, Prioritize):
+        return "wrong"
     if case.get("remark"):
         # Only a remark is right: it must never become a plan (M9.2 §C.2).
         want = case["remark"]
@@ -357,10 +365,10 @@ async def evaluate(translator: Translator, cases_file: Path = DEFAULT_CASES, *,
         elif outcome == "wrong":
             item = {
                 "text": case["text"],
-                "expected": case.get("expect") or case.get("remark")
+                "expected": case.get("expect") or case.get("remark") or case.get("priority")
                 or ("clarify" if case.get("clarify") else "reject"),
                 "got": result.canonical() if isinstance(result, Query)
-                else {"remark": result.model_dump()} if isinstance(result, Remark)
+                else {"remark": result.model_dump()} if isinstance(result, Remark | Prioritize)
                 else {"clarify": result.question},
             }
             report.wrong.append(item)

@@ -26,8 +26,8 @@ from typing import Any
 from pydantic import ValidationError
 
 from ..rules.schema import CATEGORIES
-from .query import Clarification, Query, Remark, as_result
-from .remarks import lift, only_remark
+from .query import Clarification, Prioritize, Query, Remark, as_result
+from .remarks import lift, only_priority, only_remark
 
 _DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
            "六": 6, "七": 7, "八": 8, "九": 9}
@@ -180,13 +180,13 @@ class RulesTranslator:
     name = "rules"
 
     async def translate(self, text: str, now: datetime, tz: tzinfo
-                        ) -> Query | Clarification | Remark | None:
+                        ) -> Query | Clarification | Remark | Prioritize | None:
         return self.parse(text, now, tz)
 
     def parse(self, text: str, now: datetime, tz: tzinfo
-              ) -> Query | Clarification | Remark | None:
+              ) -> Query | Clarification | Remark | Prioritize | None:
         # 「juvr00309 下过了」, on its own, is a remark about files: never a plan (M9.2 §C.2).
-        remark = only_remark(text)
+        remark = only_remark(text) or only_priority(text)
         if remark is not None:
             return remark
         # In a request, what it says about files already on the NAS is lifted out first:

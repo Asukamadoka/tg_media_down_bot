@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,6 +53,13 @@ class FileTrack:
     file_id: str
     name: str
     size: int = 0
+    priority: int = 0
+    """0 normal, 1 high, 2 top (docs/wms/M9.4); may change while the file waits or runs."""
+    base: int = 0
+    """How many actions of the plan were done before this run: the task's number is
+    ``base + index + 1``, the place it has in the plan."""
+    created: str = ""
+    """When the plan was made: the tie-break between plans of the same priority."""
     state: str = QUEUED
     received: int = 0
     conns: int = 0
@@ -101,6 +109,20 @@ class FileTrack:
         return self.received / self.size if self.size else None
 
     @property
+    def number(self) -> int:
+        return self.base + self.index + 1
+
+    @property
+    def order(self) -> tuple[str, int]:
+        """Within one priority: older plans first, then the plan's own order."""
+        return (self.created, self.base + self.index)
+
+    @property
+    def key(self) -> tuple[int, str, int]:
+        """The start order: ``(-priority, plan created_at, item index)`` (M9.4 §A.2)."""
+        return (-self.priority, *self.order)
+
+    @property
     def pending(self) -> bool:
         return self.state in (QUEUED, ACTIVE, PAUSED)
 
@@ -112,36 +134,48 @@ class FileTrack:
         return [p for p in (self.part, side) if p.exists()]
 
 
+class _Waiter:
+    __slots__ = ("front", "future", "key", "owner", "seq")
+
+    def __init__(self, owner, future, front, key, seq):
+        self.owner, self.future, self.front, self.key, self.seq = owner, future, front, key, seq
+
+    def rank(self) -> tuple:
+        # A promoted waiter first (the latest promoted first), then by the task's key.
+        return (0, -self.seq) if self.front else (1, self.key() if self.key else (), self.seq)
+
+
 class Gate:
     """At most ``limit`` holders at once; 0 means no limit. The limit may change
-    while holders are inside. A waiter can be moved to the front (``promote``)."""
+    while holders are inside. Waiters are served in the order of their ``key`` (priority,
+    plan age, place: docs/wms/M9.4 §A.2), a promoted waiter (``front``) before all."""
 
     def __init__(self, limit: int = 0) -> None:
         self.limit = max(limit, 0)
         self.inside = 0
-        self._waiters: deque[tuple[object, asyncio.Future]] = deque()
+        self._waiters: list[_Waiter] = []
+        self._seq = 0
 
     def _room(self) -> bool:
         return self.limit == 0 or self.inside < self.limit
 
-    async def acquire(self, owner: object = None, *, front: bool = False) -> None:
+    async def acquire(self, owner: object = None, *, front: bool = False,
+                      key: Callable[[], tuple] | None = None) -> None:
         if self._room() and not self._waiters:
             self.inside += 1
             return
-        waiter = asyncio.get_running_loop().create_future()
-        entry = (owner, waiter)
-        if front:
-            self._waiters.appendleft(entry)
-        else:
-            self._waiters.append(entry)
+        self._seq += 1
+        waiter = _Waiter(owner, asyncio.get_running_loop().create_future(), front, key,
+                         self._seq)
+        self._waiters.append(waiter)
         try:
-            await waiter
+            await waiter.future
         except BaseException:
-            if waiter.done() and not waiter.cancelled():
+            if waiter.future.done() and not waiter.future.cancelled():
                 self._leave()
             else:
                 with contextlib.suppress(ValueError):
-                    self._waiters.remove(entry)
+                    self._waiters.remove(waiter)
             raise
 
     def release(self) -> None:
@@ -160,17 +194,18 @@ class Gate:
 
     def _wake(self) -> None:
         while self._waiters and self._room():
-            _owner, waiter = self._waiters.popleft()
-            if not waiter.done():
+            waiter = min(self._waiters, key=_Waiter.rank)
+            self._waiters.remove(waiter)
+            if not waiter.future.done():
                 self.inside += 1
-                waiter.set_result(None)
+                waiter.future.set_result(None)
 
     def promote(self, owner: object) -> bool:
         """Move ``owner``'s waiting place to the front; False when it is not waiting."""
-        for entry in self._waiters:
-            if entry[0] == owner:
-                self._waiters.remove(entry)
-                self._waiters.appendleft(entry)
+        for waiter in self._waiters:
+            if waiter.owner == owner:
+                self._seq += 1
+                waiter.front, waiter.seq = True, self._seq
                 return True
         return False
 
@@ -186,6 +221,11 @@ class Control:
         self.gate = Gate(limit)
         self.tracks: dict[int, FileTrack] = {}
         self.page = 0
+        self.base = 0
+        """Actions of the plan done before this run (the offset of the task numbers)."""
+        self.plan_priority = 0
+        self.created = ""
+        """The plan's ``created_at``."""
 
     @property
     def limit(self) -> int:
@@ -194,10 +234,34 @@ class Control:
     def set_limit(self, limit: int) -> None:
         self.gate.set_limit(limit)
 
-    def add(self, index: int, file_id: str, name: str, size: int) -> FileTrack:
-        track = FileTrack(index=index, file_id=file_id, name=name, size=size)
+    def add(self, index: int, file_id: str, name: str, size: int,
+            priority: int | None = None) -> FileTrack:
+        track = FileTrack(index=index, file_id=file_id, name=name, size=size, base=self.base,
+                          created=self.created,
+                          priority=self.plan_priority if priority is None else priority)
         self.tracks[index] = track
         return track
+
+    def set_priority(self, index: int, level: int) -> bool:
+        """Change one task's priority, whatever state it is in (a finished one too: it is
+        only remembered). False for a task this run does not have."""
+        track = self.tracks.get(index)
+        if track is None:
+            return False
+        track.priority = level
+        return True
+
+    def set_plan_priority(self, level: int) -> int:
+        """整组优先: the plan's priority, and every task of it. Returns how many tasks."""
+        self.plan_priority = level
+        for track in self.tracks.values():
+            track.priority = level
+        return len(self.tracks)
+
+    def queued_order(self) -> list[FileTrack]:
+        """The queued tasks in the order they will start."""
+        return sorted((t for t in self.tracks.values() if t.state == QUEUED),
+                      key=lambda t: t.key)
 
     def track_for(self, file_id: str) -> FileTrack | None:
         """The file being fetched for ``file_id`` (an active one first)."""

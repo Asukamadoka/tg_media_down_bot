@@ -31,6 +31,7 @@ from pikpak_wms.ops.embed import (
     AccountUnavailable,
     Clarification,
     EmbeddedWms,
+    Prioritize,
     Remark,
     Run,
     WmsError,
@@ -354,6 +355,8 @@ class WmsInBot:
             return t("wms.nl.not_understood"), None
         if isinstance(result, Remark):
             return await self._remark(user_id, result)
+        if isinstance(result, Prioritize):
+            return await self._prioritize(result)
         record = {"user": user_id, "sentence": text, "at": time.time()}
         pid = await embedded.save_proposal(record)
         if isinstance(result, Clarification):
@@ -428,6 +431,19 @@ class WmsInBot:
                (t("wms.button.cancel"), f"wms:nl:cancel:{pid}")]
         return f"{head}\n<pre>{escape_html(body)}</pre>", callback_buttons([row])
 
+    async def _prioritize(self, wish: Prioritize) -> tuple[str, Any]:
+        """「先下 X」「优先下载 X」「X 置顶」 (docs/wms/M9.4 §B.3): moves queued and running
+        downloads up the line; never a plan."""
+        assert self.embedded is not None
+        names = escape_html("、".join(wish.names))
+        level = {"high": 1, "top": 2}[wish.level]
+        found = await self.embedded.prioritize(wish.names, level)
+        if not found:
+            return t("wms.priority.none", names=names), None
+        shown = escape_html("、".join(found[:3]) + ("…" if len(found) > 3 else ""))
+        return t("wms.priority.done", level=t(f"wms.priority.level.{level}"),
+                 count=len(found), names=shown), None
+
     async def _pending_plan(self, user_id: int) -> tuple[int, dict[str, Any]] | None:
         """This user's newest plan from a sentence, waiting and less than 30 minutes old."""
         assert self.embedded is not None
@@ -469,6 +485,16 @@ class WmsInBot:
             lines.append(f"<pre>{escape_html(body)}</pre>")
             if len(rows) > len(shown):
                 lines.append(t("wms.downloads.more", count=len(rows) - len(shown)))
+        queued = embedded.queued_tasks()
+        if queued:
+            lines.append(t("wms.downloads.queue", count=len(queued)))
+            body = "\n".join(
+                f"{n}. {self.priority_mark(track.priority)}{truncate(track.name, 40)} "
+                f"({t('wms.downloads.queue_plan', id=plan_id)}, {track.number})"
+                for n, (plan_id, track) in enumerate(queued[:DOWNLOAD_ROWS], 1))
+            lines.append(f"<pre>{escape_html(body)}</pre>")
+            if len(queued) > DOWNLOAD_ROWS:
+                lines.append(t("wms.downloads.more", count=len(queued) - DOWNLOAD_ROWS))
         current = await embedded.parallel_files()
         lines.append(t("wms.downloads.parallel", n=self._parallel_label(current)))
         buttons = callback_buttons([
@@ -576,7 +602,13 @@ class WmsInBot:
             detail = f"{label} {percent}"
         else:
             detail = label
-        return t("wms.task.line", n=track.index + 1, name=name, detail=detail)
+        mark = self.priority_mark(track.priority)
+        return t("wms.task.line", n=track.number, name=mark + name, detail=detail)
+
+    @staticmethod
+    def priority_mark(level: int) -> str:
+        """⬆ for high, ⬆⬆ for top, on the task's line."""
+        return "⬆" * level + (" " if level else "")
 
     @staticmethod
     def _parallel_label(limit: int) -> str:
@@ -593,14 +625,14 @@ class WmsInBot:
         left a partial file offers 删除已下载部分."""
         who = f"{plan_id}:{track.index}"
         short = truncate(track.name, 12)
-        if track.state == "active":
-            return [(t("wms.button.task_pause", n=track.index + 1, name=short), f"wms:tp:{who}"),
-                    (t("wms.button.task_stop", n=track.index + 1), f"wms:tx:{who}")]
+        first = (t("wms.button.task_pause", n=track.number, name=short), f"wms:tp:{who}")
         if track.state in ("queued", "paused"):
-            return [(t("wms.button.task_start", n=track.index + 1, name=short), f"wms:ts:{who}"),
-                    (t("wms.button.task_stop", n=track.index + 1), f"wms:tx:{who}")]
+            first = (t("wms.button.task_start", n=track.number, name=short), f"wms:ts:{who}")
+        if track.state in ("active", "queued", "paused"):
+            return [first, (t("wms.button.task_stop", n=track.number), f"wms:tx:{who}"),
+                    (t("wms.button.task_priority", n=track.number), f"wms:tr:{who}")]
         if track.state == "cancelled" and track.partial_files():
-            return [(t("wms.button.task_delete", n=track.index + 1, name=short),
+            return [(t("wms.button.task_delete", n=track.number, name=short),
                      f"wms:td:{who}")]
         return []
 
@@ -625,7 +657,8 @@ class WmsInBot:
             rows.append(nav)
         if len(control.tracks) > 1:
             plan_row = [(t("wms.button.pause_all"), f"wms:pall:{run.plan_id}"),
-                        (t("wms.button.start_all"), f"wms:sall:{run.plan_id}")]
+                        (t("wms.button.start_all"), f"wms:sall:{run.plan_id}"),
+                        (t("wms.button.plan_priority"), f"wms:pr:{run.plan_id}")]
             counts = control.counts()
             if counts["failed"] or counts["cancelled"]:
                 plan_row.append((t("wms.button.retry_failed"), f"wms:retry:{run.plan_id}"))

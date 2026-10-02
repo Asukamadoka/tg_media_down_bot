@@ -34,7 +34,6 @@ import json
 import os
 import re
 import time
-from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,28 +69,55 @@ size of each chunk before it is written. The bot sets it to wait while its
 direct-traffic cap is reached (TRAFFIC_DIRECT_DAILY_GB, docs/wms/M9 §D.1)."""
 
 
+WEIGHTS = {0: 1, 1: 2, 2: 4}
+"""Connection grants by priority: normal 1 : high 2 : top 4 (docs/wms/M9.4 §A.3)."""
+
+
+class _Wait:
+    __slots__ = ("first", "future", "level", "order", "seq")
+
+    def __init__(self, future, level, order, first, seq):
+        self.future, self.level, self.order, self.first, self.seq = (
+            future, level, order, first, seq)
+
+
 class ConnectionPool:
-    """Connection slots shared by every file in flight (first come, first served).
+    """Connection slots shared by every file in flight.
 
     A connection takes a slot for as long as one stream is open and gives it
     back between ranges and while backing off, so files beyond the budget wait
-    for connections, not for each other."""
+    for connections, not for each other.
+
+    Free slots are granted by priority (M9.4): among the waiters, the priority
+    classes take turns in proportion to their weights (:data:`WEIGHTS`), and inside a class
+    the older plan and the earlier item go first. A file with no connection open at all
+    asks with ``first=True`` and is served before the weights apply, so a running file
+    never drops below one connection. Nothing is taken from a stream that is open: a
+    connection of a lower priority is handed over when its range ends (a soft pre-emption).
+    """
 
     def __init__(self, capacity: int = 32) -> None:
         self.capacity = capacity
         self.used = 0
-        self._waiters: deque[asyncio.Future] = deque()
+        self._waiters: list[_Wait] = []
+        self._passes: dict[int, float] = {}
+        self._present: set[int] = set()
+        self._seq = 0
 
-    async def acquire(self) -> None:
+    async def acquire(self, priority: Callable[[], int] | int = 0, order: tuple = (),
+                      first: bool = False) -> None:
         if self.used < self.capacity and not self._waiters:
             self.used += 1
             return
-        waiter = asyncio.get_running_loop().create_future()
+        self._seq += 1
+        level = priority if callable(priority) else (lambda value=priority: value)
+        waiter = _Wait(asyncio.get_running_loop().create_future(), level, order, first,
+                       self._seq)
         self._waiters.append(waiter)
         try:
-            await waiter
+            await waiter.future
         except BaseException:
-            if waiter.done() and not waiter.cancelled():
+            if waiter.future.done() and not waiter.future.cancelled():
                 self.release()  # granted just as it was cancelled: hand the slot on
             else:
                 with contextlib.suppress(ValueError):
@@ -102,12 +128,31 @@ class ConnectionPool:
         self.used = max(self.used - 1, 0)
         self._wake()
 
+    def _pick(self) -> _Wait:
+        starving = [w for w in self._waiters if w.first]
+        if starving:
+            return min(starving, key=lambda w: (w.order, w.seq))
+        classes: dict[int, list[_Wait]] = {}
+        for waiter in self._waiters:
+            classes.setdefault(waiter.level(), []).append(waiter)
+        # A class that was not waiting joins at the level of the others, not with a credit.
+        running = [self._passes[c] for c in classes if c in self._present and c in self._passes]
+        floor = min(running, default=0.0)
+        for level in classes:
+            if level not in self._present:
+                self._passes[level] = max(self._passes.get(level, 0.0), floor)
+        self._present = set(classes)
+        chosen = min(classes, key=lambda c: (self._passes[c], -c))
+        self._passes[chosen] += 1.0 / WEIGHTS.get(chosen, 1)
+        return min(classes[chosen], key=lambda w: (w.order, w.seq))
+
     def _wake(self) -> None:
         while self._waiters and self.used < self.capacity:
-            waiter = self._waiters.popleft()
-            if not waiter.done():
+            waiter = self._pick()
+            self._waiters.remove(waiter)
+            if not waiter.future.done():
                 self.used += 1
-                waiter.set_result(None)
+                waiter.future.set_result(None)
 
     def configure(self, capacity: int) -> None:
         self.capacity = max(int(capacity), 1)
@@ -335,7 +380,7 @@ async def download(
     max_connections: int | None = None, stats: FetchStats | None = None,
     clock: Callable[[], float] = time.monotonic, rebalance_after: float = 20.0,
     adapt_every: float = 20.0, tick: float = 1.0, pool: ConnectionPool | None = None,
-    retry_seconds: float = 0.0,
+    retry_seconds: float = 0.0, priority: Callable[[], int] | int = 0, order: tuple = (),
 ) -> int:
     """Fetch the file behind ``url_for()`` into ``part``; returns its size.
 
@@ -344,6 +389,9 @@ async def download(
     speed keeps rising, to ``max_connections``; they drop by 4 on HTTP 429/503
     or repeated resets. With two links, ranges not yet started go to the faster
     one. Cancelling (or failing) leaves ``part`` and its sidecar for the next run.
+
+    ``priority`` (a number, or a function read at each grant) and ``order`` rank this file's
+    requests for connections in ``pool`` (:class:`ConnectionPool`).
 
     ``retry_seconds`` > 0 turns on the patient mode of docs/wms/M9.2 §D.3: CDN and
     network trouble is retried with a growing pause until that long has passed
@@ -428,7 +476,7 @@ async def download(
             failures = streak = 0
             while span.left > 0:
                 seen = state["generation"]
-                await pool.acquire()
+                await pool.acquire(priority, order, first=sum(link_conns) == 0)
                 index = pick_link()
                 urls = state["urls"]
                 url = urls[index % len(urls)]

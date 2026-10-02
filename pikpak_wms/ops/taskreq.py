@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 from ..core.errors import WmsError
+from . import priority
 from .context import Context
 from .control import ACTIVE, Control
 
@@ -29,14 +30,15 @@ EVERY = 5.0
 SNAPSHOT = "tasks:"
 FRESH = 30.0
 """A snapshot older than this is from a process that has gone."""
-VERBS = ("pause", "start", "stop")
+VERBS = ("pause", "start", "stop", "priority")
 
 
 def snapshot(control: Control, plan_id: int) -> dict[str, Any]:
     return {
         "plan": plan_id, "at": time.time(), "limit": control.limit,
         "tasks": [
-            {"n": t.index + 1, "name": t.name, "state": t.state, "size": t.size,
+            {"n": t.number, "name": t.name, "state": t.state, "size": t.size,
+             "priority": t.priority,
              "received": t.received, "mib_s": round(t.speed / (1024 * 1024), 2) if
              t.state == ACTIVE else 0.0}
             for t in sorted(control.tracks.values(), key=lambda t: t.index)],
@@ -53,6 +55,16 @@ async def withdraw(ctx: Context, plan_id: int) -> None:
 
 def _do(control: Control, plan_id: int, number: str, arg: str) -> str:
     verb, _, extra = arg.partition("+")
+    if verb.startswith(("priority:", "priority-plan:")):
+        kind, _, name = verb.partition(":")
+        try:
+            level = priority.parse(name)
+        except WmsError:
+            return "refused: not a priority"
+        if kind == "priority-plan":
+            return f"ok: {control.set_plan_priority(level)}"
+        verb = "priority"
+        extra = str(level)
     if verb not in VERBS:
         return "refused: unknown request"
     if number == "all":
@@ -62,24 +74,44 @@ def _do(control: Control, plan_id: int, number: str, arg: str) -> str:
             return f"ok: {control.start_all()}"
         return "refused: stop needs one task"
     try:
-        index = int(number) - 1
+        index = int(number) - 1 - control.base
     except ValueError:
         return "refused: not a task number"
     track = control.tracks.get(index)
     if track is None:
         return "refused: no such task"
+    if verb == "priority":
+        return "ok" if control.set_priority(index, int(extra)) else "refused: no such task"
     state = track.state
     if control.handle(verb, index, delete_partial=extra == "delete"):
         return "ok"
     return f"refused: the task is {state}"
 
 
+async def _keep(ctx: Context, plan_id: int, number: str, arg: str) -> None:
+    """A priority that was asked for is also written to the plan (so it outlives the run)."""
+    kind, _, name = arg.partition(":")
+    if kind not in ("priority", "priority-plan"):
+        return
+    level = priority.parse(name)
+    if kind == "priority-plan":
+        await priority.set_plan(ctx, plan_id, level)
+    else:
+        await priority.set_task(ctx, plan_id, int(number) - 1, level)
+
+
 async def serve_once(ctx: Context, control: Control, plan_id: int) -> int:
     """Take the requests for this plan's tasks and carry them out; returns how many."""
-    targets = {f"{plan_id}:all", *(f"{plan_id}:{i + 1}" for i in control.tracks)}
+    targets = {f"{plan_id}:all", *(f"{plan_id}:{t.number}" for t in control.tracks.values())}
     rows = await ctx.store.take_requests(KIND, targets)
     for rid, target, arg in rows:
-        result = _do(control, plan_id, target.partition(":")[2], arg)
+        number = target.partition(":")[2]
+        result = _do(control, plan_id, number, arg)
+        if result.startswith("ok"):
+            try:
+                await _keep(ctx, plan_id, number, arg)
+            except WmsError as exc:
+                result = f"ok (not saved: {exc})"
         await ctx.store.finish_request(rid, result)
         log.info("task request %s %s: %s", target, arg, result)
     if rows:
@@ -117,13 +149,18 @@ def parse_target(text: str) -> tuple[int, str]:
 
 
 async def request(ctx: Context, verb: str, target: str, *, delete_partial: bool = False,
-                  wait: float = 0.0, step: float = 0.5) -> tuple[bool, str]:
+                  level: str | None = None, whole_plan: bool = False, wait: float = 0.0,
+                  step: float = 0.5) -> tuple[bool, str]:
     """Post a request; with ``wait`` seconds, wait for the process running the plan to
-    answer. Returns ``(answered, result)``."""
+    answer. Returns ``(answered, result)``. ``priority`` takes a ``level`` (normal, high,
+    top) and, with ``whole_plan``, is for the plan and every task of it."""
     if verb not in VERBS:
         raise WmsError(f"unknown verb {verb}", key="task.bad_verb", verb=verb)
     plan_id, number = parse_target(target)
     arg = "stop+delete" if verb == "stop" and delete_partial else verb
+    if verb == "priority":
+        priority.parse(level or "")
+        arg = f"{'priority-plan' if whole_plan else 'priority'}:{level}"
     rid = await ctx.store.post_request(KIND, f"{plan_id}:{number}", arg)
     waited = 0.0
     while True:

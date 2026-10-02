@@ -427,3 +427,10 @@ cases:
     expect:
       intent: download
       filters: {created_after: "2026-10-02T02:50:00+08:00", kinds: [video], not_downloaded: true}
+  # ---------------- M9.4：优先，只改排队，不做计划 ----------------
+  - text: 先下 juvr00309
+    priority: {names: [juvr00309], level: high}
+  - text: 优先下载 juvr00309
+    priority: {names: [juvr00309], level: high}
+  - text: juvr00309 置顶
+    priority: {names: [juvr00309], level: top}

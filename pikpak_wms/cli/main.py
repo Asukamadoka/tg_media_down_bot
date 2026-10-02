@@ -18,6 +18,7 @@ from typing import Any, TypeVar
 import typer
 from rich.console import Console
 from rich.table import Table
+from typer.core import TyperGroup
 
 from .. import __version__
 from ..config import Config, Credentials, config_path, load_config
@@ -26,7 +27,7 @@ from ..core.errors import WmsError
 from ..core.models import ActionType, Plan
 from ..i18n import t
 from ..ops import downloads as downloads_ops
-from ..ops import eventsync, listing, organize, plans, protect, taskreq, tidy
+from ..ops import eventsync, listing, organize, plans, priority, protect, taskreq, tidy
 from ..ops import inbound as inbound_ops
 from ..ops import outbound as outbound_ops
 from ..ops import stocktake as stocktake_ops
@@ -708,7 +709,21 @@ def list_plans(all_plans: bool = typer.Option(False, "--all", help="closed ones 
     console.print(table)
 
 
-@app.command(name="plan")
+class _PlanGroup(TyperGroup):
+    """``wms plan 66`` still shows plan 66; ``wms plan priority 66 high`` is a command."""
+
+    def resolve_command(self, ctx, args):
+        if args and args[0].isdigit():
+            return "show", self.commands["show"], args
+        return super().resolve_command(ctx, args)
+
+
+plan_app = typer.Typer(cls=_PlanGroup, help="Show a stored plan, or set its priority.",
+                       no_args_is_help=True)
+app.add_typer(plan_app, name="plan")
+
+
+@plan_app.command(name="show")
 def show_plan(
     plan_id: int = typer.Argument(..., help="plan id"),
     limit: int = typer.Option(200, "--show", help="actions to list"),
@@ -719,6 +734,23 @@ def show_plan(
         console.print(line, markup=False)
     console.print(t("cli.plan.status", status=t(f"plan.status.{row['status']}"),
                     progress=row["progress"], total=len(row["plan"])))
+
+
+@plan_app.command(name="priority")
+def plan_priority(
+    plan_id: int = typer.Argument(..., help="plan id"),
+    level: str = typer.Argument(..., help="normal | high | top"),
+) -> None:
+    """整组优先: the plan's priority, and every task of it (kept with the plan)."""
+    value = priority.parse(level)
+
+    async def work(ctx: Context):
+        await priority.set_plan(ctx, plan_id, value)
+        return await taskreq.request(ctx, "priority", f"{plan_id}:all", level=level,
+                                     whole_plan=True, wait=TASK_WAIT)
+
+    _run(work)
+    console.print(t("cli.priority.done", level=level, target=str(plan_id)))
 
 
 @app.command(name="apply")
@@ -810,6 +842,34 @@ def task_pause(target: str = typer.Argument(..., help="<plan>:<n>, or <plan>:all
 def task_start(target: str = typer.Argument(..., help="<plan>:<n>, or <plan>:all")) -> None:
     """开始: resume a paused task, or let a queued one go first."""
     _task_request("start", target)
+
+
+@task_app.command(name="priority")
+def task_priority(
+    target: str = typer.Argument(..., help="<plan>:<n>"),
+    level: str = typer.Argument(..., help="normal | high | top"),
+) -> None:
+    """优先: how soon this task starts and how many connections it gets. Asked of the
+    process running the plan; kept with the plan if nothing answers."""
+    value = priority.parse(level)
+    plan_id, number = taskreq.parse_target(target)
+
+    async def work(ctx: Context):
+        answered, result = await taskreq.request(ctx, "priority", target, level=level,
+                                                 wait=TASK_WAIT)
+        if answered and result.startswith("refused"):
+            return False, result
+        if not answered and number != "all":
+            await priority.set_task(ctx, plan_id, int(number) - 1, value)
+        return answered, result
+
+    answered, result = _run(work)
+    if answered and result.startswith("refused"):
+        console.print(t("cli.task.refused", verb="priority", target=target, reason=result),
+                      style="red", markup=False)
+        raise typer.Exit(code=1)
+    console.print(t("cli.priority.done" if answered else "cli.priority.saved",
+                    level=level, target=target))
 
 
 @task_app.command(name="stop")

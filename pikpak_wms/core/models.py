@@ -213,6 +213,8 @@ class Plan:
     generated_at: str | None = None
     notes: list[dict[str, Any]] = field(default_factory=list)
     """``{"key": catalogue key, "args": {...}}``: stored, translated when shown."""
+    priority: int = 0
+    """The default priority of the plan's downloads: 0 normal, 1 high, 2 top (M9.4)."""
 
     def __len__(self) -> int:
         return len(self.actions)
@@ -234,6 +236,7 @@ class Plan:
             "source": self.source,
             "generated_at": self.generated_at,
             "notes": list(self.notes),
+            "priority": self.priority,
         }
 
     @classmethod
@@ -242,6 +245,7 @@ class Plan:
             actions=[Action.from_dict(item) for item in data.get("actions") or []],
             source=str(data.get("source", "")),
             generated_at=data.get("generated_at"),
+            priority=int(data.get("priority") or 0),
             notes=[
                 note if isinstance(note, dict) else {"key": "plan.note", "args": {"text": note}}
                 for note in data.get("notes") or []

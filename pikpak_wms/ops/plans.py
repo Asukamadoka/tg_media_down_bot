@@ -84,13 +84,13 @@ async def discard(ctx: Context, plan_id: int) -> None:
                                 result=row["result"])
 
 
-def _name_of(action: Action) -> str:
+def name_of(action: Action) -> str:
     return str(action.before.get("name") or str(action.before.get("path") or "").rsplit("/", 1)[-1])
 
 
 def _refresh_notes(plan: Plan) -> None:
     """What the plan says it matched, made true again after files were taken out."""
-    names = [_name_of(a) for a in plan.actions]
+    names = [name_of(a) for a in plan.actions]
     size = sum(int(a.before.get("size") or 0) for a in plan.actions)
     for note in plan.notes:
         if note.get("key") == "nl.explain.matched":
@@ -114,7 +114,7 @@ async def remove_matching(ctx: Context, plan_id: int, fragments: list[str]) -> l
     gone: list[str] = []
     renumber: dict[int, int] = {}
     for index, action in enumerate(plan.actions):
-        name = _name_of(action)
+        name = name_of(action)
         if index >= start and any(fragment in name.casefold() for fragment in wanted):
             gone.append(name)
             continue
@@ -283,7 +283,7 @@ def _skip(report: ApplyReport, state: str, action: Action) -> None:
     """One action left alone: counted by why, and named when its source has vanished."""
     report.skipped[state] = report.skipped.get(state, 0) + 1
     if state == GONE:
-        report.gone.append(_name_of(action))
+        report.gone.append(name_of(action))
 
 
 def _failure(item: Action, error: str, **more: Any) -> dict[str, Any]:
@@ -438,7 +438,7 @@ async def _execute_outbound(
                         # 已暂停: nothing is held, not a slot and not a connection.
                         await track.resume.wait()
                         track.paused, front = False, True  # a started file goes first
-                    await control.gate.acquire(i, front=front)
+                    await control.gate.acquire(i, front=front, key=lambda: track.key)
                     try:
                         if halt or (action.file_id and action.file_id in failed_files):
                             if not halt:
@@ -498,7 +498,8 @@ async def _execute_outbound(
             name = (node.name if node else None) or str(
                 action.before.get("name") or action.before.get("path") or "").rsplit("/", 1)[-1]
             size = int((node.size if node else 0) or action.before.get("size") or 0)
-            control.add(i, action.file_id, name, size)
+            control.add(i, action.file_id, name, size,
+                        priority=int(action.after.get("priority", control.plan_priority)))
             if i in settled:
                 # Done, failed or cancelled before the last stop: not done again.
                 control.tracks[i].state = settled[i]
@@ -585,6 +586,9 @@ async def apply(
         control = Control(ctx.config.outbound.parallel_files)
     before = {int(k) - start: v for k, v in (previous.get("settled") or {}).items()
               if int(k) >= start}
+    if control is not None:
+        control.base, control.plan_priority, control.created = (
+            start, plan.priority, str(row["created_at"]))
     # Whoever runs the plan also answers ``wms task`` requests for it (M9.3 §A.5).
     server = (asyncio.create_task(taskreq.serve(ctx, control, plan_id), name=f"taskreq-{plan_id}")
               if control is not None else None)

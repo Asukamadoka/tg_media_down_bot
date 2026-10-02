@@ -22,7 +22,7 @@ from ..core.client import Provider
 from ..core.errors import AuthError, WmsError
 from ..core.models import ActionType
 from ..i18n import set_language, t
-from ..nl.query import Clarification, Query, Remark
+from ..nl.query import Clarification, Prioritize, Query, Remark
 from ..rules.schema import Rule
 from ..rules.units import human_size
 from . import downloads, nl, organize, outbound, plans, protect, tidy
@@ -32,7 +32,8 @@ from .runs import Run, Runs
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "AccountUnavailable", "Clarification", "EmbeddedWms", "Query", "Remark", "Rule", "Run",
+    "AccountUnavailable", "Clarification", "EmbeddedWms", "Prioritize", "Query", "Remark", "Rule",
+    "Run",
     "WmsError", "run_command", "set_language",
 ]
 
@@ -201,6 +202,24 @@ class EmbeddedWms:
     def start_file(self, plan_id: int, index: int) -> bool:
         """开始 one file: a paused one resumes, a queued one goes first."""
         return self.runs.start_file(plan_id, index) if self.runs is not None else False
+
+    async def set_task_priority(self, plan_id: int, index: int, level: int) -> bool:
+        """优先 on one task of a running plan (0 normal, 1 high, 2 top; M9.4)."""
+        return await self.runs.set_priority(plan_id, index, level) if self.runs else False
+
+    async def set_plan_priority(self, plan_id: int, level: int) -> int:
+        """整组优先."""
+        assert self.runs is not None
+        return await self.runs.set_plan_priority(plan_id, level)
+
+    async def prioritize(self, names: list[str], level: int) -> list[str]:
+        """「先下 X」 / 「X 置顶」: the names of the queued or running downloads that matched."""
+        assert self.runs is not None
+        return await self.runs.prioritize_names(names, level)
+
+    def queued_tasks(self) -> list[tuple[int, Any]]:
+        """The queued downloads of every running plan, in the order they will start."""
+        return self.runs.queue() if self.runs is not None else []
 
     def pause_all(self, plan_id: int) -> int:
         control = self.runs.control_of(plan_id) if self.runs is not None else None

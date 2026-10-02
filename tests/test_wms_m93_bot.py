@@ -11,7 +11,7 @@ from test_wms_m92 import CdnIO
 from test_wms_m92_bot import chinese, media_files, plan_of, rig, serve_with  # noqa: F401
 
 
-async def running(rig, monkeypatch, names, *, hold_after=2):
+async def running(rig, monkeypatch, names, *, hold_after=2, started=None):
     media_files(rig.drive, names)
     io = CdnIO(payload(2000))
     io.gate, io.hold_after = asyncio.Event(), hold_after
@@ -19,7 +19,7 @@ async def running(rig, monkeypatch, names, *, hold_after=2):
     inbot, handlers = await rig.boot()
     plan_id = await plan_of(inbot, names)
     pressed = await press(handlers, f"wms:apply:{plan_id}")
-    await until(lambda: len(io.begun) == len(names))
+    await until(lambda: len(io.begun) == (len(names) if started is None else started))
     await asyncio.sleep(0.05)
     return inbot, handlers, io, plan_id, pressed
 
@@ -51,8 +51,8 @@ class TestTheLines:
     async def test_the_buttons_follow_the_state(self, rig, monkeypatch):
         inbot, _handlers, io, plan_id, _ = await running(rig, monkeypatch, ("a.mkv", "b.mkv"))
         try:
-            assert labels(inbot, plan_id)[:4] == [
-                "⏸ 暂停 1 a.mkv", "■ 终止 1", "⏸ 暂停 2 b.mkv", "■ 终止 2"]
+            assert labels(inbot, plan_id)[:6] == [
+                "⏸ 暂停 1 a.mkv", "■ 终止 1", "⬆ 优先 1", "⏸ 暂停 2 b.mkv", "■ 终止 2", "⬆ 优先 2"]
             run = inbot.embedded.run_of(plan_id)
             run.control.pause(0)
             await until(lambda: run.control.tracks[0].state == "paused")

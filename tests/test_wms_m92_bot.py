@@ -155,10 +155,11 @@ class TestManyFiles:
             assert "完成 0 · 失败 0 · 跳过 0 · 共 3" in text and "同时下载 不限" in text
             assert text.count("下载中") == 3 and "1. a.mkv" in text
             labels = [label for label, _ in buttons_of({"buttons": inbot.run_buttons(run)})]
-            assert labels[:6] == ["⏸ 暂停 1 a.mkv", "■ 终止 1", "⏸ 暂停 2 b.mkv", "■ 终止 2",
-                                  "⏸ 暂停 3 c.mkv", "■ 终止 3"]
-            assert labels[6:] == ["全部暂停", "全部开始", "同时 1", "同时 2", "同时 4",
-                                  "✓ 同时 不限", "停止"]
+            assert labels[:9] == ["⏸ 暂停 1 a.mkv", "■ 终止 1", "⬆ 优先 1", "⏸ 暂停 2 b.mkv",
+                                  "■ 终止 2", "⬆ 优先 2", "⏸ 暂停 3 c.mkv", "■ 终止 3",
+                                  "⬆ 优先 3"]
+            assert labels[9:] == ["全部暂停", "全部开始", "整组优先", "同时 1", "同时 2",
+                                  "同时 4", "✓ 同时 不限", "停止"]
             # The watcher puts these buttons on the message by itself.
             await until(lambda: any(len(buttons_of(k)) > 1 for _, k in pressed.edits))
             io.gate.set()

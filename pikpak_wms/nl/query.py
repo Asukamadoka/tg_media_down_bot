@@ -193,6 +193,15 @@ class Remark(_Strict):
     「跳过」, which only leave the files out."""
 
 
+class Prioritize(_Strict):
+    """「先下 X」「优先下载 X」「X 置顶」: move files that are already queued or downloading
+    up the line (docs/wms/M9.4 §B.3). Like a :class:`Remark` it never makes a plan."""
+
+    names: list[str]
+    level: str
+    """``high`` (「先下」「优先下载」) or ``top`` (「置顶」)."""
+
+
 def as_result(query: Query) -> Query | Clarification:
     if query.needs_clarification:
         return Clarification(question=query.needs_clarification)
