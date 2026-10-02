@@ -145,8 +145,11 @@ def ground(sentence: str, result: Query | Clarification | None) -> Query | Clari
     named = [item for item in filters.name_contains if item.casefold() in text]
     regex_ok = filters.name_regex is None or any(
         part.casefold() in text for part in _literal_parts(filters.name_regex))
-    if len(named) != len(filters.name_contains) or not regex_ok:
+    left_out = [item for item in filters.exclude_names if item.casefold() in text]
+    if (len(named) != len(filters.name_contains) or not regex_ok
+            or len(left_out) != len(filters.exclude_names)):
         filters.name_contains = named
+        filters.exclude_names = left_out
         if not regex_ok:
             filters.name_regex = None
         dropped.append("name")

@@ -59,6 +59,7 @@ class Matcher:
     def __init__(self, match: Match) -> None:
         self.match = match
         self._regex = re.compile(match.name_regex) if match.name_regex else None
+        self._not = re.compile(match.name_not_regex) if match.name_not_regex else None
         self._globs = [glob_to_regex(p) for p in match.path_glob or []]
 
     def test(
@@ -74,6 +75,8 @@ class Matcher:
         if m.kind is not None and str(node.kind) != m.kind:
             return None
         if m.name_equals is not None and node.name != m.name_equals:
+            return None
+        if self._not is not None and self._not.search(node.name):
             return None
         if m.file_ids is not None and node.file_id not in m.file_ids:
             return None

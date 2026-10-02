@@ -255,7 +255,9 @@ class TestOutboundLocalOverRanges:
         assert "3000 of 5000" in report.failed[0]["error"]
         assert not list((tmp_path / "media" / "PikPak").glob("a.mkv*"))
 
-    async def test_a_network_error_fails_that_file_and_keeps_the_part(self, world, tmp_path):
+    async def test_a_network_error_fails_that_file_and_keeps_the_part(
+            self, world, tmp_path, monkeypatch):
+        monkeypatch.setenv("OUTBOUND_RETRY_MINUTES", "0")  # no patience: fail at the first error
         plan = await self._one(world, tmp_path)
         io = FakeIO(payload(3000), chunk=500, any_url=True)
         io.fail_after = 2
@@ -335,7 +337,8 @@ class TestRuns:
         io.release.set()
         await runs.stop_all()
 
-    async def test_stop_keeps_what_was_done_and_the_place(self, world, tmp_path):
+    async def test_stop_keeps_what_was_done_and_the_place(self, world, tmp_path, monkeypatch):
+        monkeypatch.setenv("OUTBOUND_PARALLEL_FILES", "1")  # one after another
         plan_id = await _outbound_plan(world, tmp_path, names=("a.mkv", "b.mkv"))
         hold = asyncio.Event()
         reached = asyncio.Event()
@@ -399,7 +402,8 @@ class TestRuns:
         assert (await plans.get(world.ctx, plan_id))["status"] in plans.OPEN
         assert run.report is None and "disk on fire" in run.error
 
-    async def test_progress_is_saved_as_the_run_goes(self, world, tmp_path):
+    async def test_progress_is_saved_as_the_run_goes(self, world, tmp_path, monkeypatch):
+        monkeypatch.setenv("OUTBOUND_PARALLEL_FILES", "1")  # one after another
         names = tuple(f"{n}.mkv" for n in "abc")
         plan_id = await _outbound_plan(world, tmp_path, names=names)
         gate = asyncio.Event()

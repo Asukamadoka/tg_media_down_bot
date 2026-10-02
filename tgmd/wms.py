@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import logging
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -30,6 +31,7 @@ from pikpak_wms.ops.embed import (
     AccountUnavailable,
     Clarification,
     EmbeddedWms,
+    Remark,
     Run,
     WmsError,
     run_command,
@@ -90,6 +92,17 @@ PROGRESS_MIN_GAP = 5.0
 
 MESSAGE_LIMIT = 3500
 """Telegram's limit is 4096; the plan is cut well before it."""
+
+FILES_PER_PAGE = 6
+"""Files shown (with a [cancel] button each) in one page of a running plan's message."""
+
+PARALLEL_CHOICES = (1, 2, 4, 0)
+"""The ``同时下载`` choices; 0 is no limit."""
+
+REMARK_WINDOW = 30 * 60
+"""A pending plan this recent is the one 「X 下过了」 refers to (docs/wms/M9.2 §C.2)."""
+
+DOWNLOAD_ROWS = 12
 
 Notify = Callable[[int, str, Any], Awaitable[None]]
 """Send ``text`` (HTML) with optional ``buttons`` to a chat."""
@@ -339,7 +352,9 @@ class WmsInBot:
             return t("wms.nl.failed", error=escape_html(exc.display())), None
         if result is None:
             return t("wms.nl.not_understood"), None
-        record = {"user": user_id, "sentence": text}
+        if isinstance(result, Remark):
+            return await self._remark(user_id, result)
+        record = {"user": user_id, "sentence": text, "at": time.time()}
         pid = await embedded.save_proposal(record)
         if isinstance(result, Clarification):
             # The next message answers the question: merge it with this one.
@@ -347,7 +362,7 @@ class WmsInBot:
             question = embedded.clarification_text(result)
             return t("wms.nl.ask", question=escape_html(question)), None
         try:
-            proposal = await embedded.propose(result)
+            proposal = await embedded.propose(result, user_id=user_id)
         except WmsError as exc:
             await embedded.drop_proposal(pid)
             return t("wms.error", error=escape_html(exc.display())), None
@@ -380,6 +395,89 @@ class WmsInBot:
     def translator_label(self, proposal: Any) -> str:
         return proposal.translator
 
+    async def _remark(self, user_id: int, remark: Remark) -> tuple[str, Any]:
+        """「abcd00123 下过了」 / 「不要 X」 on its own (docs/wms/M9.2 §C.2): never a plan.
+
+        With a plan of this user's from the last 30 minutes waiting, the files are taken
+        out of it and it is shown again; otherwise a 「X 下过了」 is remembered in the
+        download log and a bare 「不要 X」 has nothing to act on."""
+        embedded = self.embedded
+        assert embedded is not None
+        names = escape_html("、".join(remark.names))
+        if remark.downloaded:
+            await embedded.mark_downloaded(remark.names, user_id=user_id)
+        found = await self._pending_plan(user_id)
+        if found is None:
+            key = "wms.remark.marked" if remark.downloaded else "wms.remark.nothing_pending"
+            return t(key, names=names), None
+        pid, entry = found
+        plan_id = entry["plan_id"]
+        removed = await embedded.remove_from_plan(plan_id, remark.names)
+        if not removed:
+            return t("wms.remark.not_in_plan", names=names, id=plan_id), None
+        head = t("wms.remark.removed", names=names, id=plan_id, count=len(removed))
+        if not await embedded.plan_open(plan_id):
+            await embedded.drop_proposal(pid)
+            return f"{head}\n{t('wms.remark.emptied', id=plan_id)}", None
+        lines = await embedded.plan_lines(plan_id, limit=8)
+        body = "\n".join(lines)
+        if len(body) > MESSAGE_LIMIT:
+            body = body[:MESSAGE_LIMIT].rsplit("\n", 1)[0] + "\n…"
+        row = [(t("wms.button.apply"), f"wms:nl:apply:{pid}"),
+               (t("wms.button.edit"), f"wms:nl:edit:{pid}"),
+               (t("wms.button.cancel"), f"wms:nl:cancel:{pid}")]
+        return f"{head}\n<pre>{escape_html(body)}</pre>", callback_buttons([row])
+
+    async def _pending_plan(self, user_id: int) -> tuple[int, dict[str, Any]] | None:
+        """This user's newest plan from a sentence, waiting and less than 30 minutes old."""
+        assert self.embedded is not None
+        for pid, entry in await self.embedded.recent_proposals(limit=20):
+            if entry.get("user") != user_id or entry.get("kind") != "plan":
+                continue
+            age = time.time() - float(entry.get("at") or 0)
+            if entry.get("plan_id") is None or age > REMARK_WINDOW:
+                continue
+            if await self.embedded.plan_open(entry["plan_id"]):
+                return pid, entry
+        return None
+
+    # ---------------------------------------------------------- download log
+
+    async def downloads_message(self, view: str = "today", name: str | None = None
+                                ) -> tuple[str, Any]:
+        """``/downloads``: today's rows, the last week's, the failed ones, or a search."""
+        assert self.embedded is not None
+        embedded = self.embedded
+        if name:
+            rows = await embedded.downloads(name=name, limit=DOWNLOAD_ROWS + 1)
+            label = t("wms.downloads.view.search", name=escape_html(name))
+        elif view == "week":
+            rows = await embedded.downloads(days=7, limit=DOWNLOAD_ROWS + 1)
+            label = t("wms.downloads.view.week")
+        elif view == "failed":
+            rows = await embedded.downloads(status=["failed"], limit=DOWNLOAD_ROWS + 1)
+            label = t("wms.downloads.view.failed")
+        else:
+            rows = await embedded.downloads(today=True, limit=DOWNLOAD_ROWS + 1)
+            label = t("wms.downloads.view.today")
+        shown = rows[:DOWNLOAD_ROWS]
+        lines = [t("wms.downloads.header", view=label, count=len(shown))]
+        if not shown:
+            lines.append(t("wms.downloads.none"))
+        else:
+            body = "\n".join(embedded.download_line(row) for row in shown)
+            lines.append(f"<pre>{escape_html(body)}</pre>")
+            if len(rows) > len(shown):
+                lines.append(t("wms.downloads.more", count=len(rows) - len(shown)))
+        current = await embedded.parallel_files()
+        lines.append(t("wms.downloads.parallel", n=self._parallel_label(current)))
+        buttons = callback_buttons([
+            [(t("wms.button.dl_today"), "wms:dl:today"), (t("wms.button.dl_week"), "wms:dl:week"),
+             (t("wms.button.dl_failed"), "wms:dl:failed")],
+            self.parallel_buttons(0, current),
+        ])
+        return "\n".join(lines), buttons
+
     async def nl_button(
         self, user_id: int, verb: str, pid: int
     ) -> tuple[str | None, str | None, Run | None]:
@@ -408,7 +506,7 @@ class WmsInBot:
                     return t("wms.nl.rule_added", path=escape_html(path)), None, None
                 if entry.get("plan_id") is None:
                     return None, t("wms.nl.expired"), None
-                run = await self.embedded.start_apply(entry["plan_id"])
+                run = await self.embedded.start_apply(entry["plan_id"], user_id=user_id)
             except WmsError as exc:
                 return None, exc.display()[:190], None
             self._finishing[run.plan_id] = pid  # forgotten when the run completes
@@ -418,20 +516,91 @@ class WmsInBot:
     # ------------------------------------------------------- background runs
 
     def progress_text(self, run: Run) -> str:
-        """⏳ Plan 58: 3/591 done · the current file, its percent, rate and time left."""
-        lines = [t("wms.run.progress", id=run.plan_id, done=run.done, total=run.total)]
-        if run.file:
-            fraction = run.fraction
-            lines.append(t(
-                "wms.run.file", name=escape_html(truncate(run.file, 48)),
-                percent=f"{fraction * 100:.0f}" if fraction is not None else "?",
-                done=human_size(run.received), size=human_size(run.size),
-                rate=human_rate(run.speed), eta=human_duration(run.eta),
-            ))
-            if run.conns:
-                lines.append(t("wms.run.fetch", avg=f"{run.average / (1024 * 1024):.1f}",
-                               conns=run.conns, links=run.links or "web"))
+        """⏳ Plan 58: 3/591 done · the current file, its percent, rate and time left.
+
+        With several files in flight: a summary line (done / failed / skipped / total,
+        the speed of all of them, time left, how many at once) and a line per file,
+        a page of them at a time."""
+        control = run.control
+        done = run.done
+        if len(control.tracks) > 1:
+            # The plan's own progress is the first file not done; with files running side by
+            # side, what is done is every one that is no longer queued or running.
+            counts = control.counts()
+            finished = sum(counts[key] for key in ("done", "failed", "skipped", "cancelled"))
+            done = max(done, run.total - len(control.tracks) + finished)
+        lines = [t("wms.run.progress", id=run.plan_id, done=done, total=run.total)]
+        if len(control.tracks) <= 1:
+            if run.file:
+                fraction = run.fraction
+                lines.append(t(
+                    "wms.run.file", name=escape_html(truncate(run.file, 48)),
+                    percent=f"{fraction * 100:.0f}" if fraction is not None else "?",
+                    done=human_size(run.received), size=human_size(run.size),
+                    rate=human_rate(run.speed), eta=human_duration(run.eta),
+                ))
+                if run.conns:
+                    lines.append(t("wms.run.fetch", avg=f"{run.average / (1024 * 1024):.1f}",
+                                   conns=run.conns, links=run.links or "web"))
+            return "\n".join(lines)
+        counts = control.counts()
+        lines.append(t(
+            "wms.run.summary", done=counts["done"], failed=counts["failed"],
+            skipped=counts["skipped"], total=len(control.tracks),
+            rate=human_rate(control.speed), eta=human_duration(control.eta),
+            parallel=self._parallel_label(control.limit))
+            + (t("wms.run.summary_cancelled", cancelled=counts["cancelled"])
+               if counts["cancelled"] else ""))
+        listed = control.listing()
+        pages = max(-(-len(listed) // FILES_PER_PAGE), 1)
+        page = min(max(control.page, 0), pages - 1)
+        for track in listed[page * FILES_PER_PAGE:(page + 1) * FILES_PER_PAGE]:
+            name = escape_html(truncate(track.name, 40))
+            if track.state == "active":
+                fraction = track.fraction
+                lines.append(t(
+                    "wms.run.file_line", name=name,
+                    percent=f"{fraction * 100:.0f}" if fraction is not None else "?",
+                    rate=human_rate(track.speed), conns=track.conns))
+            else:
+                lines.append(t("wms.run.file_queued", name=name))
+        if pages > 1:
+            lines.append(t("wms.run.page", page=page + 1, pages=pages))
         return "\n".join(lines)
+
+    @staticmethod
+    def _parallel_label(limit: int) -> str:
+        return str(limit) if limit else t("wms.parallel.all")
+
+    def parallel_buttons(self, plan_id: int, current: int) -> list[tuple[str, str]]:
+        """``同时下载`` choices for a plan (``plan_id`` 0: the default for every plan)."""
+        return [(t("wms.button.parallel_on" if n == current else "wms.button.parallel",
+                   n=self._parallel_label(n)), f"wms:par:{plan_id}:{n}")
+                for n in PARALLEL_CHOICES]
+
+    def run_buttons(self, run: Run) -> Any:
+        """A running plan's buttons: [cancel] for each file shown, the page buttons, the
+        choice of how many at once, and [stop]."""
+        rows: list[list[tuple[str, str]]] = []
+        control = run.control
+        listed = control.listing()
+        pages = max(-(-len(listed) // FILES_PER_PAGE), 1)
+        page = min(max(control.page, 0), pages - 1)
+        if len(control.tracks) > 1:
+            for track in listed[page * FILES_PER_PAGE:(page + 1) * FILES_PER_PAGE]:
+                data = f"wms:cancel:{run.plan_id}:{track.index}"
+                rows.append([(t("wms.button.cancel_file", name=truncate(track.name, 24)), data)])
+            if pages > 1:
+                nav = []
+                if page > 0:
+                    nav.append((t("wms.button.prev"), f"wms:page:{run.plan_id}:{page - 1}"))
+                if page < pages - 1:
+                    nav.append((t("wms.button.next"), f"wms:page:{run.plan_id}:{page + 1}"))
+                rows.append(nav)
+        if run.total > 1:
+            rows.append(self.parallel_buttons(run.plan_id, control.limit))
+        rows.append([(t("wms.button.stop"), f"wms:stop:{run.plan_id}")])
+        return callback_buttons(rows)
 
     def stop_buttons(self, plan_id: int) -> Any:
         return callback_buttons([[(t("wms.button.stop"), f"wms:stop:{plan_id}")]])
@@ -463,6 +632,9 @@ class WmsInBot:
         if report.remaining:
             lines.append(t("wms.run.remaining", remaining=report.remaining))
             return "\n".join(lines), self._resume_buttons(run.plan_id)
+        if report.failed or getattr(report, "cancelled", None):
+            return "\n".join(lines), callback_buttons(
+                [[(t("wms.button.retry_failed"), f"wms:retry:{run.plan_id}")]])
         return "\n".join(lines), None
 
     def watch(self, run: Run, edit: Edit) -> asyncio.Task:
@@ -477,7 +649,7 @@ class WmsInBot:
 
     async def _watch(self, run: Run, edit: Edit) -> None:
         loop = asyncio.get_running_loop()
-        last, shown_done = loop.time(), run.done
+        last, shown_done, shown_files = loop.time(), run.done, 0
         while True:
             try:
                 await asyncio.wait_for(run.finished.wait(), timeout=self.tick)
@@ -485,9 +657,12 @@ class WmsInBot:
             except TimeoutError:
                 pass
             waited = loop.time() - last
-            if waited >= self.progress_every or (run.done != shown_done and waited >= self.min_gap):
-                last, shown_done = loop.time(), run.done
-                await self._safe_edit(edit, self.progress_text(run), self.stop_buttons(run.plan_id))
+            files = len(run.control.tracks)
+            if waited >= self.progress_every or (
+                (run.done != shown_done or files != shown_files) and waited >= self.min_gap
+            ):
+                last, shown_done, shown_files = loop.time(), run.done, files
+                await self._safe_edit(edit, self.progress_text(run), self.run_buttons(run))
         text, buttons = self.finished_message(run)
         await self._safe_edit(edit, text, buttons)
         pid = self._finishing.pop(run.plan_id, None)

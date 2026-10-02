@@ -59,6 +59,8 @@ class Match(_Strict):
     name_regex: str | None = None
     name_equals: str | None = None
     """The file name, exactly (docs/wms/M8.3 §K)."""
+    name_not_regex: str | None = None
+    """Skip names this matches (「X 下过了」「除了 X」, docs/wms/M9.2 §C)."""
     file_ids: list[str] | None = None
     """Only these files. Written by ``/do`` when a count was asked for (「只要一个」),
     never by hand: ids mean nothing to a rule that runs again tomorrow."""
@@ -79,14 +81,14 @@ class Match(_Strict):
     ``created`` is when the file arrived in the drive (saved, restored or
     finished downloading)."""
 
-    @field_validator("name_regex")
+    @field_validator("name_regex", "name_not_regex")
     @classmethod
     def _regex(cls, value: str | None) -> str | None:
         if value is not None:
             try:
                 re.compile(value)
             except re.error as exc:
-                raise ValueError(f"name_regex does not compile: {exc}") from exc
+                raise ValueError(f"name regex does not compile: {exc}") from exc
         return value
 
     @field_validator("exclude_paths", mode="before")

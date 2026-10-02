@@ -72,6 +72,7 @@ ENV_VARS = (
     "TG_UPLOAD_RATE_LIMIT_MBPS",
     # M9.1: node selection, direct-first routing, faster PikPak fetch
     "PROXY_PROBE_HOURS",
+    "PROXY_PROBE_CONFIRM",
     "PROXY_PROBE_URL",
     "PROXY_PROBE_UP_URL",
     "PROXY_PROBE_LISTENER",
@@ -85,6 +86,10 @@ ENV_VARS = (
     "DIRECT_RULES_FILE",
     "OUTBOUND_CONNECTIONS",
     "OUTBOUND_MAX_CONNECTIONS",
+    "OUTBOUND_PARALLEL_FILES",
+    "OUTBOUND_MAX_TOTAL_CONNECTIONS",
+    "OUTBOUND_RETRY_MINUTES",
+    "OUTBOUND_SKIP_KNOWN",
     # Which message catalogue tgmd.i18n reads. POSIX LANG is deliberately not
     # one of these: images set it to C.UTF-8 for unrelated reasons.
     "TGMD_LANG",

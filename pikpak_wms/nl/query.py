@@ -69,6 +69,10 @@ class Filters(_Strict):
     full file name was given; not part of the wire format a model fills in."""
     limit: int | None = None
     """Only this many files: the newest to arrive first (「只要一个」「前 3 个」)."""
+    not_downloaded: bool = False
+    """Leave out what the download log says is already on the NAS (docs/wms/M9.2 §C.1)."""
+    exclude_names: list[str] = Field(default_factory=list)
+    """Leave out files whose name contains any of these (「abcd00123 下过了」「除了 X」)."""
 
     @field_validator("limit")
     @classmethod
@@ -93,6 +97,11 @@ class Filters(_Strict):
     @classmethod
     def _extensions(cls, value: list[str]) -> list[str]:
         return [item.lower().lstrip(".") for item in value if item.strip(" .")]
+
+    @field_validator("exclude_names")
+    @classmethod
+    def _excluded(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(item.strip() for item in value if item.strip()))
 
     @field_validator("name_regex")
     @classmethod
@@ -139,6 +148,9 @@ class Query(_Strict):
     corrections: list[str] = Field(default_factory=list, exclude=True)
     """Catalogue keys of what was put right after the model answered (the time
     direction, M8.2 §C), shown in the plan. Not part of the wire format."""
+    marked: list[str] = Field(default_factory=list, exclude=True)
+    """Names the sentence said were already downloaded (「X 下过了」): recorded in the
+    download log when the plan is made. Not part of the wire format."""
 
     @model_validator(mode="after")
     def _schedule_needs_an_action(self) -> Query:
@@ -170,6 +182,17 @@ class Clarification(_Strict):
     args: dict[str, Any] = Field(default_factory=dict)
 
 
+class Remark(_Strict):
+    """A sentence that only says which files are done with: 「abcd00123 下过了」,
+    「不要 X」. It never makes a plan (docs/wms/M9.2 §C.2): it takes the files out of
+    a pending plan, or is remembered in the download log."""
+
+    names: list[str]
+    downloaded: bool
+    """True for 「已经下过了」 (the log should remember it); False for 「不要」「除了」
+    「跳过」, which only leave the files out."""
+
+
 def as_result(query: Query) -> Query | Clarification:
     if query.needs_clarification:
         return Clarification(question=query.needs_clarification)
@@ -199,7 +222,8 @@ WIRE_SCHEMA: dict[str, Any] = {
             "type": "object",
             "additionalProperties": False,
             "required": ["created_after", "created_before", "min_size", "max_size", "kinds",
-                         "extensions", "name_contains", "name_regex", "limit"],
+                         "extensions", "name_contains", "name_regex", "limit",
+                         "not_downloaded", "exclude_names"],
             "properties": {
                 "created_after": _nullable({"type": "string"}),
                 "created_before": _nullable({"type": "string"}),
@@ -210,6 +234,8 @@ WIRE_SCHEMA: dict[str, Any] = {
                 "name_contains": {"type": "array", "items": {"type": "string"}},
                 "name_regex": _nullable({"type": "string"}),
                 "limit": _nullable({"type": "integer"}),
+                "not_downloaded": {"type": "boolean"},
+                "exclude_names": {"type": "array", "items": {"type": "string"}},
             },
         },
         "action_args": {

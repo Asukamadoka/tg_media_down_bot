@@ -50,7 +50,7 @@ import yaml
 from ..rules.schema import CATEGORIES
 from ..rules.units import parse_moment
 from .hosts import BOARD
-from .query import Clarification, Query, period_start
+from .query import Clarification, Query, Remark, period_start
 from .rules_parser import RulesTranslator
 from .translator import Chain, OpenAITranslator, Translator, build
 
@@ -229,13 +229,16 @@ def equivalent(expected: dict[str, Any], got: dict[str, Any], now: datetime, tz:
             == {k: v for k, v in have.items() if k != "filters"})
 
 
-def is_dangerous(case: dict[str, Any], result: Query | Clarification | None, now: datetime,
-                 tz: tzinfo) -> bool:
+def is_dangerous(case: dict[str, Any], result: Query | Clarification | Remark | None,
+                 now: datetime, tz: tzinfo) -> bool:
     """Would acting on this wrong answer hurt? (docs/wms/M8.2 §A3): a trash or
     archive with its time pointing the other way, ``max_size: 0``, or a
     destructive query where the right answer was to ask or refuse."""
     if not isinstance(result, Query):
         return False
+    if case.get("remark"):
+        # 「X 下过了」 made into a plan of anything: the inversion of M9.2 §C.2.
+        return result.intent in ("download", "trash", "move", "archive")
     filters = result.filters
     if filters.max_size == 0:
         return True
@@ -251,10 +254,18 @@ def is_dangerous(case: dict[str, Any], result: Query | Clarification | None, now
     return bool(wanted.created_after and filters.created_before and not filters.created_after)
 
 
-def verdict(case: dict[str, Any], result: Query | Clarification | None, now, tz) -> str:
+def verdict(case: dict[str, Any], result: Query | Clarification | Remark | None, now, tz) -> str:
     """``right``, ``equivalent``, ``wrong`` or ``declined``."""
     if result is None:
         return "declined"
+    if case.get("remark"):
+        # Only a remark is right: it must never become a plan (M9.2 §C.2).
+        want = case["remark"]
+        ok = (isinstance(result, Remark) and result.names == want["names"]
+              and result.downloaded == want["downloaded"])
+        return "right" if ok else "wrong"
+    if isinstance(result, Remark):
+        return "wrong"
     if case.get("reject") or case.get("clarify"):
         return "right" if isinstance(result, Clarification) else "wrong"
     if isinstance(result, Clarification):
@@ -346,8 +357,10 @@ async def evaluate(translator: Translator, cases_file: Path = DEFAULT_CASES, *,
         elif outcome == "wrong":
             item = {
                 "text": case["text"],
-                "expected": case.get("expect") or ("clarify" if case.get("clarify") else "reject"),
+                "expected": case.get("expect") or case.get("remark")
+                or ("clarify" if case.get("clarify") else "reject"),
                 "got": result.canonical() if isinstance(result, Query)
+                else {"remark": result.model_dump()} if isinstance(result, Remark)
                 else {"clarify": result.question},
             }
             report.wrong.append(item)

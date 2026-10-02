@@ -22,18 +22,18 @@ from ..core.client import Provider
 from ..core.errors import AuthError, WmsError
 from ..core.models import ActionType
 from ..i18n import set_language, t
-from ..nl.query import Clarification, Query
+from ..nl.query import Clarification, Query, Remark
 from ..rules.schema import Rule
 from ..rules.units import human_size
-from . import nl, organize, outbound, plans, protect, tidy
+from . import downloads, nl, organize, outbound, plans, protect, tidy
 from .context import Context, open_context
 from .runs import Run, Runs
 
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "AccountUnavailable", "Clarification", "EmbeddedWms", "Query", "Rule", "Run", "WmsError",
-    "run_command", "set_language",
+    "AccountUnavailable", "Clarification", "EmbeddedWms", "Query", "Remark", "Rule", "Run",
+    "WmsError", "run_command", "set_language",
 ]
 
 ProviderFactory = Callable[[], Provider]
@@ -76,6 +76,12 @@ class EmbeddedWms:
         self._scheduler = WmsScheduler(self.ctx, on_result=self.on_result)
         self.runs = Runs(self.ctx, self._scheduler.lock)
         self.interrupted = await self.runs.recover()
+        try:
+            added = await downloads.scan_once(self.ctx)
+            if added:
+                log.info("download log: %d file(s) already in the library were added", added)
+        except Exception:  # a scan that fails must not stop WMS from starting
+            log.exception("could not scan the library for the download log")
         self._scheduler.start()
         names = self.scheduled()
         log.info(
@@ -151,21 +157,82 @@ class EmbeddedWms:
             row = await plans.get(ctx, plan_id)
             deliver = None
             if any(a.type is ActionType.OUTBOUND for a in row["plan"].actions):
-                deliver = outbound.make_deliver(ctx)
+                deliver = outbound.make_deliver(ctx, plan_id=plan_id)
             return await plans.apply(ctx, plan_id, limit=limit, deliver=deliver)
 
-    async def start_apply(self, plan_id: int, *, limit: int | None = None) -> Run:
+    async def start_apply(self, plan_id: int, *, limit: int | None = None,
+                          user_id: int | None = None) -> Run:
         """Confirming a plan: start it in the background and return at once
         (docs/wms/M8.3 §G). Watch the returned :class:`Run`; stop it with
         :meth:`stop_apply`. A plan already running is refused (``plan.running``)."""
         ctx = self._live
         assert self.runs is not None
         return await self.runs.start(
-            plan_id, limit=limit,
-            make_deliver=lambda progress: outbound.make_deliver(ctx, progress=progress))
+            plan_id, limit=limit, user_id=user_id,
+            make_deliver=lambda progress: outbound.make_deliver(
+                ctx, progress=progress, plan_id=plan_id))
 
     async def stop_apply(self, plan_id: int) -> Run | None:
         return await self.runs.stop(plan_id) if self.runs is not None else None
+
+    async def set_parallel(self, limit: int, plan_id: int | None = None) -> None:
+        """How many files fetch at once (0: no limit): for one plan, now and later, or,
+        without ``plan_id``, the default for every plan (docs/wms/M9.2 §D.1)."""
+        assert self.runs is not None
+        await self.runs.set_parallel(plan_id, limit)
+
+    async def parallel_files(self, plan_id: int | None = None) -> int:
+        assert self.runs is not None
+        if plan_id is None:
+            value = await self._live.store.get_meta("outbound:parallel")
+            return int(value) if value is not None else self.config.outbound.parallel_files
+        return await self.runs.parallel_for(plan_id)
+
+    def cancel_file(self, plan_id: int, index: int) -> bool:
+        """Stop one file of a running plan; its ``.part`` is kept (M9.2 §D.5)."""
+        return self.runs.cancel_file(plan_id, index) if self.runs is not None else False
+
+    async def retry_failed(self, plan_id: int) -> int | None:
+        """A new plan of the files that failed or were cancelled in ``plan_id``; None
+        when there are none."""
+        ctx = self._live
+        row = await plans.get(ctx, plan_id)
+        result = row["result"] or {}
+        items = [*(result.get("failed") or []), *(result.get("cancelled") or [])]
+        wanted = {item["file_id"] for item in items if item.get("file_id")}
+        # A plan finished before M9.2 recorded the path only.
+        paths = {item["path"] for item in items if not item.get("file_id") and item.get("path")}
+        again = [a for a in row["plan"].actions if a.type is ActionType.OUTBOUND
+                 and (a.file_id in wanted or a.before.get("path") in paths)]
+        if not again:
+            return None
+        from ..core.models import Plan
+
+        retry = Plan(source="outbound", generated_at=row["plan"].generated_at, actions=again)
+        retry.note("outbound.retry_of", id=plan_id)
+        return await plans.save(ctx, retry)
+
+    # --------------------------------------------- the download log (M9.2)
+
+    async def downloads(self, *, today: bool = False, days: int | None = None,
+                        since: str | None = None, name: str | None = None,
+                        status: list[str] | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        ctx = self._live
+        return await ctx.store.downloads(
+            since=downloads.since_for(ctx, today=today, days=days, since=since),
+            name=name, status=status, limit=limit)
+
+    def download_line(self, row: dict[str, Any]) -> str:
+        return downloads.row_line(self._live, row)
+
+    async def mark_downloaded(self, names: list[str], *, user_id: int | None = None) -> int:
+        """「X 下过了」: remember it; returns how many files in the index it matched."""
+        return len(await downloads.mark(self._live, names, user_id=user_id))
+
+    async def remove_from_plan(self, plan_id: int, names: list[str]) -> list[str]:
+        """Take the files named out of an open plan; returns the names removed."""
+        async with self._scheduler.lock:
+            return await plans.remove_matching(self._live, plan_id, names)
 
     def run_of(self, plan_id: int) -> Run | None:
         return self.runs.get(plan_id) if self.runs is not None else None
@@ -251,9 +318,9 @@ class EmbeddedWms:
         or a local model with the name of the machine it runs on."""
         return getattr(self._nl(), "last_label", "") or t("nl.by.rules")
 
-    async def propose(self, query: Any) -> Any:
+    async def propose(self, query: Any, *, user_id: int | None = None) -> Any:
         async with self._scheduler.lock:
-            proposal = await nl.make_proposal(self._live, query)
+            proposal = await nl.make_proposal(self._live, query, user_id=user_id)
         proposal.translator = self.last_translator
         return proposal
 
@@ -303,6 +370,26 @@ class EmbeddedWms:
 
         raw = await self._live.store.get_meta(f"nl:{pid}")
         return json.loads(raw) if raw else None
+
+    async def recent_proposals(self, *, limit: int = 20) -> list[tuple[int, dict[str, Any]]]:
+        """The newest stored proposals, newest first: ``(id, record)``."""
+        import json
+
+        store = self._live.store
+        newest = int(await store.get_meta("nl_next") or 0)
+        found = []
+        for pid in range(newest, max(newest - limit, 0), -1):
+            raw = await store.get_meta(f"nl:{pid}")
+            if raw:
+                found.append((pid, json.loads(raw)))
+        return found
+
+    async def plan_open(self, plan_id: int) -> bool:
+        """The plan exists and can still be applied."""
+        try:
+            return (await plans.get(self._live, plan_id))["status"] in plans.OPEN
+        except WmsError:
+            return False
 
     async def drop_proposal(self, pid: int) -> None:
         await self._live.store.delete_meta(f"nl:{pid}")

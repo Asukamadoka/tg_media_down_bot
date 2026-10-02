@@ -38,6 +38,9 @@ select = [
 "pikpak_wms/i18n.py" = ["RUF001"]
 # Matches Chinese punctuation and numerals on purpose.
 "pikpak_wms/nl/rules_parser.py" = ["RUF001", "RUF002"]
+"pikpak_wms/nl/remarks.py" = ["RUF001", "RUF002"]
+# The model's prompt quotes the Chinese phrases it must recognise.
+"pikpak_wms/nl/translator.py" = ["RUF001"]
 "pikpak_wms/rules/names.py" = ["RUF001"]
 # Node names are full-width on purpose: the price sits between ｜ separators.
 "tgmd/traffic/pricing.py" = ["RUF001", "RUF002"]
@@ -54,6 +57,9 @@ select = [
 "tests/test_wms_m7_fixture.py" = ["RUF001"]
 "tests/test_wms_m83_bot.py" = ["RUF001"]
 "tests/test_wms_m83_nl.py" = ["RUF001"]
+"tests/test_wms_m92.py" = ["RUF001", "RUF003"]
+"tests/test_wms_m92_bot.py" = ["RUF001", "RUF003"]
+"tests/test_traffic_probe_ask.py" = ["RUF001", "RUF003"]
 # typer declares options as argument defaults; that is its API, not a bug.
 "pikpak_wms/cli/*" = ["B008"]
 # A diagnostic tool's job is to turn any failure into a "failed" line rather

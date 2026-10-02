@@ -394,3 +394,31 @@ cases:
     expect:
       intent: download
       filters: {kinds: [video], limit: 2}
+
+  # ---------------- M9.2：Saki 在 10-02 的原话（nl:3 nl:4 与计划 60） ----------------
+  - text: 下载今天保存的两个视频
+    expect:
+      intent: download
+      filters: {created_after: "{today}", kinds: [video], limit: 2}
+  - text: abcd00123 下过了
+    remark: {names: [abcd00123], downloaded: true}     # 只记下，不做计划
+  - text: 把今天保存但还未下载过的视频下载，abcd00123 下过了
+    expect:
+      intent: download
+      filters: {created_after: "{today}", kinds: [video], not_downloaded: true, exclude_names: [abcd00123]}
+  - text: 把今天保存但还未下载过的视频下载
+    expect:
+      intent: download
+      filters: {created_after: "{today}", kinds: [video], not_downloaded: true}
+  - text: 不要 abcd00123
+    remark: {names: [abcd00123], downloaded: false}
+  - text: abcd00123 已经下载了
+    remark: {names: [abcd00123], downloaded: true}
+  - text: 下载今天的视频，除了 abcd00123
+    expect:
+      intent: download
+      filters: {created_after: "{today}", kinds: [video], exclude_names: [abcd00123]}
+  - text: 下载还没下载过的视频，abc123 不用
+    expect:
+      intent: download
+      filters: {kinds: [video], not_downloaded: true, exclude_names: [abc123]}

@@ -14,6 +14,7 @@ apply time and never written to the audit.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 from collections.abc import Awaitable, Callable
@@ -25,8 +26,10 @@ from ..config import Config
 from ..core.errors import WmsError
 from ..core.models import Action, ActionType, FileNode, Plan, normalize_path
 from ..rules.actions import Deliver
+from ..rules.units import human_size
+from ..store.db import now_iso
+from . import downloads, library
 from . import fetch as ranged
-from . import library
 from .context import Context
 from .organize import now
 
@@ -61,6 +64,77 @@ def _safe_part(part: str) -> str:
 def local_target(base: Path, to: str, name: str) -> Path:
     parts = [_safe_part(p) for p in to.split("/") if p not in ("", ".", "..")]
     return base.joinpath(*parts, _safe_part(name).replace("/", "_"))
+
+
+def unique_target(target: Path) -> Path:
+    """``name (2).ext``, ``name (3).ext`` …: the first that does not exist yet.
+    Nothing a person put in the library is ever overwritten (docs/wms/M9.2 §B)."""
+    number = 2
+    while True:
+        candidate = target.with_name(f"{target.stem} ({number}){target.suffix}")
+        if not candidate.exists():
+            return candidate
+        number += 1
+
+
+def resolve_target(ctx: Context, node: FileNode, to: str, *, when: datetime | None = None
+                   ) -> tuple[Path, str]:
+    """Where ``node`` will be written (before any ``(2)`` is chosen) and how to show it."""
+    config = ctx.config.outbound
+    library_root = config.library_path
+    if library_root is not None:
+        relative, shown = library.destination(ctx.config, to, when=when)
+        base, to = library_root, relative
+    else:
+        base, shown = config.local_path, ""
+    if base is None:
+        raise WmsError("no local folder for outbound", key="outbound.no_local_dir")
+    return local_target(base, to, node.name), shown
+
+
+async def present(ctx: Context, node: FileNode, to: str, *, when: datetime | None = None
+                  ) -> tuple[str, str] | None:
+    """Would downloading ``node`` be skipped? ``("exists", path)`` when the file is
+    at its destination with the same size, ``("known", path)`` when the download log
+    has it somewhere else; None when it has to be fetched."""
+    target, _shown = resolve_target(ctx, node, to, when=when)
+    if target.exists() and target.stat().st_size == node.size:
+        return "exists", str(target)
+    if ctx.config.outbound.skip_known:
+        found, where = await downloads.known_elsewhere(ctx, node, target)
+        if found:
+            return "known", where
+    return None
+
+
+async def drop_present(ctx: Context, plan: Plan, *, when: datetime | None = None
+                       ) -> list[FileNode]:
+    """Take the downloads that would only be skipped out of ``plan`` (in place) and
+    say so in its notes, so the confirm screen shows the real work (M9.2 §B.2)."""
+    gone: list[FileNode] = []
+    keep: list[Action] = []
+    for action in plan.actions:
+        via = action.after.get("via") or ctx.config.outbound.downloader
+        if action.type is not ActionType.OUTBOUND or via != "local":
+            keep.append(action)
+            continue
+        node = await ctx.store.node(action.file_id) or FileNode.from_snapshot(action.before)
+        try:
+            found = await present(ctx, node, str(action.after.get("to") or ""), when=when)
+        except WmsError:
+            found = None  # the plan will say why when it is applied
+        if found is None:
+            keep.append(action)
+        else:
+            gone.append(node)
+    if gone:
+        plan.actions = keep
+        names = "、".join(n.name for n in gone[:3]) + ("…" if len(gone) > 3 else "")
+        plan.note("outbound.skipping", count=len(gone),
+                  size=human_size(sum(n.size for n in gone)), names=names)
+        if not keep:
+            plan.note("outbound.all_present")
+    return gone
 
 
 def annotate(config: Config, plan: Plan, *, when: datetime | None = None) -> None:
@@ -100,6 +174,8 @@ def make_deliver(
     ctx: Context, *, downloader: str | None = None, fetch: Fetch | None = None,
     rpc: Rpc | None = None, io: ranged.RangeIO | None = None,
     progress: Progress | None = None, clock: Callable[[], datetime] | None = None,
+    pool: ranged.ConnectionPool | None = None, sleep: Callable[[float], Awaitable[None]]
+    | None = None, fetch_clock: Callable[[], float] | None = None, plan_id: int | None = None,
 ) -> Deliver:
     """One deliver function for a plan. Each action may name its own
     downloader (``via``); otherwise ``downloader``, else the config's.
@@ -108,9 +184,17 @@ def make_deliver(
     (:mod:`pikpak_wms.ops.fetch`); ``fetch`` replaces that with one plain
     download function (tests, and anything that cannot do ranges). ``clock``
     says what day it is *now*: the default folder is the day the download runs.
+    Every ``local`` attempt is written to the download log (docs/wms/M9.2 §A):
+    done, skipped because it is already there, failed, or cancelled by hand.
+    ``pool`` is the connection budget shared with every other download; ``sleep`` and
+    ``fetch_clock`` (tests) stand in for the pauses and the time of its retries.
     """
     config = ctx.config.outbound
     default = downloader or config.downloader
+    pool = pool if pool is not None else ranged.POOL
+    pool.configure(config.max_total_connections)
+    # PikPak's API is asked for a few links at a time, however many files are running.
+    link_calls = asyncio.Semaphore(4)
 
     async def links(node: FileNode, to: str) -> dict[str, Any]:
         url = await ctx.client.download_url(node.file_id)
@@ -128,41 +212,56 @@ def make_deliver(
         })
         return {"downloader": "aria2", "dir": folder, "gid": str(gid)}
 
+    def track_of(node: FileNode):
+        find = getattr(progress, "track", None)
+        return find(node.file_id) if find is not None else None
+
     async def local(node: FileNode, to: str) -> dict[str, Any]:
-        library_root = config.library_path
-        if library_root is not None:
-            # A place was resolved when the plan was made; do it again, since
-            # this is the door the files go through.
-            relative, shown = library.destination(ctx.config, to, when=clock() if clock else None)
-            base, to = library_root, relative
-        else:
-            base, shown = config.local_path, ""
-        if base is None:
-            raise WmsError("no local folder for outbound", key="outbound.no_local_dir")
-        target = local_target(base, to, node.name)
-        if target.exists() and target.stat().st_size == node.size:
-            return {"downloader": "local", "path": str(target), "skipped": True,
-                    **({"library_path": shown} if shown else {})}
+        # A place was resolved when the plan was made; do it again, since this is
+        # the door the files go through.
+        target, shown = resolve_target(ctx, node, to, when=clock() if clock else None)
+        extra = {"library_path": shown} if shown else {}
+        track = track_of(node)
+        if target.exists():
+            same = target.stat().st_size == node.size
+            if same and config.verify_mode == "hash" and re.fullmatch(
+                    r"[0-9A-Fa-f]{40}", node.hash or ""):
+                same = await asyncio.to_thread(
+                    lambda: ranged.gcid(target, node.size or None) == node.hash.upper())
+            if same:
+                return {"downloader": "local", "path": str(target), "skipped": "exists", **extra}
+            target = unique_target(target)  # never overwrite what is there
+        elif config.skip_known:
+            found, where = await downloads.known_elsewhere(ctx, node, target)
+            if found:
+                return {"downloader": "local", "skipped": "known", "known_at": where, **extra}
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
         except PermissionError as exc:
-            where = library.display_path(to.split("/")[0]) if library_root else str(base)
+            where = library.display_path(
+                str(target.relative_to(config.library_path)).split("/")[0]
+            ) if config.library_path is not None and target.is_relative_to(
+                config.library_path) else str(target.parent)
             raise WmsError(f"no permission to write {where}", key="outbound.no_permission",
                            path=where) from exc
         part = target.with_name(target.name + ".part")
 
         async def url_for():
             # The web link and the origin media link, from one API call.
-            links = getattr(ctx.client, "download_links", None)
-            if links is None:
-                return await ctx.client.download_url(node.file_id)
-            web, origin = await links(node.file_id)
-            return ranged.Links(web, origin)
+            async with link_calls:
+                found = getattr(ctx.client, "download_links", None)
+                if found is None:
+                    return await ctx.client.download_url(node.file_id)
+                web, origin = await found(node.file_id)
+                return ranged.Links(web, origin)
 
         stats = ranged.FetchStats()
         note = getattr(progress, "info", None)
 
         def report(received: int, total: int) -> None:
+            if track is not None:
+                track.bytes(received, total or node.size)
+                track.info(stats.connections, stats.links)
             if progress is not None:
                 progress(node.name, received, total or node.size)
                 if note is not None:
@@ -179,9 +278,15 @@ def make_deliver(
                 raise
         else:
             # An interrupted part stays on disk: the next run carries on from it.
+            kwargs: dict[str, Any] = {}
+            if sleep is not None:
+                kwargs["sleep"] = sleep
+            if fetch_clock is not None:
+                kwargs["clock"] = fetch_clock
             written = await ranged.download(
                 url_for, io or ranged.AiohttpIO(), part, connections=config.parallel,
                 max_connections=config.max_parallel, progress=report, stats=stats,
+                pool=pool, retry_seconds=config.retry_minutes * 60, **kwargs,
             )
         if config.verify_mode != "off" and node.size and written != node.size:
             part.unlink(missing_ok=True)
@@ -191,26 +296,68 @@ def make_deliver(
         if config.verify_mode == "hash":
             _verify_hash(part, node)
         part.replace(target)
-        return {"downloader": "local", "path": str(target),
-                **({"library_path": shown} if shown else {}),
+        return {"downloader": "local", "path": str(target), **extra,
                 **({"fetch": stats.as_dict()} if fetch is None and stats.seconds else {})}
 
     modes = {"none": links, "aria2": aria2, "local": local}
     if default not in modes:
         raise WmsError(f"unknown downloader {default}", key="outbound.unknown", mode=default)
 
+    async def log(node: FileNode, status: str, started: str, *, path: str = "",
+                  reason: str = "", fetch_info: dict | None = None) -> None:
+        """One row in the download log; a failure to write it never fails the download."""
+        info = fetch_info or {}
+        try:
+            if status == "skipped_exists" and path and await ctx.store.download_exists(
+                    path, ("done", "skipped_exists")):
+                return  # a re-run over what was already logged
+            plan = plan_id if plan_id is not None else downloads.current_plan.get()
+            await ctx.store.add_download(
+                name=node.name, size=node.size, file_id=node.file_id, hash=node.hash,
+                dest_path=path, plan_id=plan, status=status, reason=reason[:300],
+                started_at=started, finished_at=now_iso(), avg_mib_s=info.get("avg_mib_s"),
+                links=info.get("links", ""), peak_connections=int(
+                    info.get("peak_connections") or 0),
+                source="plan" if plan is not None else "manual",
+                user_id=downloads.current_user.get())
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must not undo a download
+            logging.getLogger(__name__).warning("could not write the download log: %s", exc)
+
     async def deliver(node: FileNode, to: str, via: str | None = None) -> dict[str, Any]:
         mode = via or default
         if mode not in modes:
             raise WmsError(f"unknown downloader {mode}", key="outbound.unknown", mode=mode)
+        started = now_iso()
         try:
-            return await modes[mode](node, to)
-        except (WmsError, asyncio.CancelledError):
+            result = await modes[mode](node, to)
+        except asyncio.CancelledError:
+            track = track_of(node)
+            if mode == "local" and track is not None and track.cancel_requested:
+                await log(node, "cancelled", started, reason="cancelled")
+            raise
+        except WmsError as exc:
+            if mode == "local":
+                await log(node, "failed", started, reason=exc.display())
             raise
         except Exception as exc:
             # One file that cannot be fetched fails that action, not the whole plan.
+            error = f"{type(exc).__name__}: {exc}"[:120]
+            if mode == "local":
+                await log(node, "failed", started, reason=error)
             raise WmsError(f"{node.path}: {type(exc).__name__}: {exc}", key="outbound.failed",
-                           path=node.path, error=f"{type(exc).__name__}: {exc}"[:120]) from exc
+                           path=node.path, error=error) from exc
+        if mode == "local":
+            skipped = result.get("skipped")
+            if skipped == "exists":
+                await log(node, "skipped_exists", started, path=result["path"],
+                          reason="exists")
+            elif skipped == "known":
+                await log(node, "skipped_exists", started, path="",
+                          reason=result["known_at"] or "marked")
+            else:
+                await log(node, "done", started, path=result["path"],
+                          fetch_info=result.get("fetch"))
+        return result
 
     return deliver
 

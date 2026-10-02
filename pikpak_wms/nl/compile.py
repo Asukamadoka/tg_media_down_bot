@@ -20,6 +20,7 @@ from typing import Any, Literal
 from ..config import Config
 from ..core.models import FileNode, Plan, normalize_path, parse_time
 from ..ops import library
+from ..ops.downloads import node_known
 from ..rules.engine import evaluate
 from ..rules.matcher import Matcher
 from ..rules.schema import Rule
@@ -73,6 +74,8 @@ def _match(query: Query, only: list[str] | None = None) -> dict[str, Any]:
     pattern = name_pattern(query)
     if pattern:
         match["name_regex"] = pattern
+    if f.exclude_names:
+        match["name_not_regex"] = "(?i)" + "|".join(re.escape(n) for n in f.exclude_names)
     return match
 
 
@@ -199,6 +202,12 @@ def explain(query: Query, config: Config, *, now: datetime, tz: tzinfo) -> list[
         notes.append(_k("nl.explain.name_equals", text=f.name_equals))
     if f.limit:
         notes.append(_k("nl.explain.limit", n=f.limit))
+    if f.not_downloaded:
+        notes.append(_k("nl.explain.not_downloaded"))
+    if f.exclude_names:
+        notes.append(_k("nl.explain.exclude_names", text="」「".join(f.exclude_names)))
+    if query.marked:
+        notes.append(_k("nl.explain.marked", names="、".join(query.marked)))
     if f.name_contains:
         notes.append(_k("nl.explain.name_contains", text="」「".join(f.name_contains)))
     if f.name_regex:
@@ -286,6 +295,12 @@ async def propose(
                         notes=[*explain(query, config, now=now, tz=tz), *(lead_notes or [])])
     matches = await _matching(store, query, now=now, tz=tz)
     only = None
+    if query.filters.not_downloaded and query.schedule is None:
+        # What the download log knows is already on the NAS is left out; a scheduled rule
+        # has no list to fix, so it relies on the skip at download time instead.
+        ids, pairs, fragments = await store.known_downloads()
+        matches = [n for n in matches if not node_known(n, ids, pairs, fragments)]
+        only = [n.file_id for n in matches]
     if query.filters.limit is not None:
         # Newest arrivals first (that is how _matching sorts): the first N.
         matches = matches[: query.filters.limit]
