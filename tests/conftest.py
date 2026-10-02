@@ -53,6 +53,23 @@ ENV_VARS = (
     "PUBLIC_BASE_URL",
     "HTTP_URL_TTL",
     "LOG_LEVEL",
+    # M9: proxy traffic metering, budgets, the download gate
+    "MIHOMO_API",
+    "TRAFFIC_ENABLED",
+    "TRAFFIC_POLL_SECONDS",
+    "TRAFFIC_BYTES_PER_GB",
+    "TRAFFIC_DEFAULT_PRICE",
+    "TRAFFIC_DAILY_REPORT_AT",
+    "TRAFFIC_BUDGET_DAILY_CNY",
+    "TRAFFIC_BUDGET_MONTHLY_CNY",
+    "TRAFFIC_BUDGET_DAILY_PROXY_GB",
+    "TRAFFIC_SPIKE_MBPS",
+    "TRAFFIC_CONN_ALERT_MB",
+    "TRAFFIC_ON_BUDGET",
+    "TRAFFIC_DIRECT_DAILY_GB",
+    "TRAFFIC_TIMEZONE",
+    "TG_MEDIA_RATE_LIMIT_MBPS",
+    "TG_UPLOAD_RATE_LIMIT_MBPS",
     # Which message catalogue tgmd.i18n reads. POSIX LANG is deliberately not
     # one of these: images set it to C.UTF-8 for unrelated reasons.
     "TGMD_LANG",

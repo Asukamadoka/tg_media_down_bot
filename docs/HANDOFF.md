@@ -1876,3 +1876,94 @@ docker compose exec bot ls -la /library/资源/整理                 # 容器�
 
 - 挂载改成 `/volume3/资源库/资源:/library/资源` 和 `/volume3/资源库/Telegram:/library/Telegram`（`LIBRARY_DIR=/library` 不变；原来的 `/media` 挂载仍保留）。上文第 1 条的 `/volume3/资源库:/library` 以这里为准。
 - bot 容器要加 `group_add: ["10"]`（NAS 的 admin 组），因为 `资源/整理` 是 `drwxrwx--- 1000:10`，容器用户 10001 不在这个组里就写不进去；不需要改属主。
+
+## Stage 3 · M9: proxy traffic meter, `/traffic`, budgets, download gate and rate limits
+
+Spec: `docs/wms/M9-traffic-monitor-and-control.md` (baseline `b4e8ee6`). Dispatch brief: `docs/briefs/2026-10-02-m9-dispatch.md`. Sections A–D are implemented; F's tests are in `tests/test_traffic.py` and `tests/test_traffic_gate.py`.
+
+### What was done
+
+**A · Meter** (`tgmd/traffic/`, new package)
+
+- `service.py` polls `GET {MIHOMO_API}/connections` every `TRAFFIC_POLL_SECONDS` (plain `urllib` in a worker thread, no new dependency). `meter.py` keeps the last `(upload, download)` per connection id and adds the difference. A connection that already existed at the first snapshot only sets the baseline; one that appears later counts in full. A global-counter difference that the connections do not explain is stored as category `unattributed` (outbound `unknown`, not priced). A counter that goes backwards means the proxy restarted: rebaseline, one warning, every live connection counts from zero.
+- `classify.py`: outbound (`direct` / `proxy`), node, group, category (first match wins: `telegram`, `pikpak`, `model`, `lan`, `proxy-sub`, `other`) and the route-leak flag.
+- `pricing.py`: `(\d+(\.\d+)?)\s*元\s*/\s*G` after NFKC (so full-width digits, `．` and `／` work). A node without a price uses `TRAFFIC_DEFAULT_PRICE`; direct traffic costs 0.
+- `store.py`: `traffic_hour` and `traffic_host_day` in `traffic.sqlite3` (own file, WAL). Flush every 60 s and on shutdown; retention 400 days (hours) and 90 days (hosts); a host is kept for a day only above 1 MB. Days and months are Asia/Shanghai (`TRAFFIC_TIMEZONE`).
+- If mihomo is unreachable: one warning per outage, back-off up to 60 s, nothing raised into the bot. If the meter cannot even start (say, an unwritable data dir) the bot still starts, `/traffic` answers "not running", and the gate and limits still work.
+
+**B · Report**
+
+- `/traffic` (admins only, in the menu as `流量`): today by default; buttons `今天 本周 本月`, `暂停下载`/`恢复下载`, `限速`. Layout as in the spec, plus the top 5 proxied hosts (with node) and, when there are any, "other" hosts over 100 MB through the proxy ("consider a rule").
+- The daily summary goes to every admin at `TRAFFIC_DAILY_REPORT_AT` (default `09:00`, set-but-empty = off), covering yesterday. It is marked sent *before* it is sent, so it can arrive at most once; it is skipped when yesterday had no proxied bytes and no alert.
+- CLI for Cowork, run inside the container: `python -m tgmd.traffic report --period today|7d|month [--json]`. It reads `traffic.sqlite3` directly (works with the bot stopped) and prints the same numbers.
+
+**C · Budgets and alerts** (all proxied traffic only)
+
+- Budgets: `TRAFFIC_BUDGET_DAILY_CNY`, `TRAFFIC_BUDGET_MONTHLY_CNY`, `TRAFFIC_BUDGET_DAILY_PROXY_GB`; alert at 80 % and 100 % once per period. The totals are kept in memory and updated on every poll, so a budget can trip within one poll, not one flush.
+- Spike (`TRAFFIC_SPIKE_MBPS`, a 60 s average above it for 5 consecutive minutes, once per episode) and single connection (`TRAFFIC_CONN_ALERT_MB`, once per connection); both name host, category and node.
+- Route leak: a `pikpak` or `lan` connection, or one to the Mac model host `10.10.10.1:11434`, whose outbound is `proxy`; once per host per day. An Ollama pull through the proxy is *not* a leak (it is expected and billed; see open decision 2).
+- Which alerts were already sent is stored in the bot database, so a restart does not repeat them.
+
+**D · Gate and rate limits** (`tgmd/traffic/gate.py`)
+
+- States `open`, `paused` (manual) and `over_budget` (automatic). With `TRAFFIC_ON_BUDGET=pause` (default) the 100 % alert also closes the gate; `warn` only alerts. `over_budget` clears by itself when the period rolls over or the budget is raised (on the next evaluation). `恢复下载` reopens the gate by hand and is not undone by the *same* budget in the same period.
+- Who waits: Telegram **downloads** (before each file, and before every part in `parallel.download_parts`; the single-connection fallback and `Downloader.stream` check in their per-chunk hook) and Telegram **uploads** (before each send in `delivery.to_telegram`, and the cache-chat upload; per part through Telethon's progress callback). They wait, they do not fail or drop, and the status line shows `已暂停（流量闸门）`. A gated job can still be cancelled.
+- Never gated: commands and replies, PikPak API calls, WMS planning, the PikPak → NAS outbound download. The last one is held back only by the optional `TRAFFIC_DIRECT_DAILY_GB` (direct bytes today, LAN and model traffic excluded), through a small hook `pikpak_wms.ops.fetch.throttle` that the bot sets at startup.
+- Rate limit: two token buckets (downloads shared by every worker and part; uploads separate). `TG_MEDIA_RATE_LIMIT_MBPS` / `TG_UPLOAD_RATE_LIMIT_MBPS`, and `/traffic` → `限速` offers `不限 2 5 10 20` for each. The runtime value is stored in the bot database (`kv` key `traffic:state`, together with paused, forced and the sent alerts) and wins over the environment until it is changed.
+- The bot only **reads** mihomo (`/connections`, `/proxies/<group>` for the "current exit" line). Nothing in the code can change a group, config or provider.
+
+### Environment variables (all optional; the old compose starts unchanged)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MIHOMO_API` | `http://127.0.0.1:9090` | mihomo controller (read only) |
+| `TRAFFIC_ENABLED` | `true` | `false` stops the polling; gate and limits still work |
+| `TRAFFIC_POLL_SECONDS` | `5` | |
+| `TRAFFIC_BYTES_PER_GB` | `1073741824` | bytes in a billed GB; also the "GB" of the volume budget and the direct cap |
+| `TRAFFIC_DEFAULT_PRICE` | `0.10` | CNY/GB for a node without a price in its name |
+| `TRAFFIC_BUDGET_DAILY_CNY` / `_MONTHLY_CNY` / `_DAILY_PROXY_GB` | off | proxied traffic only |
+| `TRAFFIC_ON_BUDGET` | `pause` | `pause` or `warn` |
+| `TRAFFIC_SPIKE_MBPS` | `0` (off) | |
+| `TRAFFIC_CONN_ALERT_MB` | `500` | |
+| `TRAFFIC_DAILY_REPORT_AT` | `09:00` | empty = off |
+| `TRAFFIC_DIRECT_DAILY_GB` | off | holds the PikPak → NAS download |
+| `TG_MEDIA_RATE_LIMIT_MBPS` / `TG_UPLOAD_RATE_LIMIT_MBPS` | `0` | megabytes (MiB) per second; 0 = unlimited |
+| `TRAFFIC_TIMEZONE` | `Asia/Shanghai` | day and month boundaries |
+
+### Deploy steps (for Cowork)
+
+1. Pull the image, restart `bot` only. Nothing else changes; no compose edit is needed because `bot` shares `proxy`'s network namespace and `127.0.0.1:9090` is mihomo.
+2. Add to the bot's env (suggested, from the spec): `TRAFFIC_BUDGET_DAILY_CNY=2`, `TRAFFIC_BUDGET_MONTHLY_CNY=30`, `TRAFFIC_CONN_ALERT_MB=500`.
+3. After 10 minutes: `/traffic` in Telegram, and `docker compose exec bot python -m tgmd.traffic report --period today`. The two must show the same numbers. Look at the "current exit" line and at the node names it prints (see my question 3).
+4. Database: no change to `tgmd.sqlite3` except one new `kv` row, `traffic:state`. The meter's own file is `traffic.sqlite3` next to it and can simply be deleted to start over.
+5. Rollback: previous image (`b4e8ee6`). Nothing to undo; the extra `kv` row and `traffic.sqlite3` are ignored by the old version.
+
+### The two open decisions for Saki (from the spec §G)
+
+1. Should Telegram prefer `TG-TOKYO` (0.01–0.02 元/G) over `TG-OTHER` (0.07–0.09 元/G)? That cuts Telegram cost by 4–9×; latency is higher. It is a mihomo config edit by Cowork; the bot does not do it.
+2. Should Ollama pulls on the NAS go DIRECT or be blocked? The NAS model service is normally stopped; the Mac is the model host. Until decided, a pull through the proxy shows up as `model` / `proxy` in the report and is billed.
+
+### Verification evidence
+
+- Tests: 1487 → 1591 (+104), Python 3.12, `ruff check .` clean. (3.11 is not installed here; CI runs both.)
+- `test_traffic.py`: prices (the names in the spec, no price, full-width), one classifier case per category (including a `dl-a10b-123.mypikpak.com` DIRECT case and `pikpak` through the proxy as a leak), delta accounting (growth, disappearing, reappearing under a new id, counter reset, unattributed remainder), hour and Shanghai day/month boundaries and retention, 80 %/100 % alerts once each, `pause` vs `warn`, raise-the-budget and rollover clearing the gate, restart persistence, spike / single-connection / leak alerts, the daily summary once, the report text for today / week / month, and the meter surviving a real HTTP server going away and coming back.
+- `test_traffic_gate.py`: token bucket average rate within 10 % (virtual time with mixed request sizes, and real time over four concurrent workers); a gated `download_parts` waits and resumes bit for bit; a gate that closes mid-file stops the next parts; the acceptance case "a forced small budget pauses a Telegram download, `恢复下载` lets it finish intact"; a gated download can still be cancelled; gated uploads; the PikPak outbound download unaffected by a budget pause and held only by the direct cap; buttons, `/traffic`, the CLI.
+- Mutation checks: removing the per-part gate call fails 2 tests; making the budget never close the gate fails 6.
+- Not done here (needs the NAS): real mihomo output, a real Telegram download being paused and resumed, the rate limit on a large real file, and the daily summary at 09:00.
+
+### Deviations from the spec and my own open questions
+
+1. **No `AGENTS.md` or `CLAUDE.md` exists in the repo.** I read `CC_BRIEF.md` (the file the dispatch names) for the red lines instead.
+2. **Database location.** The spec says `data/db/traffic.sqlite3`; the code puts it at `<DATA_DIR>/traffic.sqlite3`, next to `tgmd.sqlite3`. If the deployment sets `DATA_DIR=/data/db` these are the same file. Please confirm.
+3. **`chains` order.** The spec says the node is the *last* element of `chains` and the group the first. In mihomo's own JSON I believe it is the other way round. So the node is the element whose name carries a price (either end), and only a name without any price falls back to the spec's rule. Please look at one real `/connections` sample and tell me if the fallback should flip.
+4. **`traffic_host_day` has an extra `node` column** (and it is part of the key), so the top-host list can show the node. The spec's column list did not have it.
+5. **"本周" is the last 7 days including today** (the heading says 近 7 天), so the button and `--period 7d` show the same numbers. It is not the calendar week.
+6. **Defaults.** The meter is on by default and `MIHOMO_API` defaults to `127.0.0.1:9090`, so the NAS needs no new env to start metering. Anywhere else (dev, Render) it logs one warning per outage and backs off to 60 s. `TRAFFIC_ENABLED=false` turns it off.
+7. **MB/s is MiB/s** for the rate limits.
+8. **Waiting inside a transfer.** The single-connection Telethon fallback and `Downloader.stream` wait for the gate inside their per-chunk hook. A long pause there can outlast a connection or, for `PIKPAK_STREAM`, PikPak's own request timeout; the transfer then fails normally and the job reports it. The parallel route waits between parts and does not have this problem. Not tested against the real services.
+9. **Server-side forwards are not gated**: a forward through the bot's `Forwarder` moves no bytes through this machine, so there is nothing to meter or limit.
+10. **A budget pause is not undone by the same budget.** After `恢复下载` against `daily_cny:2026-10-02`, that budget does not close the gate again that day; another budget, or the same one the next day, still does.
+11. **The route-leak rule** treats a `model` connection as a leak only when it is the Mac host (`10.10.10.1:11434`), because an Ollama pull through the proxy is expected. Say if Ollama through the proxy should also alert.
+12. **The direct cap** counts direct bytes that are neither LAN nor model (that is, internet bandwidth on the NAS), not only PikPak.
+13. **Process-wide hook.** `pikpak_wms.ops.fetch.throttle` is a module global set by the bot. It is a small, explicit seam; if you prefer it passed through `Context`, that is a separate change.
+14. **Existing test changed:** `tests/test_tasks.py`'s `FakeDownloader.download` now accepts `on_gated=None`, because the job queue passes it. No test was removed.

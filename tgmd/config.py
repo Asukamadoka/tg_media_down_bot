@@ -132,6 +132,11 @@ class DownloadConfig:
         return self.data_dir / "tgmd.sqlite3"
 
     @property
+    def traffic_db_path(self) -> Path:
+        """The traffic meter's own database, next to the main one."""
+        return self.data_dir / "traffic.sqlite3"
+
+    @property
     def media_root(self) -> Path:
         return self.media_dir if self.media_dir is not None else self.dir
 
@@ -227,6 +232,37 @@ class WmsSettings:
     with a confirm button, ``apply`` shelves them at once, ``off`` does nothing."""
 
 
+TRAFFIC_ON_BUDGET_CHOICES = ("pause", "warn")
+
+
+@dataclass
+class TrafficConfig:
+    """Proxy traffic metering, budgets and the download gate (docs/wms/M9)."""
+
+    enabled: bool = True
+    """TRAFFIC_ENABLED: poll mihomo. Unreachable mihomo is a warning, never an error."""
+    mihomo_api: str = "http://127.0.0.1:9090"
+    """MIHOMO_API: the controller, which the bot only reads."""
+    poll_seconds: float = 5.0
+    bytes_per_gb: int = 1073741824
+    default_price: float = 0.10
+    """CNY per GB for a node whose name carries no price."""
+    daily_report_at: str = "09:00"
+    """Local time of the summary of yesterday; empty is off."""
+    budget_daily_cny: float = 0.0
+    budget_monthly_cny: float = 0.0
+    budget_daily_proxy_gb: float = 0.0
+    """0 is off, for each of the three budgets."""
+    spike_mbps: float = 0.0
+    conn_alert_mb: float = 500.0
+    on_budget: str = "pause"
+    direct_daily_gb: float = 0.0
+    media_rate_mbps: float = 0.0
+    upload_rate_mbps: float = 0.0
+    """TG_MEDIA_RATE_LIMIT_MBPS / TG_UPLOAD_RATE_LIMIT_MBPS, megabytes per second."""
+    timezone: str = "Asia/Shanghai"
+
+
 @dataclass
 class Config:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
@@ -236,6 +272,7 @@ class Config:
     pikpak: PikPakConfig = field(default_factory=PikPakConfig)
     http: HttpConfig = field(default_factory=HttpConfig)
     wms: WmsSettings = field(default_factory=WmsSettings)
+    traffic: TrafficConfig = field(default_factory=TrafficConfig)
     log_level: str = "INFO"
     language: str = i18n.DEFAULT_LANGUAGE
     """Which catalogue :func:`tgmd.i18n.t` reads. Never affects stored values."""
@@ -286,6 +323,12 @@ class Config:
             raise ConfigError(
                 f"delivery.default_mode must be one of {', '.join(MODES)}, "
                 f"got {self.delivery.default_mode!r}"
+            )
+
+        if self.traffic.on_budget not in TRAFFIC_ON_BUDGET_CHOICES:
+            raise ConfigError(
+                "TRAFFIC_ON_BUDGET must be one of "
+                f"{', '.join(TRAFFIC_ON_BUDGET_CHOICES)}, got {self.traffic.on_budget!r}"
             )
 
         if self.download.concurrent < 1:
@@ -635,6 +678,57 @@ def load_config(path: Path | None = None) -> Config:
         ).strip().lower(),
     )
 
+    traffic = TrafficConfig(
+        enabled=parse_bool(
+            os.environ.get("TRAFFIC_ENABLED"),
+            parse_bool(_get(data, "traffic", "enabled", default=True), True),
+        ),
+        mihomo_api=_env_str(
+            "MIHOMO_API", str(_get(data, "traffic", "mihomo_api", default="http://127.0.0.1:9090"))
+        ).rstrip("/"),
+        poll_seconds=max(1.0, _env_float(
+            "TRAFFIC_POLL_SECONDS", float(_get(data, "traffic", "poll_seconds", default=5.0)))),
+        bytes_per_gb=_env_int(
+            "TRAFFIC_BYTES_PER_GB",
+            int(_get(data, "traffic", "bytes_per_gb", default=1073741824))),
+        default_price=_env_float(
+            "TRAFFIC_DEFAULT_PRICE", float(_get(data, "traffic", "default_price", default=0.10))),
+        # Set but empty means "off", which _env_str would read as "unset".
+        daily_report_at=(
+            os.environ["TRAFFIC_DAILY_REPORT_AT"].strip()
+            if "TRAFFIC_DAILY_REPORT_AT" in os.environ
+            else str(_get(data, "traffic", "daily_report_at", default="09:00"))
+        ),
+        budget_daily_cny=_env_float(
+            "TRAFFIC_BUDGET_DAILY_CNY",
+            float(_get(data, "traffic", "budget_daily_cny", default=0.0) or 0.0)),
+        budget_monthly_cny=_env_float(
+            "TRAFFIC_BUDGET_MONTHLY_CNY",
+            float(_get(data, "traffic", "budget_monthly_cny", default=0.0) or 0.0)),
+        budget_daily_proxy_gb=_env_float(
+            "TRAFFIC_BUDGET_DAILY_PROXY_GB",
+            float(_get(data, "traffic", "budget_daily_proxy_gb", default=0.0) or 0.0)),
+        spike_mbps=_env_float(
+            "TRAFFIC_SPIKE_MBPS", float(_get(data, "traffic", "spike_mbps", default=0.0))),
+        conn_alert_mb=_env_float(
+            "TRAFFIC_CONN_ALERT_MB",
+            float(_get(data, "traffic", "conn_alert_mb", default=500.0))),
+        on_budget=_env_str(
+            "TRAFFIC_ON_BUDGET", str(_get(data, "traffic", "on_budget", default="pause"))
+        ).strip().lower(),
+        direct_daily_gb=_env_float(
+            "TRAFFIC_DIRECT_DAILY_GB",
+            float(_get(data, "traffic", "direct_daily_gb", default=0.0) or 0.0)),
+        media_rate_mbps=_env_float(
+            "TG_MEDIA_RATE_LIMIT_MBPS",
+            float(_get(data, "traffic", "media_rate_mbps", default=0.0) or 0.0)),
+        upload_rate_mbps=_env_float(
+            "TG_UPLOAD_RATE_LIMIT_MBPS",
+            float(_get(data, "traffic", "upload_rate_mbps", default=0.0) or 0.0)),
+        timezone=_env_str(
+            "TRAFFIC_TIMEZONE", str(_get(data, "traffic", "timezone", default="Asia/Shanghai"))),
+    )
+
     return Config(
         telegram=telegram,
         access=access,
@@ -643,6 +737,7 @@ def load_config(path: Path | None = None) -> Config:
         pikpak=pikpak,
         http=http,
         wms=wms,
+        traffic=traffic,
         log_level=_env_str("LOG_LEVEL", str(_get(data, "log_level", default="INFO"))).upper(),
         # POSIX LANG is deliberately not consulted: images set it to C.UTF-8
         # for unrelated reasons, and that is not a UI decision.
