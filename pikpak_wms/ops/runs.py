@@ -63,10 +63,24 @@ class Run:
     """Stopped because the process is going away: left marked ``running`` so that
     the next start reports it as interrupted."""
     _samples: deque = field(default_factory=lambda: deque(maxlen=64))
+    conns: int = 0
+    """Connections open for the file being fetched, and the links they use."""
+    links: str = ""
+    file_started: float = field(default_factory=time.monotonic)
+
+    def note_info(self, conns: int, links: str) -> None:
+        self.conns, self.links = conns, links
+
+    @property
+    def average(self) -> float:
+        """Bytes per second of the file so far, from its first byte."""
+        span = time.monotonic() - self.file_started
+        return self.received / span if span > 0 else 0.0
 
     def note_bytes(self, name: str, received: int, size: int) -> None:
         if name != self.file:
             self.file, self._samples = name, deque(maxlen=64)
+            self.file_started, self.conns, self.links = time.monotonic(), 0, ""
         self.received, self.size = received, size
         self._samples.append((time.monotonic(), received))
 
@@ -162,6 +176,7 @@ class Runs:
             if on_bytes is not None:
                 on_bytes(name, received, size)
 
+        seen.info = run.note_info  # type: ignore[attr-defined]
         has_outbound = any(a.type is ActionType.OUTBOUND for a in row["plan"].actions)
         if deliver is None and has_outbound and make_deliver is not None:
             deliver = make_deliver(seen)

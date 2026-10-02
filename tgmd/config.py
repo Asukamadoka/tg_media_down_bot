@@ -261,6 +261,24 @@ class TrafficConfig:
     upload_rate_mbps: float = 0.0
     """TG_MEDIA_RATE_LIMIT_MBPS / TG_UPLOAD_RATE_LIMIT_MBPS, megabytes per second."""
     timezone: str = "Asia/Shanghai"
+    # --- M9.1: node selection and direct-first routing (docs/wms/M9.1)
+    probe_hours: float = 6.0
+    """PROXY_PROBE_HOURS: how often every node's speed is measured; 0 is off."""
+    probe_url: str = "https://speed.cloudflare.com/__down?bytes=8000000"
+    probe_up_url: str = "https://speed.cloudflare.com/__up"
+    probe_listener: str = "http://127.0.0.1:7899"
+    """The mixed listener ``probe``, whose rule sends it to the ``PROBE`` group."""
+    probe_max_price: float = 0.09
+    probe_max_mb: float = 150.0
+    switch_min_minutes: float = 30.0
+    direct_candidate_mb: float = 50.0
+    direct_probe_hosts: tuple[str, ...] = (
+        "registry.ollama.ai", "ollama.com", "r2.cloudflarestorage.com", "github.com",
+        "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org",
+    )
+    direct_test_urls: dict[str, str] = field(default_factory=dict)
+    direct_auto_apply: bool = False
+    direct_rules_file: str = "/mihomo-rules/direct-auto.txt"
 
 
 @dataclass
@@ -727,6 +745,25 @@ def load_config(path: Path | None = None) -> Config:
             float(_get(data, "traffic", "upload_rate_mbps", default=0.0) or 0.0)),
         timezone=_env_str(
             "TRAFFIC_TIMEZONE", str(_get(data, "traffic", "timezone", default="Asia/Shanghai"))),
+        probe_hours=_env_float("PROXY_PROBE_HOURS", 6.0),
+        probe_url=_env_str("PROXY_PROBE_URL", TrafficConfig.probe_url),
+        probe_up_url=_env_str("PROXY_PROBE_UP_URL", TrafficConfig.probe_up_url),
+        probe_listener=_env_str("PROXY_PROBE_LISTENER", TrafficConfig.probe_listener),
+        probe_max_price=_env_float("PROXY_PROBE_MAX_PRICE", 0.09),
+        probe_max_mb=_env_float("PROXY_PROBE_MAX_MB", 150.0),
+        switch_min_minutes=_env_float("PROXY_SWITCH_MIN_MINUTES", 30.0),
+        direct_candidate_mb=_env_float("DIRECT_CANDIDATE_MB", 50.0),
+        direct_probe_hosts=tuple(
+            host.strip().lower() for host in _env_str(
+                "DIRECT_PROBE_HOSTS", ",".join(TrafficConfig.direct_probe_hosts)).split(",")
+            if host.strip()),
+        direct_test_urls={
+            host.strip().lower(): url.strip()
+            for host, _, url in (
+                pair.partition("=") for pair in _env_str("DIRECT_TEST_URLS", "").split(","))
+            if host.strip() and url.strip()},
+        direct_auto_apply=parse_bool(os.environ.get("DIRECT_AUTO_APPLY"), False),
+        direct_rules_file=_env_str("DIRECT_RULES_FILE", TrafficConfig.direct_rules_file),
     )
 
     return Config(

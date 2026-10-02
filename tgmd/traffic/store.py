@@ -42,6 +42,29 @@ CREATE TABLE IF NOT EXISTS traffic_host_day (
 );
 """
 
+NODE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS proxy_node (
+    name       TEXT PRIMARY KEY,
+    latency_ms INTEGER,
+    down_mbps  REAL,
+    up_mbps    REAL,
+    price      REAL,
+    alive      INTEGER NOT NULL DEFAULT 0,
+    tested_at  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS direct_host (
+    host        TEXT PRIMARY KEY,
+    state       TEXT NOT NULL,
+    reason      TEXT NOT NULL DEFAULT '',
+    direct_ms   INTEGER,
+    proxy_ms    INTEGER,
+    direct_mbps REAL,
+    proxy_mbps  REAL,
+    tested_at   REAL NOT NULL,
+    changed_at  REAL NOT NULL
+);
+"""
+
 HourKey = tuple[int, str, str, str]
 """``(hour_utc, category, outbound, node)``."""
 HostKey = tuple[str, str, str, str, str]
@@ -125,6 +148,7 @@ class TrafficStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(SCHEMA)
+        conn.executescript(NODE_SCHEMA)
         conn.commit()
         self._conn = conn
 
@@ -179,6 +203,77 @@ class TrafficStore:
             self._db.execute("DELETE FROM traffic_hour WHERE hour_utc < ?", (hours,))
             self._db.execute("DELETE FROM traffic_host_day WHERE day_local < ?", (days,))
             self._db.commit()
+
+    # ------------------------------------------------- nodes and direct hosts
+
+    def save_node(self, name: str, *, latency_ms, down_mbps, up_mbps, price, alive: bool,
+                  tested_at: float) -> None:
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO proxy_node (name, latency_ms, down_mbps, up_mbps, price, alive,
+                                        tested_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET latency_ms = excluded.latency_ms,
+                    down_mbps = excluded.down_mbps, up_mbps = excluded.up_mbps,
+                    price = excluded.price, alive = excluded.alive,
+                    tested_at = excluded.tested_at
+                """,
+                (name, latency_ms, down_mbps, up_mbps, price, int(alive), tested_at))
+            self._db.commit()
+
+    def nodes(self) -> list[dict]:
+        with self._lock:
+            cursor = self._db.execute(
+                "SELECT name, latency_ms, down_mbps, up_mbps, price, alive, tested_at "
+                "FROM proxy_node")
+            keys = [c[0] for c in cursor.description]
+            return [dict(zip(keys, row, strict=True)) for row in cursor.fetchall()]
+
+    def last_probe(self) -> float:
+        with self._lock:
+            row = self._db.execute("SELECT MAX(tested_at) FROM proxy_node").fetchone()
+        return float(row[0] or 0.0)
+
+    def save_direct(self, host: str, *, state: str, reason: str = "", direct_ms=None,
+                    proxy_ms=None, direct_mbps=None, proxy_mbps=None, now: float) -> None:
+        """Record a host's direct-route state; ``changed_at`` moves only when the state does."""
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO direct_host (host, state, reason, direct_ms, proxy_ms,
+                                         direct_mbps, proxy_mbps, tested_at, changed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(host) DO UPDATE SET
+                    changed_at = CASE WHEN state = excluded.state THEN changed_at
+                                      ELSE excluded.changed_at END,
+                    state = excluded.state, reason = excluded.reason,
+                    direct_ms = excluded.direct_ms, proxy_ms = excluded.proxy_ms,
+                    direct_mbps = excluded.direct_mbps, proxy_mbps = excluded.proxy_mbps,
+                    tested_at = excluded.tested_at
+                """,
+                (host, state, reason, direct_ms, proxy_ms, direct_mbps, proxy_mbps, now, now))
+            self._db.commit()
+
+    def direct_hosts(self) -> list[dict]:
+        with self._lock:
+            cursor = self._db.execute(
+                "SELECT host, state, reason, direct_ms, proxy_ms, direct_mbps, proxy_mbps, "
+                "tested_at, changed_at FROM direct_host ORDER BY host")
+            keys = [c[0] for c in cursor.description]
+            return [dict(zip(keys, row, strict=True)) for row in cursor.fetchall()]
+
+    def proxied_hosts(self, period: Period, *, minimum: int) -> list[tuple[str, int]]:
+        """Hosts that moved more than ``minimum`` bytes through the proxy."""
+        first, last = period.days
+        with self._lock:
+            return self._db.execute(
+                """
+                SELECT host, SUM(bytes) AS total FROM traffic_host_day
+                WHERE day_local >= ? AND day_local <= ? AND outbound = 'proxy'
+                GROUP BY host HAVING total > ? ORDER BY total DESC
+                """,
+                (first, last, minimum)).fetchall()
 
     # ------------------------------------------------------------------- read
 

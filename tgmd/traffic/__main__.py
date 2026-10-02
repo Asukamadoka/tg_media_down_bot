@@ -16,9 +16,8 @@ from zoneinfo import ZoneInfo
 from .. import i18n
 from ..config import ConfigError, load_config
 from .gate import STATE_KEY
-from .mihomo import MihomoClient
+from .mihomo import TG_GROUP, MihomoClient
 from .report import Budgets, build_report, render
-from .service import TG_GROUP
 from .store import TrafficStore
 
 

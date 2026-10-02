@@ -186,7 +186,8 @@ CATALOG: dict[str, dict[str, str]] = {
                           'PikPak\n'
                           '/cache — use a channel as the upload cache\n'
                           "/verify — check the bot's identity and configuration\n"
-                          '/traffic — proxy traffic, budgets, download gate and rate limits'
+                          '/traffic — proxy traffic, budgets, download gate and rate limits\n'
+                          '/proxy — proxy nodes, speed tests and direct routing'
                       ),
         'help.unclaimed': (
                               '<b>This bot has no admin yet</b>\n'
@@ -562,6 +563,8 @@ CATALOG: dict[str, dict[str, str]] = {
         'wms.run.started': 'Started.',
         'wms.run.progress': '⏳ Plan {id} running: {done}/{total} done',
         'wms.run.file': 'Now {name} {percent}% ({done} of {size}) · {rate} · about {eta} left',
+        'wms.run.fetch': 'average {avg} MB/s · {conns} connections · source {links}',
+        'wms.run.fetch_line': '⬇ {name}: average {avg} MB/s · {conns} connections · source {links}',
         'wms.run.stopped': (
             '⏹ Plan {id} stopped at {done}/{total}. What was done stays; '
             'a half-fetched file carries on next time.'
@@ -1145,6 +1148,65 @@ CATALOG: dict[str, dict[str, str]] = {
         "traffic.ack.resumed": "Downloads resumed",
         "traffic.ack.rate": "Rate limit set",
         "traffic.failed": "Could not build the traffic report: {error}",
+        # ---- node selection and direct-first routing (M9.1)
+        "menu.proxy": "Proxy nodes, speed tests, direct routing",
+        "traffic.cat.probe": "speed tests",
+        "nodes.switched": "Fast node switched: {old} → {new} ({mbps} Mbps).",
+        "nodes.health.bad": (
+            "The proxy subscription may have failed (out of balance or expired): {alive}/{total} "
+            "nodes alive. Renew it, or send the new subscription to Cowork."
+        ),
+        "nodes.health.recovered": "The proxy subscription is back: {alive}/{total} nodes alive.",
+        "nodes.busy": "A Telegram upload is finishing; try again in a moment.",
+        "proxy.title": "Proxy nodes",
+        "proxy.group.proxy": "Browsing (PROXY)",
+        "proxy.group.tg": "Downloads / Telegram (TG-PICK)",
+        "proxy.short.proxy": "Browse",
+        "proxy.short.tg": "Down",
+        "proxy.group.line": "{group}: {mode} → {node}",
+        "proxy.mode.auto-latency": "auto · lowest latency",
+        "proxy.mode.auto-speed": "auto · fastest",
+        "proxy.mode.manual": "manual",
+        "proxy.latency": "{ms} ms",
+        "proxy.speed": "↓{down} / ↑{up} Mbps",
+        "proxy.never": "never",
+        "proxy.unreachable": "Cannot read mihomo: {error}",
+        "proxy.alive": "Subscription: {alive}/{total} nodes alive",
+        "proxy.last_probe": "Last speed test: {when}",
+        "proxy.probe_error": "Last speed test failed: {error}",
+        "proxy.probing": "⏳ Testing every node; this takes a few minutes…",
+        "proxy.probing_short": "A speed test is already running",
+        "proxy.probe_done": "Tested {nodes} node(s), about {mb} MB used.",
+        "proxy.btn.lat": "lowest latency",
+        "proxy.btn.spd": "fastest",
+        "proxy.btn.manual": "pick…",
+        "proxy.btn.probe": "Test speed now",
+        "proxy.btn.direct": "Direct check",
+        "proxy.btn.set_direct": "Go direct",
+        "proxy.btn.keep_proxy": "Keep proxy",
+        "proxy.btn.restore": "Back to proxy",
+        "proxy.pick.title": "Pick a node for {group}",
+        "proxy.pick.none": "No alive nodes.",
+        "proxy.pick.stale": "That list is out of date; here it is again.",
+        "proxy.ack.mode": "Mode set",
+        "proxy.ack.manual": "Node set; no automatic re-picks for this group",
+        "proxy.ack.probe": "Speed test done",
+        "proxy.failed": "That did not work: {error}",
+        "direct.title": "Direct-first check",
+        "direct.none": "Nothing to show yet.",
+        "direct.latency": "direct {direct} ms, proxy {proxy} ms",
+        "direct.state.candidate": "works direct",
+        "direct.state.failed": "needs the proxy",
+        "direct.state.applied": "routed direct",
+        "direct.state.broken": "direct is failing",
+        "direct.state.kept": "kept on the proxy",
+        "direct.testing": "⏳ Testing direct routes…",
+        "direct.ack.set": "Now routed direct",
+        "direct.ack.keep": "Kept on the proxy",
+        "direct.auto_applied": "Now routed direct: <code>{host}</code>.",
+        "direct.broken": (
+            "⚠️ Direct is failing for <code>{host}</code> ({reason}). Put it back on the proxy?"
+        ),
     },
     "zh": {
         'help.body': (
@@ -1182,7 +1244,8 @@ CATALOG: dict[str, dict[str, str]] = {
                           '/setup — 在这里完成配置：登录读取账号或 PikPak\n'
                           '/cache — 指定一个频道作为上传缓存\n'
                           '/verify — 检查机器人的身份和配置\n'
-                          '/traffic — 代理流量、预算、下载闸门和限速'
+                          '/traffic — 代理流量、预算、下载闸门和限速\n'
+                          '/proxy — 节点选择、测速和直连检测'
                       ),
         'help.unclaimed': (
                               '<b>这个机器人还没有管理员</b>\n'
@@ -1530,6 +1593,8 @@ CATALOG: dict[str, dict[str, str]] = {
         'wms.run.started': '开始执行',
         'wms.run.progress': '⏳ 计划 {id} 执行中：已完成 {done}/{total}',
         'wms.run.file': '当前 {name} {percent}%（{done} / {size}）· {rate} · 预计剩余 {eta}',
+        'wms.run.fetch': '平均 {avg} MB/s · 连接 {conns} · 源 {links}',
+        'wms.run.fetch_line': '⬇ {name}：平均 {avg} MB/s · 连接 {conns} · 源 {links}',
         'wms.run.stopped': (
             '⏹ 计划 {id} 已停止于 {done}/{total}。做完的保留，下载到一半的文件下次接着下。'
         ),
@@ -2044,5 +2109,62 @@ CATALOG: dict[str, dict[str, str]] = {
         "traffic.ack.resumed": "已恢复下载",
         "traffic.ack.rate": "已设置限速",
         "traffic.failed": "生成流量报告失败：{error}",
+        # ---- 节点选择与直连优先 (M9.1)
+        "menu.proxy": "节点：选择、测速、直连检测",
+        "traffic.cat.probe": "测速",
+        "nodes.switched": "极速节点已切换：{old} → {new}（{mbps} Mbps）。",
+        "nodes.health.bad": (
+            "代理订阅可能失效（余额不足或已过期）：存活 {alive}/{total} 个节点。"
+            "请续费或把新订阅发给 Cowork 更换。"
+        ),
+        "nodes.health.recovered": "代理订阅已恢复：存活 {alive}/{total} 个节点。",
+        "nodes.busy": "有 Telegram 上传正在收尾，请稍后再试。",
+        "proxy.title": "节点",
+        "proxy.group.proxy": "访问（PROXY）",
+        "proxy.group.tg": "下载/Telegram（TG-PICK）",
+        "proxy.short.proxy": "访问",
+        "proxy.short.tg": "下载",
+        "proxy.group.line": "{group}：{mode} → {node}",
+        "proxy.mode.auto-latency": "自动·延迟最低",
+        "proxy.mode.auto-speed": "自动·速度最快",
+        "proxy.mode.manual": "手动",
+        "proxy.latency": "延迟 {ms} ms",
+        "proxy.speed": "速度 ↓{down} / ↑{up} Mbps",
+        "proxy.never": "还没有",
+        "proxy.unreachable": "读不到 mihomo：{error}",
+        "proxy.alive": "订阅：存活 {alive}/{total} 个节点",
+        "proxy.last_probe": "上次测速：{when}",
+        "proxy.probe_error": "上次测速失败：{error}",
+        "proxy.probing": "⏳ 正在逐个测速，需要几分钟…",
+        "proxy.probing_short": "测速已经在进行了",
+        "proxy.probe_done": "测了 {nodes} 个节点，约用了 {mb} MB。",
+        "proxy.btn.lat": "延迟最低",
+        "proxy.btn.spd": "速度最快",
+        "proxy.btn.manual": "手动选择…",
+        "proxy.btn.probe": "立即测速",
+        "proxy.btn.direct": "直连检测",
+        "proxy.btn.set_direct": "设为直连",
+        "proxy.btn.keep_proxy": "保持代理",
+        "proxy.btn.restore": "恢复代理",
+        "proxy.pick.title": "为 {group} 选择节点",
+        "proxy.pick.none": "没有存活的节点。",
+        "proxy.pick.stale": "这个列表已经过期，重新列出。",
+        "proxy.ack.mode": "已切换模式",
+        "proxy.ack.manual": "已选定节点，这一组不再自动换",
+        "proxy.ack.probe": "测速完成",
+        "proxy.failed": "没成功：{error}",
+        "direct.title": "直连检测",
+        "direct.none": "暂时没有结果。",
+        "direct.latency": "直连 {direct} ms，代理 {proxy} ms",
+        "direct.state.candidate": "可以直连",
+        "direct.state.failed": "需要走代理",
+        "direct.state.applied": "已走直连",
+        "direct.state.broken": "直连出问题了",
+        "direct.state.kept": "保持代理",
+        "direct.testing": "⏳ 正在检测直连…",
+        "direct.ack.set": "已改为直连",
+        "direct.ack.keep": "已保持代理",
+        "direct.auto_applied": "已改为直连：<code>{host}</code>。",
+        "direct.broken": "⚠️ <code>{host}</code> 的直连出问题了（{reason}），要恢复走代理吗？",
     },
 }

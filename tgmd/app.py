@@ -32,6 +32,9 @@ from .resolver import Resolver
 from .setup import USER_SESSION_KEY, SetupWizard, stored_user_session
 from .tasks import JobQueue
 from .traffic import TrafficControl, TrafficService
+from .traffic.direct import DirectRouting
+from .traffic.nodes import NodeManager
+from .traffic.probe import Prober, UrllibNet
 from .traffic.store import TrafficStore
 from .utils import escape_html
 from .webserver import FileServer
@@ -251,11 +254,32 @@ class Application:
             return
         self.traffic = service
         self.handlers.attach_traffic(service)
+        if not self.config.traffic.enabled:
+            return
+        # Node selection and direct routing share the meter's mihomo client and store.
+        settings = self.config.traffic
+        net = UrllibNet(settings.probe_listener)
+        store = service._store  # noqa: SLF001 - one store, shared on purpose
+        nodes = NodeManager(settings, service.client, store, self.db, self.control,
+                            Prober(settings, service.client, net, store),
+                            notify=self._notify_admins)
+        direct = DirectRouting(settings, service.client, net, store, self.db,
+                               notify=self._notify_admins)
+        try:
+            await nodes.load()
+            await direct.load()
+            await nodes.apply_saved()
+            await direct.sync_at_start()
+        except Exception:
+            log.exception("could not restore node and direct-routing state at start")
+        service.add_extra(nodes)
+        service.add_extra(direct)
+        self.handlers.attach_nodes(nodes, direct)
 
-    async def _notify_admins(self, text: str) -> None:
+    async def _notify_admins(self, text: str, buttons=None) -> None:
         for admin in self.config.access.admin_user_ids:
             try:
-                await self._send_html(admin, text)
+                await self._send_html(admin, text, buttons)
             except Exception:  # noqa: BLE001 - an admin who never opened the chat cannot be messaged
                 log.warning("could not send a traffic message to admin %s", admin)
 

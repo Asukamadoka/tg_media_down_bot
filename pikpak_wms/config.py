@@ -159,7 +159,7 @@ class OutboundConfig(BaseModel):
     """Where a download goes when no place is named, under the library. ``{Y}``,
     ``{M}``, ``{D}`` are the year, month and day the download runs, unpadded."""
     connections: int | None = None
-    """Parallel HTTP Range connections per file; None means ``OUTBOUND_CONNECTIONS`` (8)."""
+    """Parallel HTTP Range connections per file; None means ``OUTBOUND_CONNECTIONS`` (12)."""
     verify: Literal["off", "size", "hash"] | None = None
     """What to check once a file is complete; None means ``OUTBOUND_VERIFY`` (size)."""
 
@@ -188,9 +188,19 @@ class OutboundConfig(BaseModel):
         if self.connections is not None:
             return max(self.connections, 1)
         try:
-            return max(int(os.environ.get("OUTBOUND_CONNECTIONS", "") or 8), 1)
+            return max(int(os.environ.get("OUTBOUND_CONNECTIONS", "") or 12), 1)
         except ValueError:
-            return 8
+            return 12
+
+    @property
+    def max_parallel(self) -> int:
+        """Where the connection count may ramp up to (``OUTBOUND_MAX_CONNECTIONS``,
+        16 by default, never more than 32 or fewer than the starting count)."""
+        try:
+            wanted = int(os.environ.get("OUTBOUND_MAX_CONNECTIONS", "") or 16)
+        except ValueError:
+            wanted = 16
+        return min(max(wanted, self.parallel), 32)
 
     @property
     def verify_mode(self) -> str:

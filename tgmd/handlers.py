@@ -18,6 +18,7 @@ from .links import LinkBundle, extract_links
 from .pikpak import PikPakError, PikPakService
 from .portal import PikPakLoginPortal
 from .tasks import Job, JobKind, JobQueue, QueueFull
+from .traffic import proxy_ui
 from .traffic import ui as traffic_ui
 from .utils import escape_html, human_size, parse_id_list, truncate
 from .verify import run_live_checks
@@ -72,6 +73,8 @@ class BotHandlers:
         self._wms = None
         self._wms_panel = None
         self._traffic = None
+        self._nodes = None
+        self._direct = None
         # chat id -> (when, whether a bot admin runs it); see CHANNEL_CHECK_TTL.
         self._channel_checks: dict[int, tuple[float, bool]] = {}
         self._me = None
@@ -88,6 +91,11 @@ class BotHandlers:
     def attach_traffic(self, service) -> None:
         """Give the handlers the traffic service (tgmd.traffic), before registering."""
         self._traffic = service
+
+    def attach_nodes(self, nodes, direct) -> None:
+        """Give the handlers the node manager and direct routing (tgmd.traffic)."""
+        self._nodes = nodes
+        self._direct = direct
 
     def attach_wizard(self, wizard) -> None:
         """Give the handlers the setup wizard, before registering."""
@@ -115,6 +123,8 @@ class BotHandlers:
         add(self.on_do, events.NewMessage(pattern=r"^/do\b"))
         add(self.on_traffic, events.NewMessage(pattern=r"^/traffic\b"))
         add(self.handle_traffic_button, events.CallbackQuery(pattern=rb"^traffic:"))
+        add(self.on_proxy, events.NewMessage(pattern=r"^/proxy\b"))
+        add(self.handle_proxy_button, events.CallbackQuery(pattern=rb"^proxy:"))
         add(self.handle_wms_button, events.CallbackQuery(pattern=rb"^wms:"))
         add(self.on_message, events.NewMessage(incoming=True))
 
@@ -651,6 +661,29 @@ class BotHandlers:
                               parse_mode="html")
             return
         await event.reply(text, parse_mode="html", buttons=buttons, link_preview=False)
+
+    async def on_proxy(self, event) -> None:
+        """Node groups, speed tests and direct routing. Admins only."""
+        if not await self._authorized(event):
+            return
+        if not self._config.access.is_admin(event.sender_id):
+            await event.reply(t("traffic.only_admin"))
+            return
+        if self._nodes is None:
+            await event.reply(t("traffic.off"))
+            return
+        text, buttons = await proxy_ui.show(self._nodes)
+        await event.reply(text, parse_mode="html", buttons=buttons, link_preview=False)
+
+    async def handle_proxy_button(self, event) -> None:
+        user_id = event.sender_id
+        if user_id is None or not self._config.access.is_admin(user_id):
+            await event.answer(t("traffic.only_admin"), alert=True)
+            return
+        if self._nodes is None:
+            await event.answer(t("traffic.off"), alert=True)
+            return
+        await proxy_ui.handle_button(event, self._nodes, self._direct)
 
     async def handle_traffic_button(self, event) -> None:
         user_id = event.sender_id

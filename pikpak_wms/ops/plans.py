@@ -146,6 +146,8 @@ class ApplyReport:
     outputs: list[str] = field(default_factory=list)
     """Lines to show once and never store: direct links, share links."""
     audit_ids: list[int] = field(default_factory=list)
+    fetches: list[dict[str, Any]] = field(default_factory=list)
+    """How each downloaded file went: ``path``, ``avg_mib_s``, ``links``, ``peak_connections``."""
 
     def summary(self) -> str:
         return t(
@@ -164,6 +166,7 @@ class ApplyReport:
             "failed": list(self.failed),
             "stopped": self.stopped,
             "audit_ids": list(self.audit_ids),
+            "fetches": list(self.fetches),
         }
 
 
@@ -264,6 +267,8 @@ async def execute(
         for item, extra in zip(batch, extras, strict=True):
             extra = dict(extra)
             output = extra.pop("_output", None)
+            if isinstance(extra.get("fetch"), dict):
+                report.fetches.append({"path": item.before.get("path"), **extra["fetch"]})
             if output:
                 report.outputs.append(str(output))
             if extra.get("share_url"):

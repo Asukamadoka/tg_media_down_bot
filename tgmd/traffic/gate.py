@@ -24,6 +24,7 @@ log = logging.getLogger(__name__)
 
 STATE_KEY = "traffic:state"
 MB = 1024 * 1024
+UPLOAD_FINAL_BYTES = 2 * MB
 
 Notice = Callable[[], Awaitable[None] | None]
 
@@ -87,6 +88,7 @@ class TrafficControl:
         """A budget the operator reopened the gate against; not reasserted."""
         self._rate_override: dict[str, float | None] = {"media": None, "upload": None}
         self.alerts: dict[str, str] = {}
+        self._uploads: dict[object, bool] = {}
         self.last_report_day = ""
         self.alert_days: dict[str, int] = {}
         self._open = asyncio.Event()
@@ -252,6 +254,20 @@ class TrafficControl:
         """Spend ``amount`` bytes of ``media`` (downloads) or ``upload`` allowance."""
         await (self.media if kind == "media" else self.upload).take(amount)
 
+    # ------------------------------------------------------ uploads in flight
+
+    def note_upload(self, token: object, sent: int, total: int) -> None:
+        """An upload's progress; its last part is where the exit must not change."""
+        self._uploads[token] = total - sent <= UPLOAD_FINAL_BYTES
+
+    def end_upload(self, token: object) -> None:
+        self._uploads.pop(token, None)
+
+    @property
+    def upload_final(self) -> bool:
+        """True while any Telegram upload is in its final part."""
+        return any(self._uploads.values())
+
     # ----------------------------------------------------------------- alerts
 
     async def claim_alert(self, key: str, day: str) -> bool:
@@ -285,6 +301,14 @@ class NullControl:
 
     async def pace(self, kind, amount) -> None:
         return None
+
+    def note_upload(self, token, sent, total) -> None:
+        return None
+
+    def end_upload(self, token) -> None:
+        return None
+
+    upload_final = False
 
     async def before_direct(self, amount=0) -> None:
         return None

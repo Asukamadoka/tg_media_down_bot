@@ -115,14 +115,18 @@ class Delivery:
             return
         try:
             await self._control.before_file("upload")
-            message = await self._bot.send_file(
-                cache_chat_id,
-                str(path),
-                caption=key,
-                attributes=self._attributes(info),
-                force_document=not (info.is_video or info.is_photo or info.is_audio),
-                progress_callback=self._wrap_progress(None),
-            )
+            wrapped = self._wrap_progress(None)
+            try:
+                message = await self._bot.send_file(
+                    cache_chat_id,
+                    str(path),
+                    caption=key,
+                    attributes=self._attributes(info),
+                    force_document=not (info.is_video or info.is_photo or info.is_audio),
+                    progress_callback=wrapped,
+                )
+            finally:
+                self._control.end_upload(wrapped.token)
             await self._db.cache_store(
                 key, cache_chat_id, message.id, info.file_name, info.size
             )
@@ -178,6 +182,7 @@ class Delivery:
             )
 
         await self._control.before_file("upload", notice=on_gated)
+        wrapped = self._wrap_progress(progress)
         try:
             await self._bot.send_file(
                 chat_id,
@@ -186,12 +191,14 @@ class Delivery:
                 parse_mode="html",
                 attributes=self._attributes(info),
                 force_document=not (info.is_video or info.is_photo or info.is_audio),
-                progress_callback=self._wrap_progress(progress),
+                progress_callback=wrapped,
             )
         except FloodWaitError as exc:
             raise DeliveryError(key="err.delivery.flood", seconds=exc.seconds) from exc
         except Exception as exc:
             raise DeliveryError(key="err.delivery.upload_failed", error=exc) from exc
+        finally:
+            self._control.end_upload(wrapped.token)
 
         if cache_key:
             await self._store_in_cache(cache_key, path, info)
@@ -382,18 +389,21 @@ class Delivery:
         """Telethon calls this after each uploaded part: where the upload waits
         for the traffic gate and spends the upload rate limit."""
         seen = 0
+        token = object()
 
         async def callback(sent: int, total: int) -> None:
             nonlocal seen
             await self._control.before_part("upload")
             await self._control.pace("upload", max(0, sent - seen))
             seen = sent
+            self._control.note_upload(token, sent, total)
             if progress is None:
                 return
             result = progress(sent, total)
             if asyncio.iscoroutine(result):
                 await result
 
+        callback.token = token  # type: ignore[attr-defined]
         return callback
 
 

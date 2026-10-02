@@ -169,16 +169,30 @@ class WmsClient:
         return info if isinstance(info, dict) and info.get("id") else None
 
     async def download_url(self, file_id: str) -> str:
+        return (await self.download_links(file_id))[0]
+
+    async def download_links(self, file_id: str) -> tuple[str, str | None]:
+        """``(web link, origin media link)`` from one ``get_download_url`` call.
+
+        The web link is ``web_content_link`` (the first media link when there is
+        none); the origin link is the ``medias`` entry with ``is_origin`` set, or
+        None. Only links the API returned are ever used (docs/wms/M9.1 §C.1).
+        """
         info = await self._call("get_download_url", file_id)
-        link = info.get("web_content_link")
-        if not link:
-            for media in info.get("medias") or []:
-                link = ((media or {}).get("link") or {}).get("url")
-                if link:
-                    break
-        if not link:
+        origin = None
+        first = None
+        for media in info.get("medias") or []:
+            url = ((media or {}).get("link") or {}).get("url")
+            if not url:
+                continue
+            first = first or str(url)
+            if (media or {}).get("is_origin") and origin is None:
+                origin = str(url)
+        web = info.get("web_content_link") or first
+        if not web:
             raise WmsError(f"PikPak gave no download link for {file_id}")
-        return str(link)
+        web = str(web)
+        return web, (origin if origin and origin != web else None)
 
     # -------------------------------------------------------------- writing
 
