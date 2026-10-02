@@ -428,6 +428,9 @@ class WmsInBot:
                 done=human_size(run.received), size=human_size(run.size),
                 rate=human_rate(run.speed), eta=human_duration(run.eta),
             ))
+            if run.conns:
+                lines.append(t("wms.run.fetch", avg=f"{run.average / (1024 * 1024):.1f}",
+                               conns=run.conns, links=run.links or "web"))
         return "\n".join(lines)
 
     def stop_buttons(self, plan_id: int) -> Any:
@@ -450,6 +453,11 @@ class WmsInBot:
         lines += [t("wms.run.failure_line", path=escape_html(str(item.get("path") or "?")),
                     error=escape_html(str(item.get("error") or "")))
                   for item in report.failed[:3]]
+        lines += [t("wms.run.fetch_line", name=escape_html(truncate(
+            str(item.get("path") or "?").rsplit("/", 1)[-1], 40)),
+            avg=f"{float(item.get('avg_mib_s') or 0):.1f}",
+            conns=item.get("peak_connections", 0), links=item.get("links", "web"))
+            for item in getattr(report, "fetches", [])[:3]]
         if report.stopped:
             lines.append(escape_html(report.stopped))
         if report.remaining:

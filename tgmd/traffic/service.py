@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from ..i18n import t
 from .gate import TrafficControl
 from .meter import Delta, Meter, Step
-from .mihomo import MihomoClient
+from .mihomo import TG_GROUP, MihomoClient
 from .pricing import short_node
 from .report import MB, Budgets, Report, build_report, fmt_bytes, fmt_cny, render
 from .store import (
@@ -35,7 +35,6 @@ log = logging.getLogger(__name__)
 FLUSH_SECONDS = 60.0
 SPIKE_WINDOW = 60.0
 SPIKE_SUSTAIN = 300.0
-TG_GROUP = "TG"
 
 Notify = Callable[[str], Awaitable[None]]
 
@@ -97,6 +96,16 @@ class TrafficService:
         self._last_prune = ""
         self._task: asyncio.Task | None = None
         self.reachable: bool | None = None
+        self._extras: list = []
+        """Objects with ``async tick()`` (and optionally ``async stop()``) that share this loop:
+        node selection and direct routing (docs/wms/M9.1)."""
+
+    @property
+    def client(self) -> MihomoClient:
+        return self._client
+
+    def add_extra(self, extra) -> None:
+        self._extras.append(extra)
 
     # -------------------------------------------------------------- lifecycle
 
@@ -115,6 +124,9 @@ class TrafficService:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
+        for extra in self._extras:
+            if hasattr(extra, "stop"):
+                await extra.stop()
         try:
             await self.flush()
         finally:
@@ -257,6 +269,11 @@ class TrafficService:
         if now.timestamp() - self._last_flush >= FLUSH_SECONDS:
             await self.flush()
         await self.maybe_report(now)
+        for extra in self._extras:
+            try:
+                await extra.tick()
+            except Exception:
+                log.exception("traffic helper %s failed", type(extra).__name__)
 
     # -------------------------------------------------------- budgets and gate
 

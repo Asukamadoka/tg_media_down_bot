@@ -151,18 +151,29 @@ def make_deliver(
                            path=where) from exc
         part = target.with_name(target.name + ".part")
 
-        async def url_for() -> str:
-            return await ctx.client.download_url(node.file_id)
+        async def url_for():
+            # The web link and the origin media link, from one API call.
+            links = getattr(ctx.client, "download_links", None)
+            if links is None:
+                return await ctx.client.download_url(node.file_id)
+            web, origin = await links(node.file_id)
+            return ranged.Links(web, origin)
+
+        stats = ranged.FetchStats()
+        note = getattr(progress, "info", None)
 
         def report(received: int, total: int) -> None:
             if progress is not None:
                 progress(node.name, received, total or node.size)
+                if note is not None:
+                    note(stats.connections, stats.links)
 
         if progress is not None:
             progress(node.name, 0, node.size)
         if fetch is not None:
             try:
-                written = await fetch(await url_for(), part)
+                got = await url_for()
+                written = await fetch(getattr(got, "web", got), part)
             except Exception:
                 part.unlink(missing_ok=True)
                 raise
@@ -170,7 +181,7 @@ def make_deliver(
             # An interrupted part stays on disk: the next run carries on from it.
             written = await ranged.download(
                 url_for, io or ranged.AiohttpIO(), part, connections=config.parallel,
-                progress=report,
+                max_connections=config.max_parallel, progress=report, stats=stats,
             )
         if config.verify_mode != "off" and node.size and written != node.size:
             part.unlink(missing_ok=True)
@@ -181,7 +192,8 @@ def make_deliver(
             _verify_hash(part, node)
         part.replace(target)
         return {"downloader": "local", "path": str(target),
-                **({"library_path": shown} if shown else {})}
+                **({"library_path": shown} if shown else {}),
+                **({"fetch": stats.as_dict()} if fetch is None and stats.seconds else {})}
 
     modes = {"none": links, "aria2": aria2, "local": local}
     if default not in modes:

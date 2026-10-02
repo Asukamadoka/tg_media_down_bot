@@ -252,6 +252,49 @@ def list_path(path: str = typer.Argument("/", help="a path in the drive")) -> No
     console.print(table)
 
 
+@app.command(name="bench-fetch")
+def bench_fetch(
+    path: str = typer.Argument(..., help="a file in the drive"),
+    seconds: float = typer.Option(10.0, "--seconds", help="how long to read per run"),
+    connections: str = typer.Option("1,4,8,16", "--connections", help="comma-separated counts"),
+) -> None:
+    """Measure download speed of a PikPak file per link and connection count.
+
+    Reads for a few seconds and discards the bytes. Prints hosts, never URLs."""
+    from urllib.parse import urlsplit
+
+    from ..ops import fetch as ranged
+
+    counts = [int(c) for c in connections.split(",") if c.strip()]
+
+    async def work(ctx: Context) -> list[tuple[str, str, int, float]]:
+        node = await ctx.store.node_at(path)
+        if node is None or node.is_folder:
+            raise WmsError(f"{path}: not a file in the index")
+        web, origin = await ctx.client.download_links(node.file_id)
+        io = ranged.AiohttpIO()
+        rows = []
+        for label, url in (("web", web), ("origin", origin)):
+            if not url:
+                continue
+            total = await io.probe(url)
+            if not total:
+                continue
+            for count in counts:
+                rows.append((label, urlsplit(url).hostname or "?", count,
+                             await ranged.bench(io, url, total, connections=count,
+                                                seconds=seconds)))
+        return rows
+
+    rows = _run(work)
+    table = Table(show_header=True)
+    for column in ("link", "host", "connections", "MiB/s"):
+        table.add_column(column)
+    for label, host, count, speed in rows:
+        table.add_row(label, host, str(count), f"{speed:.2f}")
+    console.print(table)
+
+
 @app.command()
 def quota() -> None:
     """Show storage used and available."""

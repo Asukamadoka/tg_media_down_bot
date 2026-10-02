@@ -1967,3 +1967,144 @@ Spec: `docs/wms/M9-traffic-monitor-and-control.md` (baseline `b4e8ee6`). Dispatc
 12. **The direct cap** counts direct bytes that are neither LAN nor model (that is, internet bandwidth on the NAS), not only PikPak.
 13. **Process-wide hook.** `pikpak_wms.ops.fetch.throttle` is a module global set by the bot. It is a small, explicit seam; if you prefer it passed through `Context`, that is a separate change.
 14. **Existing test changed:** `tests/test_tasks.py`'s `FakeDownloader.download` now accepts `on_gated=None`, because the job queue passes it. No test was removed.
+
+## Stage 3 · M9.1: node selection, direct-first routing, two-link adaptive PikPak fetch
+
+Spec: `docs/wms/M9.1-nodes-direct-first-pikpak-speed.md` (baseline `82c6ee1`). Sections A–D are implemented. **This replaces M9 §D.4**: the bot may now write to mihomo, but only through a strict whitelist.
+
+### What was done
+
+**A · Node selection** (`tgmd/traffic/{mihomo,probe,nodes,proxy_ui}.py`)
+
+- **Write whitelist** (`MihomoClient._write`, checked *before* any request is made; everything else raises `ForbiddenWrite`):
+  `PUT /proxies/{FAST|TG-PICK|PROXY|PROBE}`, `DELETE /connections/<id>`, `PUT /providers/rules/direct-auto`. Reads are `GET` only (`/connections`, `/proxies/<name>`, `/proxies/<node>/delay`, `/providers/proxies/main`). There is no code path for `PUT /configs`, a restart, or any other group or provider. Tests send every call to a real local HTTP server and assert nothing else reaches it.
+- **Probe** (`probe.py`): every `PROXY_PROBE_HOURS` (default 6; the first one 5 minutes after start when there is no earlier result; 0 turns the schedule off) and on demand. Per node, one after another: `PUT /proxies/PROBE`, latency by `GET …/delay`, an 8 MB download (≤ 10 s) and a 2 MB upload through the `probe` listener (`PROXY_PROBE_LISTENER`). Skips notice entries (the same filter as the `PROXY` group), nodes priced above `PROXY_PROBE_MAX_PRICE` (0.09), dead nodes. Cheapest nodes go first and a run stops adding nodes before it would pass `PROXY_PROBE_MAX_MB` (150). `PROBE` is always put back on `DIRECT`. Results (`latency_ms`, `down_mbps`, `up_mbps`, `price`, `alive`, `tested_at`) are in `traffic.sqlite3`, table `proxy_node`. Speeds are megabits per second.
+- **Probe traffic is metered**: a connection whose `metadata.inboundName` is `probe` is category `probe` (`/traffic` shows it as 测速), ahead of every other category.
+- **Picking**: best download speed; among nodes within 15 % of it, the cheapest. In auto-speed the bot points `FAST` at it, but only if the current `FAST` node is dead or the new one is at least 25 % faster, and at most once per `PROXY_SWITCH_MIN_MINUTES` (30; manual switches are not limited). `FAST` is only updated while some group is in auto-speed.
+- **`/proxy`** (admins, menu label `节点`): the two groups (访问 = `PROXY`, 下载/Telegram = `TG-PICK`) with mode, node, latency, speed and price; the provider's alive count; the last probe time. Per group: `自动·延迟最低`, `自动·速度最快`, `手动选择…` (pages of alive nodes, fastest first, with latency and speed). `立即测速` runs a probe and reports in the same message. Defaults when nothing was chosen: `PROXY` = auto-latency (`AUTO-LATENCY`), `TG-PICK` = auto-speed (`FAST`). A manual pick stops auto re-picks for that group; modes and picks are in the bot DB (`kv` key `traffic:nodes`) and re-applied to mihomo at start (only groups the owner chose).
+- **Telegram exit safety**: after changing `TG-PICK`, or `FAST` while `TG-PICK` is on `FAST`, every live connection whose chain includes `TG` is closed (`DELETE /connections/<id>`), so Telethon reconnects through one exit. Nothing is switched while a Telegram upload is in its last 2 MiB (`TrafficControl.upload_final`): an automatic switch waits for the next probe, a manual one answers "有 Telegram 上传正在收尾，请稍后再试。".
+- **Subscription health** (alert only): the provider endpoint failing with 5xx or listing no real nodes, or ≥ 80 % of the real nodes dead for 10 minutes → one alert (the exact text from the spec, with `存活 N/M`); one recovery note. Persisted, so a restart does not repeat it. mihomo itself being unreachable says nothing about the subscription.
+
+**B · Direct-first routing** (`tgmd/traffic/direct.py`)
+
+- Candidates: hosts that moved more than `DIRECT_CANDIDATE_MB` (50) through the proxy in the last 24 h (from `traffic_host_day`), plus `DIRECT_PROBE_HOSTS`. Never Telegram domains/CIDRs, `bujidao`, LAN or IP addresses (`validate_host`; also enforced when writing the file and by `apply`).
+- Test: through the probe listener twice (`PROBE=DIRECT`, then `PROBE=<AUTO-LATENCY's current node>`): TCP + TLS with a verified certificate + `HEAD`; 2xx–4xx is reachable. Throughput only when `DIRECT_TEST_URLS` has a URL for the host. Direct works when TLS is valid, nothing reset or timed out, latency ≤ 3× the proxy's and, when measured, throughput ≥ 70 % of the proxy's or 2 MiB/s.
+- Apply: the bot writes `DIRECT_RULES_FILE` (default `/mihomo-rules/direct-auto.txt`; one `+.host` per line, so subdomains match) with a temp file and `os.replace`, then calls `PUT /providers/rules/direct-auto`. The file is rewritten from the stored state at start.
+- `/proxy` → `直连检测` runs the tests and lists them with `设为直连` / `保持代理` (and `恢复代理` for hosts already direct). `DIRECT_AUTO_APPLY=true` (default false) routes hosts that pass without asking and notes it. Applied hosts are re-tested weekly; if direct breaks, the owner gets one alert with a `恢复代理` button. Discovery runs once a day (only does anything with `DIRECT_AUTO_APPLY`).
+
+**C · Faster PikPak → NAS** (`pikpak_wms/ops/fetch.py`, `core/client.py`, `ops/outbound.py`)
+
+- One `get_download_url` call now yields the web link and the `is_origin` media link (`WmsClient.download_links`; `download_url` still returns the web link). Only the URLs the API returned are used, and never modified.
+- The origin link is used only if it reports the same total size and the same SHA-256 of the first 256 KiB as the web link; otherwise the reason is kept (`FetchStats.origin_note`) and the web link carries everything.
+- Starts with `OUTBOUND_CONNECTIONS` (default **12**), adds 4 while the aggregate speed rose by more than 15 % over the last 20 s, up to `OUTBOUND_MAX_CONNECTIONS` (default 16, hard cap 32), drops 4 on HTTP 429/503 or repeated resets. A file is cut into ranges of about 64 MiB (more ranges than connections), so after 20 s the ranges not yet started are handed to the faster link (weights = measured per-connection speed). A 403/410 asks for **both** links again and re-checks the origin.
+- Per file the plan result (audit `after`) gets `fetch: {avg_mib_s, links, peak_connections, hosts}`; `ApplyReport.fetches` carries them to the final summary; the progress message shows `平均 X MB/s · 连接 N · 源 web+origin`.
+- `wms bench-fetch <path> [--seconds 10] [--connections 1,4,8,16]` reads each link for a few seconds per connection count, discards the bytes and prints host (never URL), connections and MiB/s. It looks the file up in the local index.
+- Unchanged: `.part` / `.part.state` resume (the state format is the same), the M9 direct-cap hook, the library layout, `OUTBOUND_VERIFY`.
+
+### Environment variables (all optional)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PROXY_PROBE_HOURS` | `6` | speed test of every node; `0` = only on demand |
+| `PROXY_PROBE_URL` / `PROXY_PROBE_UP_URL` | Cloudflare `__down?bytes=8000000` / `__up` | |
+| `PROXY_PROBE_LISTENER` | `http://127.0.0.1:7899` | the `probe` mixed listener |
+| `PROXY_PROBE_MAX_PRICE` | `0.09` | skip nodes dearer than this (CNY/GB) |
+| `PROXY_PROBE_MAX_MB` | `150` | cap on the bytes of one run |
+| `PROXY_SWITCH_MIN_MINUTES` | `30` | minimum gap between automatic switches |
+| `DIRECT_CANDIDATE_MB` | `50` | |
+| `DIRECT_PROBE_HOSTS` | the seven in the spec | comma list |
+| `DIRECT_TEST_URLS` | empty | `host=url,host=url` for throughput tests |
+| `DIRECT_AUTO_APPLY` | `false` | |
+| `DIRECT_RULES_FILE` | `/mihomo-rules/direct-auto.txt` | |
+| `OUTBOUND_CONNECTIONS` | **12** (was 8) | starting connections per file |
+| `OUTBOUND_MAX_CONNECTIONS` | `16` | ramp ceiling, max 32 |
+
+### The mihomo config for Cowork
+
+The bot relies only on these names. Edit `./mihomo/config.yaml` in the proxy container (backup first), `main` being the existing provider. `<FILTER>` is the `exclude-filter` the `PROXY` group already has: `'充值|分割线|群 |官网|失联|0[.]10元'`.
+
+```yaml
+listeners:
+  - name: probe            # the bot's speed and direct tests; metered as category "probe"
+    type: mixed
+    listen: 127.0.0.1
+    port: 7899
+
+proxy-groups:
+  - name: AUTO-LATENCY     # lowest latency
+    type: url-test
+    use: [main]
+    exclude-filter: '<FILTER>'
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+  - name: FAST             # the bot points this at the fastest node (PUT /proxies/FAST)
+    type: select
+    use: [main]
+    exclude-filter: '<FILTER>'
+  - name: PROXY            # general access; default AUTO-LATENCY (first entry)
+    type: select
+    proxies: [AUTO-LATENCY, FAST]
+    use: [main]
+    exclude-filter: '<FILTER>'
+  - name: TG-PICK          # Telegram's first choice; default FAST; set by the bot
+    type: select
+    proxies: [FAST, AUTO-LATENCY]
+    use: [main]
+    exclude-filter: '<FILTER>'
+  - name: TG               # keeps Telegram up if the picked node dies
+    type: fallback
+    proxies: [TG-PICK, AUTO-LATENCY]
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+  - name: PROBE            # reachable only through the probe listener
+    type: select
+    proxies: [DIRECT]
+    use: [main]
+    exclude-filter: '<FILTER>'
+
+rule-providers:
+  direct-auto:
+    type: file
+    behavior: domain
+    format: text
+    path: ./rules/direct-auto.txt     # = ./mihomo/rules/direct-auto.txt on the host
+
+rules:
+  - IN-NAME,probe,PROBE               # 1. first of all
+  # ... the existing LAN rules (DIRECT) ...
+  - RULE-SET,direct-auto,DIRECT       # 2. after the LAN rules, before Telegram
+  # ... the existing Telegram rules (-> TG), PikPak DIRECT, bujidao.cc DIRECT ...
+  - MATCH,PROXY                       # last, as today
+```
+
+Notes: remove the old `TG` group's members if it still lists `TG-OTHER`/`TG-TOKYO` (the spec's `TG` replaces it). `AUTO-LATENCY` must exist before `PROXY` lists it. mihomo only accepts a rule-provider `path` inside its home directory, so `./mihomo/rules` must be the same directory the proxy container sees as `<home>/rules`.
+
+### Deploy steps (Cowork)
+
+1. `mkdir ./mihomo/rules`, owned by 10001 and readable by root; create an empty `direct-auto.txt` in it.
+2. Add to `bot`: volume `./mihomo/rules:/mihomo-rules`. (`MIHOMO_API` is already right.)
+3. Apply the config block above in the proxy container, reload (`PUT /configs?force=true`), then restart `bot` only. Until the groups exist, `/proxy` shows what it can, a probe fails with a note ("PROBE… 404") and nothing else is affected.
+4. `/proxy` → `立即测速`; check that one run costs under 150 MB and shows as 测速 in `/traffic`. Try each mode and a manual pick and watch `/connections` (Telegram must stay up after a switch). `/proxy` → `直连检测`; `设为直连` on `registry.ollama.ai` and check a new connection to it is `DIRECT`.
+5. A large PikPak → NAS download: first with `OUTBOUND_VERIFY=hash` (the gcid check) to prove the output is identical; compare the average with the M8.3 single-link speed and with `wms bench-fetch` (the table in the spec).
+6. Rollback: previous image (`82c6ee1`); set `OUTBOUND_CONNECTIONS=8` for the old connection count. No existing table or key changes: new `kv` keys `traffic:nodes`, `traffic:direct`; new tables `proxy_node` and `direct_host` in `traffic.sqlite3`. The rule file can be emptied.
+
+### Verification evidence
+
+- Tests: 1591 → 1715 (+124), Python 3.12, `ruff check .` clean. New files: `tests/test_traffic_nodes.py` (picking, probe skip rules and the MB cap, hysteresis and the minimum interval, modes persisting and being re-applied, the write whitelist against a real HTTP server, closing Telegram connections, the upload guard, subscription incident and recovery, probe category, `/proxy` snapshots, direct verdicts, the validator, atomic file write and reload, auto-apply, weekly re-test) and `tests/test_fetch_links.py` (identical / mismatched-size / mismatched-content origin, rebalancing, ramp, ceiling and hard cap, 429 and reset back-off, relink asking for both links, resume, no-range server, `download_links`, the progress and summary text, bench).
+- **Not verified here** (needs the NAS): every real mihomo response shape (`/providers/proxies/main`, the `alive` field, `/delay`), a real probe through the listener, the numbers in the spec's table, TLS to the real hosts, the Telegram exit switch on a live session, a real PikPak origin link, and the gcid check on a big file.
+
+### My open questions and deviations
+
+1. **"Provider refresh fails"**: refreshing the provider (`PUT /providers/proxies/main`) is not on the whitelist, so the bot cannot trigger or observe a refresh. I treat a 5xx from the provider endpoint or an empty node list as the failure, plus the 80 %-dead-for-10-minutes rule.
+2. **Manual switches during the last upload part** are refused too ("Never switch while…" read literally); say if the owner's explicit pick should win.
+3. **"Final part" of an upload** = the last 2 MiB.
+4. **Nodes without a price** in their name are not skipped by the price filter (their price is unknown, not above 0.09) and sort last when picking among equals.
+5. **Probe speeds are Mbps** (megabits); the fetch numbers are MiB/s as in the spec's table.
+6. **"Last 24 h"** for candidates is today plus yesterday (the Shanghai days), because `traffic_host_day` is per day and keeps only hosts above 1 MB.
+7. **Defaults without a saved choice**: `PROXY` = auto-latency and `TG-PICK` = auto-speed, as the spec's config implies; the bot writes to mihomo only after the owner chooses (or after a probe in auto-speed moves `FAST`).
+8. **Probe traffic through `PROBE=DIRECT`** (direct tests) is also category `probe`, outbound `direct`.
+9. **Origin check cost**: two extra range probes and 2 × 256 KiB per link refresh (including after each 403/410).
+10. **`bench-fetch` and the origin link** have only run against fakes here. The aiohttp transport is unchanged (still `# pragma: no cover`).
+11. `DIRECT_RULES_FILE` is a `domain`/`text` provider written as `+.host`; if mihomo wants plain hosts for an exact match, tell me.
+12. The first scheduled probe happens 5 minutes after start when no result exists, so a fresh deploy spends up to 150 MB by itself. `PROXY_PROBE_HOURS=0` prevents that.

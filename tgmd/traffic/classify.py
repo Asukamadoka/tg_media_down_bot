@@ -12,7 +12,9 @@ from dataclasses import dataclass
 
 from .pricing import parse_price
 
-CATEGORIES = ("telegram", "pikpak", "model", "lan", "proxy-sub", "other")
+CATEGORIES = ("probe", "telegram", "pikpak", "model", "lan", "proxy-sub", "other")
+PROBE_LISTENER = "probe"
+"""``metadata.inboundName`` of the listener the speed probe goes through."""
 
 # Telegram's published address ranges.
 TELEGRAM_NETWORKS = tuple(
@@ -113,7 +115,9 @@ def classify(connection: dict) -> Classified:
     on_tg_group = any(_TG_GROUP.match(name) for name in chains)
     is_mac = dest_ip == MODEL_HOST[0] and (not dest_port or dest_port == str(MODEL_HOST[1]))
 
-    if (
+    if str(metadata.get("inboundName") or "") == PROBE_LISTENER:
+        category = "probe"
+    elif (
         on_tg_group
         or _in_domains(host, TELEGRAM_DOMAINS)
         or (address is not None and any(address in net for net in TELEGRAM_NETWORKS
