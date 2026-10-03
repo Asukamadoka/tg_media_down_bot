@@ -75,12 +75,12 @@ Nothing found.
 
 | rule | file | value | first commit | in HEAD now | in HEAD at audit start |
 |---|---|---|---|---|---|
-| nas-model | `CC_BRIEF.md` | `UGRE…(6)` | f548c4a | no | yes |
-| nas-model | `CC_BRIEF.md` | `ugre…(6)` | f548c4a | no | yes |
+| nas-model | `CC_BRIEF.md` | `…(6)` | f548c4a | no | yes |
+| nas-model | `CC_BRIEF.md` | `…(6)` | f548c4a | no | yes |
 | nas-model | `CC_BRIEF.md` | `…(7)` | f548c4a | no | yes |
-| nas-model | `deploy/restricted-network/README.md` | `UGRE…(6)` | b40b5e2 | no | yes |
+| nas-model | `deploy/restricted-network/README.md` | `…(6)` | b40b5e2 | no | yes |
 | nas-model | `deploy/restricted-network/README.md` | `…(7)` | b40b5e2 | no | yes |
-| nas-model | `docs/HANDOFF.md` | `ugre…(6)` | 8ae52d6 | no | yes |
+| nas-model | `docs/HANDOFF.md` | `…(6)` | 8ae52d6 | no | yes |
 | nas-volume-path | `.env.example` | `/vol…(27)` | b4e8ee6 | no | yes |
 | nas-volume-path | `.env.example` | `/vol…(23)` | daa8e12 | no | no |
 | nas-volume-path | `.env.example` | `/vol…(41)` | b4e8ee6 | no | yes |

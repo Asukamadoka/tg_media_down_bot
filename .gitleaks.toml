@@ -91,9 +91,9 @@ regexes = ['''^/home/tgmd$''', '''^/(?:Users|home)/<''']
 
 [[rules]]
 id = "nas-model"
-description = "The NAS's make or model (use <NAS_MODEL>)"
-regex = '''(?i)\b(?:Synology|DS\d{3}\+?|QNAP)\b'''
-keywords = ["synology", "ds", "qnap"]
+description = "A NAS vendor name (use <NAS_MODEL>); exact models and host names are in the private rules"
+regex = '''(?i)\b(?:Synology|QNAP|Asustor|TerraMaster|Buffalo|WD My Cloud)\b'''
+keywords = ["synology", "qnap", "asustor", "terramaster", "buffalo", "my cloud"]
 
 [[rules]]
 id = "catalogue-code"
