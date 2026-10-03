@@ -85,6 +85,8 @@ class EventSyncReport:
     """Why, in English, for logs; a person gets :meth:`alert`."""
     baseline: bool = False
     """First run: the cursor was only set."""
+    failed: bool = False
+    """The feed itself errored; the cursor was left as it was."""
     at: str = ""
 
     def summary(self) -> str:
@@ -156,24 +158,38 @@ async def _save_cursor(store: Store, ids: list[str], at: str) -> None:
     await store.set_meta(CURSOR_KEY, json.dumps({"ids": ids[:KEEP_IDS], "at": at}))
 
 
+def _short(exc: Exception, limit: int = 120) -> str:
+    text = " ".join(str(exc).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 async def _read_new(
     client: WmsClient, seen: set[str], page_size: int, max_pages: int
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
-    """(the head page, every event not in ``seen``, why the cursor was lost or "")."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, str]:
+    """(the head page, every event not in ``seen``, why the cursor was lost or "",
+    why the feed failed or "").
+
+    A first page that errors is a failed feed, not a lost cursor: the cursor
+    may well still be good. Only an :class:`AuthError` is raised.
+    """
     head: list[dict[str, Any]] = []
     fresh: list[dict[str, Any]] = []
     token: str | None = None
     for page_number in range(max_pages):
         try:
             page = await client.events(page_size=page_size, token=token)
-        except (AuthError, RateLimitedError):
+        except AuthError:
             if token is None:
                 raise
-            return head, fresh, "the feed refused its next page"
+            return head, fresh, "the feed refused its next page", ""
+        except RateLimitedError:
+            if token is None:
+                return [], [], "", "rate limited"
+            return head, fresh, "the feed refused its next page", ""
         except WmsError as exc:
             if token is None:
-                raise
-            return head, fresh, f"the feed refused its next page ({exc})"
+                return [], [], "", _short(exc)
+            return head, fresh, f"the feed refused its next page ({exc})", ""
         events = [e for e in (page or {}).get("events") or [] if isinstance(e, dict)]
         if page_number == 0:
             head = events
@@ -181,8 +197,8 @@ async def _read_new(
         fresh.extend(new)
         token = (page or {}).get("next_page_token") or None
         if len(new) < len(events) or not token:
-            return head, fresh, ""
-    return head, fresh, f"more than {max_pages * page_size} events since the last sync"
+            return head, fresh, "", ""
+    return head, fresh, f"more than {max_pages * page_size} events since the last sync", ""
 
 
 # ------------------------------------------------------------- applying events
@@ -262,7 +278,7 @@ async def sync_events(
 
     remembered = await _cursor(store)
     seen = set(remembered or [])
-    head, fresh, lost = await _read_new(client, seen, page_size, max_pages)
+    head, fresh, lost, failed = await _read_new(client, seen, page_size, max_pages)
 
     def done() -> EventSyncReport:
         report.seconds = time.monotonic() - started
@@ -276,6 +292,12 @@ async def sync_events(
         await _save_cursor(store, [_event_id(e) for e in head], synced_at)
         return done()
 
+    if failed:
+        # Not a lost cursor: keep it, so the next good sync resumes from it.
+        report.failed = True
+        report.fallback = "incremental"
+        report.reason = f"the event feed failed: {failed}"
+        return done()
     if remembered is None:
         report.baseline = True
         return await rebase("no cursor yet (first run)", "incremental")
@@ -358,7 +380,10 @@ async def refresh_index(ctx: Context, *, allow_full: bool = True,
                             events.reason)
                 result.alert = await _alert_once(ctx.store, events.reason)
     await ctx.store.set_meta("last_stocktake", result.at)
-    await ctx.store.set_meta(SYNC_KEY, json.dumps({"at": result.at, "kind": result.kind}))
+    state = {"at": result.at, "kind": result.kind}
+    if result.events is not None and result.events.failed:
+        state["failed"] = result.events.reason
+    await ctx.store.set_meta(SYNC_KEY, json.dumps(state))
     return result
 
 
@@ -379,6 +404,15 @@ async def freshness(ctx: Context) -> tuple[str, str] | None:
     return when.astimezone(ctx.config.schedule.tz).strftime("%H:%M"), kind
 
 
+async def failure(ctx: Context) -> str:
+    """Why the last sync could not use the event feed, or "" when it could."""
+    try:
+        data = json.loads(await ctx.store.get_meta(SYNC_KEY) or "{}")
+    except ValueError:
+        return ""
+    return str(data.get("failed") or "") if isinstance(data, dict) else ""
+
+
 async def note_freshness(ctx: Context, plans: list[Any]) -> None:
     """Put "Index updated at 14:05 (event sync)" on each plan (M8.1 §B): a
     plan made from the entry folders is only as good as the index behind it."""
@@ -386,5 +420,8 @@ async def note_freshness(ctx: Context, plans: list[Any]) -> None:
     if found is None:
         return
     clock, kind = found
+    reason = await failure(ctx)
     for plan in plans:
         plan.note("sync.updated", time=clock, kind={"key": f"sync.kind.{kind}", "args": {}})
+        if reason:
+            plan.note("sync.failed", reason=reason)

@@ -81,8 +81,11 @@ async def _freshness_note(ctx: Context) -> list[dict]:
     if found is None:
         return []
     clock, kind = found
-    return [{"key": "sync.updated", "args": {
+    notes = [{"key": "sync.updated", "args": {
         "time": clock, "kind": {"key": f"sync.kind.{kind}", "args": {}}}}]
+    if reason := await eventsync.failure(ctx):
+        notes.append({"key": "sync.failed", "args": {"reason": reason}})
+    return notes
 
 
 async def _sync(ctx: Context, *, events: bool, scope: str) -> list[dict]:

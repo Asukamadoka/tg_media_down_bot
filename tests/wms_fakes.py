@@ -45,6 +45,10 @@ class FakeDrive:
         """Events, oldest first; ``events()`` answers newest first."""
         self.emit = True
         self.cursor_expired = False
+        self.captcha_token = None
+        self.captcha_actions: list[str] = []
+        self.requests: list[tuple[str, str | None]] = []
+        """(url, X-Captcha-Token) of each request made through ``_make_request``."""
 
     # ------------------------------------------------------------ building
 
@@ -268,9 +272,41 @@ class FakeDrive:
         self._record("file_batch_share")
         return {"share_url": "https://mypikpak.com/s/SHARE", "pass_code": ""}
 
-    async def get_download_url(self, file_id):
-        self._record("get_download_url")
+    def download_info(self, file_id):
+        """What ``GET /drive/v1/files/<id>`` answers with a valid captcha."""
         return {"web_content_link": f"https://download.example/{file_id}"}
+
+    # The pieces of pikpakapi that WmsClient drives itself (the M9.5 captcha
+    # scoping): the captcha, the headers, and the raw request.
+
+    async def captcha_init(self, action, meta=None):
+        self._record("captcha_init")
+        self.captcha_actions.append(action)
+        return {"captcha_token": f"captcha-for:{action}"}
+
+    def get_headers(self, access_token=None):
+        headers = {"Authorization": "Bearer fake", "User-Agent": "plain"}
+        if self.captcha_token:
+            headers["X-Captcha-Token"] = self.captcha_token
+        return headers
+
+    def build_custom_user_agent(self):
+        return "custom"
+
+    async def _make_request(self, method, url, data=None, params=None, headers=None):
+        headers = headers or self.get_headers()
+        token = headers.get("X-Captcha-Token")
+        self.requests.append((url, token))
+        if url.endswith("/drive/v1/events"):
+            return await self.events(
+                size=int((params or {}).get("limit") or 100),
+                next_page_token=(params or {}).get("next_page_token"),
+            )
+        file_id = url.split("/drive/v1/files/", 1)[1].rstrip("?")
+        self._record("get_download_url")
+        if token != f"captcha-for:GET:/drive/v1/files/{file_id}":
+            raise PikpakException("Verification code is invalid")
+        return self.download_info(file_id)
 
     async def offline_download(self, file_url, parent_id=None, name=None):
         self._record("offline_download")
@@ -315,6 +351,8 @@ class FakeDrive:
 
     async def events(self, size=100, next_page_token=None):
         self._record("events")
+        if self.captcha_token:  # the SDK sends a parked token with every request
+            raise PikpakException("Verification code is invalid")
         if self.cursor_expired and next_page_token:
             raise PikpakException("invalid page token")
         newest_first = list(reversed(self.feed))

@@ -40,3 +40,7 @@ class RateLimitedError(WmsError):
 
 class NotFoundError(WmsError):
     """A path or file the operation needs does not exist."""
+
+
+class CaptchaError(WmsError):
+    """PikPak refused a request's captcha even after one fresh one for its action."""
