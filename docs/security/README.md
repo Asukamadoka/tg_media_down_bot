@@ -37,12 +37,10 @@ ids, the library's volume path, the share URL prefix) live **outside this reposi
 1. **The NAS's `.env`** next to its compose file: the runtime source of truth. The bot reads every
    one of these from the environment, with an empty or neutral default in code; compose files refer
    to host paths as `${VAR}` and never hold a literal.
-2. **A private, Saki-owned copy** of that file, so a lost NAS or a rebuilt one does not lose them.
-   Two ways to keep it; **the choice is `PENDING (Saki)`**:
-   * **A private GitHub repository** (for example a `private-values` repo) holding `private.env`
-     as is. Simple; protected by GitHub's access control only.
-   * **A sops/age-encrypted file** (`private.env.sops`) kept in that private repository. The age key
-     stays in the macOS Keychain or on the Mac only; the encrypted file is safe to sync and diff.
+2. **A private, Saki-owned copy**, so a lost NAS or a rebuilt one does not lose them: Saki's
+   private values repo (a PRIVATE GitHub repository) holding **sops/age-encrypted files**:
+   `private.env.enc` (dotenv) and `gitleaks.private.toml.enc`. The age key stays on the Mac only
+   (never in a repository, never on the NAS); the encrypted files are safe to sync and diff.
 
 `deploy/private.env.example` lists every deployment-identifying variable with placeholders and says
 where the real value lives. Copy it to `deploy/private.env` (gitignored, and excluded from the
@@ -72,6 +70,25 @@ default, add it to `deploy/private.env.example`, and use `${VAR}` in compose fil
    only) and `tests/nl/`; `.dockerignore` keeps documents, briefs, tests, `.env*`, the real WMS
    config and token out of the build context as well. `tests/test_image_hygiene.py` fails if either
    changes.
+
+## Decrypt at deploy
+
+1. **The NAS holds no key.** Decrypt on the Mac, from a checkout of Saki's private values repo:
+   ```
+   SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt sops -d --input-type dotenv --output-type dotenv private.env.enc
+   ```
+2. **macOS caveat**: sops looks for the age key in `~/Library/Application Support/sops/age/keys.txt`
+   by default, so `SOPS_AGE_KEY_FILE` is required when the key lives in `~/.config/sops/age`.
+3. **sops dotenv does not preserve comments or blank lines**; the `KEY=value` pairs are exact. The
+   commented checklist stays in `deploy/private.env.example`.
+4. **Copy only the variables the NAS needs** into the NAS's `.env`, after backing it up as
+   `.env.bakN-<date>` (N counts up). Restart `bot` only, never `proxy`. Do not leave the decrypted
+   output in a file, a shell history or a chat.
+5. **Gitleaks private rules**: decrypt `gitleaks.private.toml.enc` the same way (use
+   `--input-type`/`--output-type` matching how it was encrypted) to
+   `~/.config/tg_media_down_bot/gitleaks.private.toml`, which the pre-commit hook reads. The CI
+   secret `GITLEAKS_PRIVATE_RULES` is **not created** (Saki has not decided); until then CI skips
+   the private scan.
 
 ## Private value rules
 
