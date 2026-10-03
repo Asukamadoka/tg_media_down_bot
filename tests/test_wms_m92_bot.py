@@ -9,7 +9,7 @@ import time
 import pytest
 from test_wms_m83 import payload
 from test_wms_m83_bot import ADMIN, Event, Rig, buttons_of, press, until
-from test_wms_m92 import ABCD, CdnIO
+from test_wms_m92 import SAMPLE, CdnIO
 from wms_fakes import FakeDrive
 
 from pikpak_wms.ops import embed, outbound
@@ -87,7 +87,7 @@ class TestDownloadsCommand:
         inbot, handlers = await rig.boot()
         try:
             store = inbot.embedded.ctx.store
-            await store.add_download(name=ABCD, size=9, status="done")
+            await store.add_download(name=SAMPLE, size=9, status="done")
             await store.add_download(name="x.mkv", size=9, status="failed", reason="503")
             await store.add_download(name="y.mkv", size=9, status="done",
                                      finished_at="2026-01-01T00:00:00+00:00")
@@ -96,9 +96,9 @@ class TestDownloadsCommand:
             assert "包含「abcd00123」（1 条）" in search.replies[0][0]
             failed = await press(handlers, "wms:dl:failed")
             assert "失败的（1 条）" in failed.edits[0][0] and "x.mkv" in failed.edits[0][0]
-            assert "503" in failed.edits[0][0] and ABCD not in failed.edits[0][0]
+            assert "503" in failed.edits[0][0] and SAMPLE not in failed.edits[0][0]
             week = await press(handlers, "wms:dl:week")
-            assert "y.mkv" not in week.edits[0][0] and ABCD in week.edits[0][0]
+            assert "y.mkv" not in week.edits[0][0] and SAMPLE in week.edits[0][0]
             empty = Event("/downloads nothing-like-this")
             await handlers.on_downloads(empty)
             assert "没有下载记录" in empty.replies[0][0]
@@ -273,7 +273,7 @@ class TestRemarks:
         return await inbot.nl_message(user, text)
 
     def _drive(self, rig):
-        media_files(rig.drive, ("a.mkv", ABCD, "c.mkv"))
+        media_files(rig.drive, ("a.mkv", SAMPLE, "c.mkv"))
 
     async def test_the_sentence_of_nl_4_makes_a_plan_without_the_name(self, rig):
         self._drive(rig)
@@ -281,12 +281,12 @@ class TestRemarks:
         try:
             text, buttons = await self._sentence(
                 inbot, "把保存的视频下载，abcd00123 下过了")
-            assert "abcd00123" in text and ABCD not in text         # only as the exclusion
+            assert "abcd00123" in text and SAMPLE not in text         # only as the exclusion
             assert "a.mkv" in text and "c.mkv" in text
             assert [b[0] for b in buttons_of({"buttons": buttons})] == [
                 "确认执行", "修改", "取消"]
             marked = await inbot.embedded.downloads(status=["marked"])
-            assert [r["name"] for r in marked] == [ABCD]
+            assert [r["name"] for r in marked] == [SAMPLE]
             (plan,) = await inbot.embedded.open_plans()
             assert plan["actions"] == 2
         finally:
@@ -297,14 +297,15 @@ class TestRemarks:
         inbot, _handlers = await rig.boot()
         try:
             text, _ = await self._sentence(inbot, "下载 /Media 里的视频")
-            assert ABCD in text
+            assert SAMPLE in text
             reply, buttons = await self._sentence(inbot, "abcd00123 下过了")
             assert reply.startswith("已从计划 1 中去掉 abcd00123（1 个文件）")
-            assert ABCD not in reply.split("\n", 1)[1] and "a.mkv" in reply
+            assert SAMPLE not in reply.split("\n", 1)[1] and "a.mkv" in reply
             assert [b[0] for b in buttons_of({"buttons": buttons})] == ["确认执行", "修改", "取消"]
             (plan,) = await inbot.embedded.open_plans()
             assert plan["actions"] == 2                              # no new plan, same one
-            assert [r["name"] for r in await inbot.embedded.downloads(status=["marked"])] == [ABCD]
+            marked = await inbot.embedded.downloads(status=["marked"])
+            assert [r["name"] for r in marked] == [SAMPLE]
             # The buttons still belong to that plan.
             confirm = buttons_of({"buttons": buttons})[0][1].decode()
             assert confirm == "wms:nl:apply:1"
@@ -360,7 +361,7 @@ class TestRemarks:
             await inbot.stop()
 
     async def test_the_last_file_out_of_a_plan_discards_it(self, rig):
-        media_files(rig.drive, (ABCD,))
+        media_files(rig.drive, (SAMPLE,))
         inbot, _handlers = await rig.boot()
         try:
             await self._sentence(inbot, "下载 /Media 里的视频")

@@ -129,7 +129,7 @@ sequential, plainly invented values of Telegram's documentation; the audit scrip
 These are not in the spec's categories and cannot be matched by a pattern without writing the value
 here, so they are counted only:
 
-* **Names of downloaded files.** The documents and tests quote the file names of the plans used as
+* **Names of downloaded files** (replaced on 2026-10-04 by the private-values-vault commit: invented names, one constant per test file, and a `catalogue-code` rule in `.gitleaks.toml`). The documents and tests quote the file names of the plans used as
   evidence (catalogue codes and a studio's name; about 85 lines in 14 files). They say
   what was downloaded. If that is personal, they can be replaced the same way (the tests use one
   constant for one of them).

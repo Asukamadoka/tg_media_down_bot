@@ -8,6 +8,13 @@ config/wms.yaml
 config/rules.yaml
 wms-token.json
 
+# Deployment-identifying values live outside the repository (docs/security/README.md).
+# The example is the only file of this kind that is committed.
+deploy/private.env*
+!deploy/private.env.example
+# Value-based gitleaks rules: the exact real host, chat id, model. Never committed.
+.gitleaks.private.toml
+
 # Telegram / PikPak session state
 sessions/
 *.session

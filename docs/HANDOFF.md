@@ -2414,3 +2414,42 @@ None. No schema change (`last_sync` meta gains an optional `failed` field).
 
 1. `_make_request` retries (token refresh, network) reuse the headers built once, so a refresh of the access token inside one scoped GET is retried with the old bearer and then fails as an auth error; the next call is fine. Rare, and the SDK's own path has no better answer.
 2. The captcha retry applies only to `events` and `download_links`; other calls raise `CaptchaError` on a refusal (a leaked token is not cleared for them). Widen `action=` per call if the NAS logs show other refusals.
+
+
+## Security · private values vault (option A)
+
+Brief: `docs/briefs/2026-10-04-wms-private-values-vault.md` (baseline `1b20121`). Repository stays public; this closes what a non-destructive change can. No history rewrite, force-push, visibility change, GHCR deletion, GitHub secret or NAS edit was done.
+
+### What changed
+
+- **Private store contract** (`docs/security/README.md`, "The private store" and "Private value rules"): the NAS's `.env` is the runtime source of truth, plus a private Saki-owned copy; both options (private GitHub repository, sops/age-encrypted file in it) are written, the choice is `PENDING (Saki)`.
+- **`deploy/private.env.example`**: every deployment-identifying variable with placeholders and where the real value lives (`ADMIN_USER_IDS`, `ALLOWED_USER_IDS`, `WMS_ACCOUNT`, `PIKPAK_USERNAME`, `CACHE_CHAT_ID`, `TRAFFIC_MODEL_HOST`, `NL_OPENAI_BASE_URL`, `NL_OPENAI_NAMES`, `OLLAMA_URL`, `PUBLIC_BASE_URL`, `MIHOMO_API`, `DIRECT_TEST_URLS`, `LOCAL_URL_PREFIX`, `LIBRARY_DIR`, and the compose-only `LIBRARY_HOST_DIR`, `MEDIA_HOST_DIR`). Found by reading `tgmd/config.py`, `pikpak_wms/nl/*` and the compose files.
+- **Code defaults**: every one of those is already read from the environment with an empty or neutral default, so no code change was needed (`TRAFFIC_MODEL_HOST` was the last, fixed in M9.3). `TRAFFIC_TIMEZONE` keeps `Asia/Shanghai` and `LIBRARY_NAME` stays `资源库`: behaviour, not an address.
+- **Compose**: `deploy/restricted-network/docker-compose.yml` now shows the library and media mounts as `${LIBRARY_HOST_DIR}` / `${MEDIA_HOST_DIR}` (still commented out, so the file starts exactly as before). `docker-compose.yml` and `docker-compose.ghcr.yml` had no literal path.
+- **Remaining personal data in HEAD**: the studio name, the catalogue codes and the site prefix quoted in docs, tests, the NL examples and two code comments or docstrings were replaced by invented ones (`abcd00123`, `wxyz04567`, `example.com@`, a studio `示例影像`, `08号模特`); `ABCD` the test constant is now `SAMPLE`. Behaviour and assertions are unchanged. "Saki" and the GitHub handle stay.
+- **Rules**: `.gitleaks.toml` gains `catalogue-code` (3-5 letters, a zero-padded number; allowlist: the two invented codes). Optional second config: the `secrets` job runs `gitleaks dir . --config <temp file>` only when the secret `GITLEAKS_PRIVATE_RULES` (base64 of `.gitleaks.private.toml`) is set, and skips silently otherwise; pre-commit has a `gitleaks-private` hook (`scripts/gitleaks_private_hook.sh`) that reads `~/.config/tg_media_down_bot/gitleaks.private.toml` when it exists. `.gitleaks.private.toml` and `deploy/private.env*` (except the example) are in `.gitignore` and `.dockerignore`.
+- **Tests**: `tests/test_image_hygiene.py` +3 (build context and git ignore the private files, the example holds placeholders only).
+- **History and images: plan only**: `docs/security/history-rewrite-plan.md`, "Option A completion" (counts, steps, all marked not executed).
+
+### Environment variables / NAS
+
+None new for the bot. `LIBRARY_HOST_DIR` and `MEDIA_HOST_DIR` are read by compose only, and only if the commented mounts are switched on. Nothing for the NAS to do.
+
+### Saki-only actions
+
+1. Choose the private copy: private GitHub repository or sops/age (`PENDING`), and put `deploy/private.env` there.
+2. Create `.gitleaks.private.toml` with the real values (recipe in `docs/security/README.md`), put it at `~/.config/tg_media_down_bot/gitleaks.private.toml`, and set the secret: `base64 < .gitleaks.private.toml | gh secret set GITLEAKS_PRIVATE_RULES`. Without them the private checks are simply off.
+3. Decide on the history rewrite, pull request 1 and the old GHCR versions (plan only; see the plan).
+
+### Verification evidence
+
+- `python scripts/public_audit.py --fail-on-head`: 0 in HEAD (64 in history, unchanged). `gitleaks dir` on the tracked and new files: 0 findings (the local `.venv` is not part of the repository; it holds this Mac's paths and is ignored). The new rule was checked to flag an invented-looking code and to pass the two allowed ones.
+- `ruff check .` clean; `pytest -q`: 1932 → 1935 passed, Python 3.12 (3.11 not run here).
+- Not verified: the CI step itself (needs a push and the secret), and the pre-commit hook inside `pre-commit` (the script was run on its own: no config, exit 0).
+
+### Deviations and open questions
+
+1. No `AGENTS.md` or `CLAUDE.md` exists in this repository; `CC_BRIEF.md` §1 (red lines) was read instead.
+2. The brief says "about 85 lines in 14 files"; the names were in 18 files (docs, tests, NL examples, comments). All were replaced.
+3. The studio-name stand-in is also a literal in `docs/security/README.md`; value rules for the real studio and codes are Saki's private file's job (no public pattern can name them).
+4. The local `.venv` has no pip or packages; checks ran in a throwaway venv outside the repository.

@@ -42,6 +42,37 @@ def test_the_build_context_leaves_out_docs_tests_briefs_and_env_files():
     assert "!tests/nl" in rules          # the one part of tests/ the image runs
 
 
+def test_the_build_context_excludes_private_value_files_except_the_example():
+    rules = set(ignored())
+    assert "deploy/private.env*" in rules
+    assert ".gitleaks.private.toml" in rules
+    # `deploy` is ignored as a whole, so the example must not be re-included either.
+    assert "!deploy/private.env.example" not in rules and "!deploy" not in rules
+    # Neither a private env file nor the private gitleaks rules may be tracked.
+    tracked = subprocess.run(["git", "ls-files", "deploy", ".gitleaks.private.toml"], cwd=ROOT,
+                             capture_output=True, text=True, check=True).stdout.split()
+    assert not [n for n in tracked
+                if Path(n).name.startswith("private.env") and n != "deploy/private.env.example"]
+    assert ".gitleaks.private.toml" not in tracked
+
+
+def test_the_gitignore_keeps_private_value_files_out_of_git():
+    rules = (ROOT / ".gitignore").read_text()
+    for needed in ("deploy/private.env*", "!deploy/private.env.example", ".gitleaks.private.toml"):
+        assert needed in rules, needed
+
+
+def test_the_private_env_example_holds_placeholders_only():
+    text = (ROOT / "deploy" / "private.env.example").read_text()
+    for line in text.splitlines():
+        if line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        assert name.isupper(), name
+        # Empty, a placeholder in <angle brackets>, or an invented value.
+        assert value in {"", "/library", "-1001234567890"} or "<" in value, line
+
+
 def test_the_gitignore_keeps_the_real_config_and_secrets_out_of_git():
     rules = (ROOT / ".gitignore").read_text()
     for needed in (".env", "config/wms.yaml", "config/rules.yaml", "wms-token.json", "sessions/"):

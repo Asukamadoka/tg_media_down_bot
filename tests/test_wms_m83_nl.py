@@ -229,7 +229,7 @@ class TestUnfoundedConditions:
         query = self.make(created_after="2026-10-01T06:00:00+08:00",
                           created_before="2026-10-01T23:59:00+08:00",
                           min_size=1073741824, max_size=10737418240, kinds=["video"])
-        sentence = "只下载一个示例影像的视频，【示例影像】31号模特_2026_样片合集.mp4"
+        sentence = "只下载一个示例影像的视频，【示例影像】08号模特_2026_样片合集.mp4"
         result = ground(sentence, query)
         f = result.filters
         assert (f.created_after, f.created_before, f.min_size, f.max_size) == (None,) * 4
@@ -331,7 +331,7 @@ class TestRulesLayer:
 
 
 class TestAFullFileName:
-    NAME = "【示例影像】31号模特_2026.9.30_样片合集.mp4"
+    NAME = "【示例影像】08号模特_2026.9.30_样片合集.mp4"
 
     def test_the_name_alone_is_taken_by_the_rules_with_the_original_sentence(self):
         result = parse(f"只下载一个示例影像的视频，{self.NAME}")

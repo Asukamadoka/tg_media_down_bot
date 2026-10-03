@@ -51,7 +51,7 @@ services:
       # 媒体目录（local 模式、auto 模式里受限的文件、超过上传上限的文件）。
       # 宿主机路径由用户决定，下面是占位；取消注释并同时打开 volumes 里那行。
       # MEDIA_DIR: "/media"
-      # LOCAL_URL_PREFIX: "smb://<NAS 地址>/<共享名>/"
+      # LOCAL_URL_PREFIX: 写在 .env 里，不写在这里（deploy/private.env.example）
       # PikPak 仓储（WMS）：在 bot 里按 ./data/db/wms.yaml 的 schedule 跑定时任务。
       # 先 `docker compose run --rm bot wms ...` 手动试过再打开。
       # WMS_ENABLED: "true"
@@ -76,7 +76,10 @@ services:
       # CHANNEL_REPLY_DM: "true"
     volumes:
       - ./data:/data
-      # - <NAS 上的媒体共享目录>:/media
+      # Host paths come from .env next to this file (deploy/private.env.example), never from here:
+      # - ${MEDIA_HOST_DIR}:/media
+      # - ${LIBRARY_HOST_DIR}/资源:/library/资源
+      # - ${LIBRARY_HOST_DIR}/Telegram:/library/Telegram
 
 # IPv6（只有 TG_DIRECT_MEDIA=v2 要连 IPv6 媒体端点时才需要，见 README.md「IPv6」）：
 # 取消下面这段的注释，然后 docker compose down && docker compose up -d

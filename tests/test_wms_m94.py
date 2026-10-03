@@ -332,7 +332,7 @@ class TestSentences:
         ("abcd00123 置顶", ["abcd00123"], "top"),
         ("把 abcd00123 置顶", ["abcd00123"], "top"),
         ("置顶 abcd00123", ["abcd00123"], "top"),
-        ("「example abcd」置顶", ["example abcd"], "top"),
+        ("「4K000 abcd」置顶", ["4K000 abcd"], "top"),
     ])
     def test_the_phrases(self, text, names, level):
         assert RulesTranslator().parse(text, NOW, TZ) == Prioritize(names=names, level=level)
