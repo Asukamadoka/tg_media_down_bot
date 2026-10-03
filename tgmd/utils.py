@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from string import Formatter
 
@@ -60,8 +60,18 @@ def human_rate(bytes_per_second: float | None) -> str:
 def progress_bar(fraction: float, width: int = 12) -> str:
     """Render a text progress bar for a fraction between 0 and 1."""
     fraction = min(max(fraction, 0.0), 1.0)
-    filled = int(round(fraction * width))
+    filled = round(fraction * width)
     return "█" * filled + "░" * (width - filled)
+
+
+def display_width(text: str) -> int:
+    """Terminal columns ``text`` takes: wide (CJK) characters count two, combining marks none."""
+    width = 0
+    for char in text:
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    return width
 
 
 def sanitize_component(name: str, *, fallback: str = "unnamed") -> str:
@@ -123,7 +133,7 @@ def build_relative_path(
     title containing slashes cannot.
     """
     stem, ext = split_extension(name)
-    when = when or datetime.now(timezone.utc)
+    when = when or datetime.now(UTC)
     values = {
         "chat": sanitize_component(chat, fallback="chat"),
         "chat_id": sanitize_component(str(chat_id), fallback="0"),

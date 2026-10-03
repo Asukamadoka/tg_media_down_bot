@@ -1,0 +1,26 @@
+# Optional: scan what you are about to commit before it leaves your machine.
+#
+#     pip install pre-commit && pre-commit install
+#
+# CI runs the same gitleaks rules on every push (the `secrets` job of .github/workflows/ci.yml),
+# so this only moves the failure to where it is cheaper. See docs/security/README.md.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+        args: ["--config=.gitleaks.toml"]
+  # Value-based rules from ~/.config/tg_media_down_bot/gitleaks.private.toml, when it exists
+  # (docs/security/README.md). Absent file: the hook does nothing.
+  - repo: local
+    hooks:
+      - id: gitleaks-private
+        name: gitleaks (private value rules, if present)
+        entry: scripts/gitleaks_private_hook.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.7
+    hooks:
+      - id: ruff

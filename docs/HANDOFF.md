@@ -1,0 +1,2456 @@
+# HANDOFF · 给 Cowork 的部署说明
+
+按阶段追加，最新的在最下面。每一节都写清：NAS 上要改什么、用户要在 Telegram 里做什么、怎么回滚、待决问题。
+
+执行方是 Claude Code（编码、测试、推送）；核验与部署方是 Cowork（NAS、Telegram 客户端）。规格见 `CC_BRIEF.md`。
+
+仓库是公开的，所以这里不写真实的地址和 id：`<NAS_IP>`、`<MODEL_HOST>`、`<OWNER_ID>`、`<CACHE_CHAT_ID>`、`<NAS_VOLUME>`、`<SHARE>` 等占位符各代表什么、真实值放在哪里，见 `docs/security/README.md`（真实值在 NAS 的 `.env` 和 Saki 私有的 skill-builder 中枢里）。
+
+---
+
+## 阶段 0 · 测试门禁
+
+### 这一阶段做了什么
+
+- **镜像只在测试通过后才构建。** `publish-image.yml` 的 `build-and-push` 现在依赖 `checks`，而 `checks` 调用的就是 `ci.yml`：ruff + pytest（Python 3.11 与 3.12 各跑一遍）。任何一项失败，镜像都不会构建，NAS 上的 `:latest` 保持原样。
+- **只有生产分支能推镜像。** 以前从任意分支手动触发都会覆盖 `:latest`；现在其他分支只构建、不推送。
+- **ruff 配置落地，告警清零。** `pyproject.toml` 显式列出规则集，ruff 版本钉死在 `requirements-dev.txt`，CI 与本地共用同一处。
+- **修了一个真 bug**（`tgmd/setup.py`，ruff RUF006 报出来的）：配置向导的过期清理有竞态，用户在对话过期后立刻重新发 `/setup`，新开的对话会被旧的清理任务误关。另外那个后台任务没有被持有引用，可能在运行前被回收。已修，并有测试证明旧代码会失败、新代码会通过。
+
+**这一阶段没有任何运行时行为变化，除了上面那个竞态修复。** 其余改动全部是等价改写（已逐条核对语义）。
+
+### NAS 上要改什么
+
+**无。** 环境变量、compose、mihomo 规则、`/data` 卷布局、镜像入口一律未动。
+
+照常 pull 新镜像重启即可。在 NAS 的部署目录里执行（受限网络拓扑，即
+`deploy/restricted-network/` 那一套；两份 compose 里服务名都叫 `bot`）：
+
+```bash
+docker compose pull bot
+docker compose up -d bot
+```
+
+只重启 `bot`，不要动 `proxy`：`bot` 共享 `proxy` 的网络栈，重启 `proxy` 会让
+`bot` 一并断网。
+
+### 用户需要在 Telegram 里做什么
+
+**无。**
+
+### 怎么回滚
+
+镜像每次构建都带一个短 SHA 标签。回到上一个版本：
+
+```bash
+# 在 GHCR 的 Packages 页面或 Actions 的运行摘要里找到上一个 sha-xxxxxxx 标签
+docker pull ghcr.io/asukamadoka/tg_media_down_bot:sha-<上一个>
+# 把 compose 里的 image 临时改成该标签，再 up -d
+```
+
+门禁本身的回滚：`git revert` 本阶段的提交即可，工作流会恢复成无门禁的旧版。
+
+### 给 Cowork 的核验手段
+
+**验证门禁确实会拦截**（不推送任何坏代码，也不会影响 `:latest`）：
+
+1. GitHub → Actions → **Publish container image** → **Run workflow**
+2. 分支选 `claude/telegram-media-downloader-bot-samm1v`
+3. 勾选 **simulate_test_failure**，运行
+4. 预期：`checks / test` 两个 Python 版本都失败并标红，**`build-and-push` 显示为 skipped**，GHCR 上没有新镜像。
+
+即使门禁失效，这次运行也只会用当前的好代码重建一次，不会发布坏东西。所以这个验收可以随时重复。
+
+### 线上验收结果（Claude Code 已跑过，均在提交 `2424ad2` 上）
+
+| 运行 | 触发 | lint | test 3.11 | test 3.12 | build-and-push |
+|---|---|---|---|---|---|
+| [35879176176](https://github.com/Asukamadoka/tg_media_down_bot/actions/runs/35879176176) | push | 通过 | 通过 | 通过 | **运行并推送**（`checks` 全部完成后才开始） |
+| [35879362757](https://github.com/Asukamadoka/tg_media_down_bot/actions/runs/35879362757) | 手动，`simulate_test_failure: true` | 通过 | **失败** | **失败** | **skipped** |
+| [35879183825](https://github.com/Asukamadoka/tg_media_down_bot/actions/runs/35879183825) | PR #1 的 CI | 通过 | 通过 | 通过 | （CI 不构建镜像） |
+
+第二行就是简报要求的「故意弄挂一个测试，确认镜像不会被构建」。
+
+### 待决问题
+
+1. **`ruff format` 没有强制。** 按它的默认风格会重排 32 个文件。简报只要求 `ruff check`，而一次纯排版的大 diff 会淹没阶段 1 的审计改动。建议：阶段 1 审计完成、模块合并之后，再决定是否在 CI 里加 `ruff format --check`。
+2. **行宽定为 100，不是 ruff 默认的 88。** 实测：88 列下全仓 115 处超长，100 列下只有 2 处。代码事实上一直按 100 列在写，定 100 是如实反映，而不是为了少改。
+3. **简报说 `i18n.py` 的中文会触发 E501，实际不会。** ruff 确实按显示宽度计数（已验证：66 个码位的中文行被判为 126 列），但 `i18n.py` 的中文条目已经拆得足够短，最长的行是 92 列的英文行。该预期在 88 列下成立，在 100 列下不成立。
+4. **真正被中文触发的是 RUF001，不是 E501。** 92 处，全部在 `tgmd/i18n.py`：ruff 把中文全角标点（「，」「：」）当成长得像 ASCII 的可疑字符。已对该文件单独豁免；其余文件保持检查，因为那里混进全角字符（比如命令名里）才是真 bug。
+5. **两条规则留给阶段 1 审计，未在本阶段处理：**
+   - **UP042**：`(str, Enum)` 改 `StrEnum`。这是语义变更，不是 lint 清理，而且这类枚举的格式化行为在 3.11 和 3.12 之间本就不同。
+   - **BLE001**：18 处 `except Exception`。多数是有意的健壮性边界（worker 不能因一个任务而死、装饰性调用失败不能阻塞启动），但每一处都值得单独判断，一次性加 18 个 `noqa` 等于替审计下结论。
+6. **`stop()` 在等待已取消的子任务时吞掉 `CancelledError`**（`tasks.py`、`webserver.py`）。如果调用 `stop()` 的任务本身正在被取消，这也会把外层的取消一并吞掉。本阶段只是把写法换成 `contextlib.suppress`，语义没变；是否需要区分“子任务的取消”和“自己的取消”，留给阶段 1。
+
+---
+
+## 阶段 1 · 全仓审计
+
+完整审计见 `docs/AUDIT.md`：简报点名的 A1–A8 逐条给了结论，另外新发现 15 条（B1–B15），阶段 0 遗留的 4 条（C1–C4）也有结论。
+
+### 这一阶段做了什么
+
+- **A1** 启动日志和 `python -m tgmd.verify` 不再误报「没有管理员」「没有读取账号」。NAS 上这两件事都是在聊天里完成的（`/claim`、`/setup telegram`），以前每次启动都有两条假警告，`verify` 还会因此判失败。
+- **A2** `HTTP_ENABLED=true` 而没有公网地址时不再崩溃循环，降为警告，只关闭「Telegram 媒体转存 PikPak」。
+- **A5** 删除了一次性 PikPak 登录链接，只保留 Mini App 与聊天内登录。理由：它要求的 HTTPS 条件与 Mini App 完全相同，所以在任何真实部署上它都不会被发出。
+- **B1（安全）** `/setup pikpak` 以前可以在群里发起，接下来的密码就发在群里。现在只能私聊。
+- **B2–B7** 几个真 bug：文件名带 `&` 时最终状态消息写不出去；下载 / 投递失败会在 NAS 上留下文件；PikPak 还没拉完的文件永远不删；任务里的意外异常让进度消息卡住；用户自己的 PikPak 会话失效后悄悄改用共享账号；PikPak 状态查询偶发失败会让正在进行的转存失败。
+- **A3** 给 `tasks.py`、`delivery.py`、`downloader.py`、`reporter.py`、`verify.py` 补了行为层面的测试，这是阶段 2 提速改动的安全网。测试 545 → 613，覆盖率 61% → 77%。
+- **行数** `tgmd/` 8,171 → 7,830（−341）。
+
+### NAS 上要改什么
+
+**必须做的：无。** 所有现有环境变量照常生效，`/data` 布局与数据库结构未动（没有迁移），镜像入口未变。照常拉新镜像、只重启 `bot`：
+
+```bash
+docker compose pull bot
+docker compose up -d bot
+```
+
+**可选：**
+
+- `PIKPAK_LOGIN_LINK_TTL` 如果在 `.env` 或 compose 里设过，现在不再起作用，可以删；不删也照常启动。
+- 如果 NAS 的 compose 因为当初的崩溃把 `HTTP_ENABLED` 设成了 `"false"`：只要 Tailscale Funnel 的地址可用，就可以设 `HTTP_ENABLED: "true"` 和 `PUBLIC_BASE_URL: "https://<FUNNEL_HOST>"`，这样 `/pikpak login` 会直接弹出 Mini App，Telegram 媒体也能转存 PikPak。即使地址暂时不可用，现在也只是一条警告，不会再崩溃循环。**改之前先看一眼 NAS 上现在的值，不要盲改。**
+
+### 用户需要在 Telegram 里做什么
+
+**无。** 下面是 Cowork 核验时可以顺手做的。
+
+### 给 Cowork 的核验手段
+
+1. **A1 假警告消失**：`docker compose logs bot --since 10m | grep -iE "no admin configured|no user session configured"`，应当没有输出。（如果确实没有读取账号，会有另一条 `no user session yet: ... /setup telegram`，那条是真话。）
+2. **verify 读得到数据库**：`docker compose exec bot python -m tgmd.verify`。期望 `access control` 为 ✓，`user session` 为 ✓ 且写着 `from an in-chat login`。`http server` 一行可能提示端口被占用，因为 bot 本身在跑，这是预期的。
+3. **B10**：在任意群里发 `/pikpak login`，应收到「请私聊我来连接 PikPak」。
+4. **A5**：私聊发 `/pikpak login`。有 HTTPS 地址时应弹出「🔐 连接 PikPak」按钮（Mini App）；没有时应提示用 `/setup pikpak`。
+5. **B12**：私聊发 `/setup`，「上传缓存」一行若未配置，应提示在频道里发 `/cache`，而不是去设 `CACHE_CHAT_ID`。
+6. **B2**：`/mode local` 后转发一个文件名含 `&` 的文件（或让它下载一个），最后的状态消息应正常显示「saved to …」，而不是停在下载中。
+
+### 怎么回滚
+
+回到阶段 0 的镜像 `sha-2424ad2`（阶段 0 之后的 `fdd04ae` 只改了文档，没有构建镜像）：
+
+```bash
+docker pull ghcr.io/asukamadoka/tg_media_down_bot:sha-2424ad2
+# 把 compose 里的 image 临时改成该标签，再 up -d bot
+```
+
+数据库没有迁移，所以前后两个版本可以用同一个 `/data` 来回切换。
+
+### 待决问题
+
+1. **`PIKPAK_LOGIN_LINK_TTL` 永久保留为空操作，还是在某个大版本里删掉？** 红线 2 要求现有变量名不动，所以本阶段只是不再使用它。建议永久保留：一行解析代码的成本远低于让某个旧部署起不来。
+2. **`/setup pikpak` 对所有已授权用户开放了（B11）。** 这是我按一致性做的决定：Mini App 本来就允许任何已授权用户连接**自己的** PikPak，聊天内登录写入的也只是发起人自己的令牌。如果主人希望聊天内登录仍只限管理员，改回来只需要一行（`handlers.py` `on_setup()`），测试 `test_any_allowed_user_may_connect_their_own_pikpak` 也要随之改。
+3. **`ruff format` 仍不强制（C4）。** 阶段 2–4 会重写大半文件，建议阶段 4 结束后再决定。
+4. **`resolver.py`（覆盖率 19%）与 `handlers.py`（36%）的测试没有补齐。** 前者阶段 2a 转发快路会改，后者阶段 3 命令面会变，届时连同新代码一起补。
+
+---
+
+## 阶段 2a · 转发快路
+
+### 这一阶段做了什么
+
+新增 `tgmd/forwarder.py`。telegram 模式下，一个文件在「查上传缓存」之后、「下载」之前，先试零字节路径：
+
+1. 源消息和所在聊天都允许转发（`noforwards` 两个标志都为假）；
+2. **读取账号**把消息转发进缓存频道；
+3. **bot** 在缓存频道里用自己的文件引用读到这条消息，再 `send_file` 发给用户（用户收到的没有「Forwarded from」头），同时写入 `media_cache`，同一链接第二次请求直接走缓存。
+
+降级规则（仿 tdl 的 direct → clone）：
+
+| 情况 | 结果 |
+|---|---|
+| 可转发，且有缓存频道 | **零字节**，日志 `forwarded, nothing downloaded`，回复「⚡ … 由 Telegram 直接复制，未下载」 |
+| 源受限（消息或聊天 `noforwards`，或 Telegram 回 `CHAT_FORWARDS_RESTRICTED`） | 下载再上传 |
+| 可转发，但**没有缓存频道** | 下载再上传，回复末尾提示「管理员在私有频道里发 /cache 就能秒转」（一个任务只提示一次） |
+| 转发报错（读取账号不在频道里、不能发言、bot 看不到转发件等） | 下载再上传，原因写进日志 |
+| 没有读取账号（bot 自己读公开频道） | bot 直接用自己的引用重发，不需要缓存频道 |
+
+只有 telegram 模式走快路。local 和 pikpak 模式本来就要字节，不受影响。
+
+**账号安全（红线 6）**：读取账号每个文件只做一次普通的 `messages.forwardMessages`，是正常用户行为。一个坑已经处理：聊天内登录得到的会话重启后不记得任何频道，第一次转发前会列一次对话列表来找到缓存频道，之后记住；**如果读取账号根本不在缓存频道里，10 分钟内不会再列第二次**，避免每个文件都把主账号的对话列表整个读一遍。
+
+`/verify` 和 `python -m tgmd.verify` 新增一行 `forward fast path`，直接告诉你快路能不能用、不能用差在哪。
+
+### NAS 上要改什么
+
+**无。** 没有新增环境变量，没有迁移。照常 `docker compose pull bot && docker compose up -d bot`。
+
+### 用户需要在 Telegram 里做什么
+
+**目前没有缓存频道，所以快路还没有生效**，可转发的视频仍然会下载再上传（回复里会有 `/cache` 的提示）。要打开它：
+
+1. 用**读取账号所在的那个 Telegram 账号**（即用户本人的主账号）新建一个**私有频道**。频道创建者天然有发言权。
+2. 把 bot（`@pikpak_WMS_bot`）加为这个频道的**管理员**。
+3. 在频道里发一条 `/cache`。bot 会回复已设为缓存频道。
+4. 私聊 bot 发 `/verify`，确认 `forward fast path` 一行是 ✅。
+
+如果频道不是用读取账号创建的，就需要把读取账号拉进频道并设为管理员、打开「发布消息」权限。`/verify` 会分别指出「看不到频道」和「在频道里但不能发言」。
+
+### 给 Cowork 的核验手段（对应 §4 阶段 2 验收第一条）
+
+1. 按上面四步设好缓存频道，`/verify` 里 `forward fast path` 为 ✅。
+2. 找一个**允许转发**的频道里的大视频（几百 MB），把消息链接发给 bot（`/mode telegram`）。
+   - 期望：几秒内收到视频；回复是「⚡ … 未下载」。
+   - 日志：`docker compose logs bot --since 5m | grep -E "forwarded, nothing downloaded|downloading"`，只应有前者。
+   - 磁盘：`/data/downloads` 下没有新文件。
+3. 同一个链接再发一次：回复「♻️ … 命中缓存」，读取账号不再转发（缓存频道里没有新增消息）。
+4. 找一个**开启了「限制保存内容」**的频道里的视频：应走下载再上传，缓存频道里不出现转发件。
+5. 对照：`/cache off` 之后再发第 2 步的链接，应下载再上传，回复末尾带 `/cache` 提示。核验完再在频道里发一次 `/cache` 恢复。
+
+### 怎么回滚
+
+回到阶段 1 的镜像 `sha-8ae52d6`。数据库无迁移，`media_cache` 里快路写入的条目在旧版本里同样有效（旧版本本来就读这张表）。
+
+### 待决问题
+
+1. **相册是逐条转发的。** 一个 10 张的相册会产生 10 次 `forwardMessages`。可以改成一次转发整组，但要同时改造「每条消息各自投递、各自报告进度」的结构，收益只在相册上。建议等阶段 2 其余部分完成后按实测决定。
+2. **缓存频道里会留下转发件。** 这是有意的，它们就是缓存本身，删掉会让第二次请求变回下载。频道会持续变大，但 Telegram 不对频道存储计费。如果主人希望定期清理，需要另定规则（清理后对应的 `media_cache` 条目会在下次命中时自动失效并回落到下载，已有逻辑能处理）。
+
+---
+
+## 阶段 2b · 并行分片下载
+
+### 这一阶段做了什么
+
+- 新增 `tgmd/parallel.py`（按 MTProto 文档中 `upload.getFile` 的规则自行实现，没有参考或复制任何第三方代码）。大于 10 MB 的文档分成 1 MiB 的分片，由多条连接同时拉取，按偏移写入同一个文件。
+- **连接怎么来**：每条连接是一个独立的 `MTProtoSender`，复用 Telethon 已经握有的授权密钥。文件在账号主 DC 上就用会话本身的密钥；在其他 DC 上就用 Telethon 为该 DC 导出的密钥（Telethon 本来就会建一次）。**不产生新的登录，不做新的密钥交换**，也不会在「设备」列表里多出条目。
+- **必须处理的四种情况**：
+
+| 情况 | 处理 |
+|---|---|
+| `FloodWait` | **所有连接一起暂停**（限制是按账号算的，其他连接继续打只会更糟），等完继续；超过 300 秒不等，直接报错给用户 |
+| `FILE_REFERENCE_EXPIRED` | 重新读取这条消息拿到新引用，继续；多条连接同时撞上只刷新一次；同一文件最多刷新两次 |
+| `FILE_MIGRATE` | 降级为 Telethon 默认的单连接下载 |
+| CDN 重定向（`upload.fileCdnRedirect`） | 降级为单连接。实际上我们不声明支持 CDN，Telegram 不会发这个；防御性处理 |
+
+  另外：连接打不开或反复断开 → 降级；能开几条算几条（比如要 4 条只开出 2 条，就用 2 条）。**任何降级都会先删掉半截文件，再从头走单连接**，结果总是正确的，只是慢。
+- 每个文件下载完在日志里打一行：文件名、大小、耗时、平均速率、**所在 DC**、实际用了几条连接。阶段 2c 需要的 DC 分布就从这行来。
+- 新增 `python -m tgmd.bench <消息链接>`：对同一个文件按不同连接数各下一次，打印对比表，然后删掉副本。
+- Telethon 没有公开「开额外连接」的接口，用到了几个私有属性。有一个测试专门核对这些属性在当前 Telethon 版本里存在，升级 Telethon 时如果它们变了，会先在 CI 里失败，而不是在用户下载到一半时失败。
+
+### NAS 上要改什么
+
+**可选。** 新增环境变量 `DOWNLOAD_CONNECTIONS`，**默认 4**，上限 8（写更大会被压到 8，并在启动日志里警告），写 1 等于关闭并行、完全回到以前的行为。旧 compose 不写这个变量，就是 4。
+
+照常 `docker compose pull bot && docker compose up -d bot`。
+
+### 用户需要在 Telegram 里做什么
+
+**无。**
+
+### 给 Cowork 的核验手段（对应 §4 阶段 2 验收第二条）
+
+1. 找一个**受限频道**（开启了「限制保存内容」）里几百 MB 的视频，复制消息链接。
+2. 在 NAS 上跑：
+   ```bash
+   docker compose exec bot python -m tgmd.bench '<消息链接>' --connections 1,4,8
+   ```
+   输出的格式如下（数字是占位，不是实测结果）：
+   ```
+   connections        size   seconds          rate  dc  endpoint
+             1   <大小>     <秒数>      <速率>   <dc>  Telethon default
+             4   <大小>     <秒数>      <速率>   <dc>  <ip>:443
+   ```
+   把这张表原样贴进验收记录，就是「前后对比的数字」。第一行 `connections` 如果显示的是 1 而你要的是 4，说明并行降级了，原因在日志里（`parallel download not possible (...)`）。
+3. **不要循环跑。** 每一行都是用户主账号的一次真实下载。一次跑 2–3 个连接数就够了；工具本身限制一次最多 6 行。
+4. 平时的下载日志：`docker compose logs bot | grep "downloaded "`，每个文件一行，含 DC 与连接数。可以顺手统计用户常看的频道文件落在哪些 DC，阶段 2c 要用。
+
+### 怎么回滚
+
+- 只关并行：设 `DOWNLOAD_CONNECTIONS=1`，重启 `bot`。代码路径与阶段 2a 完全一致。
+- 整体回滚：镜像 `sha-2522974`（阶段 2a）。
+
+### 待决问题
+
+1. **默认 4 条连接是否保守到位。** 简报给的默认值是 4，我照做了。每条连接都是用户主账号的，而 `concurrent`（同时处理的任务数，默认 2）会与之相乘：两个大文件同时下载就是 8 条连接。如果 Cowork 实测中看到 FloodWait 日志（`flood wait of ...s during a parallel download`），建议先把 `DOWNLOAD_CONNECTIONS` 降到 2–3，再看数字。
+2. **照片与小文件不走并行。** 照片通常只有几百 KB，10 MB 以下的文件多开连接得不偿失。这个阈值写在代码里（`MIN_PARALLEL_SIZE`），暂不做成配置项。
+
+---
+
+## 阶段 2c · 直连媒体线路
+
+### 这一阶段做了什么
+
+- **Cowork 实测的发现落地了**：NAS 不经代理能连上的只有三个 `media_only` 端点，其中 IPv4 的是 DC4 的 `149.154.166.111:443`。Telethon 挑端点时根本不看 `media_only`，所以以前即使线路通也用不上。现在下载用的连接是我们自己开的（阶段 2b），端点也由我们选。
+- 新配置 `TG_DIRECT_MEDIA=auto|off`，**默认 `off`**，按简报要求实测通过后再改成 `auto`。
+- `auto` 时的行为：
+  - 先试该 DC 的 `media_only` IPv4 端点（排除 IPv6、CDN、需要混淆的 `tcpo_only`），**与普通端点共用同一个授权密钥**，不产生新登录。
+  - **连不上**：每个端点最多等 10 秒，然后自动改用普通端点（经代理）。
+  - **连上了但传输中被重置**（简报担心的「防火墙在握手后重置」）：本文件自动改走普通端点重下一次。
+  - 以上任一情况都会把「该 DC 的直连」记为失败，**30 分钟内**所有下载直接走代理，不再每个文件都先撞一次墙。
+  - **文件恰好在账号主 DC 时**：Telethon 默认走主连接（经代理）。现在只要该 DC 有可用的媒体端点，即使是 10 MB 以下的小文件，也用我们自己的一条连接直连下载。没有媒体端点的 DC（实测 DC1/3/5）照旧交给 Telethon。
+- 实验开关：`python -m tgmd.bench <链接> --route normal|media|both`。`normal` 强制走 Telethon 会选的普通端点（经代理），`media` 只走媒体端点（直连失败时该行会显示 `Telethon default`，不会悄悄走代理冒充直连），`both` 对同一个文件每种连接数各跑一遍，两种路线相邻对比。
+- 每个文件的下载日志已含 `DC`，走直连时末尾会有 `via 149.154.166.111:443 media`。
+- `deploy/restricted-network/mihomo/config.example.yaml` 新增 `IP-CIDR,149.154.166.111/32,DIRECT,no-resolve`，位于 `MATCH` 之前。
+
+### NAS 上要改什么（按顺序）
+
+1. **同步 mihomo 规则**。在 NAS 真实的 mihomo `config.yaml` 的 `rules:` 里，`MATCH,PROXY` **之前**加一行：
+   ```yaml
+   - IP-CIDR,149.154.166.111/32,DIRECT,no-resolve
+   ```
+2. 拉新镜像，然后**两个一起重启**（`bot` 共享 `proxy` 的网络栈，单独重启 `proxy` 会让 `bot` 断网）：
+   ```bash
+   docker compose pull bot
+   docker compose up -d --force-recreate proxy bot
+   ```
+3. **先不要改 `TG_DIRECT_MEDIA`**，保持默认 `off`，先做下面的实测。
+
+### 给 Cowork 的核验手段（对应 §4 阶段 2 验收第三条）
+
+1. **找一个 DC4 的文件**。看平时的下载日志：
+   ```bash
+   docker compose logs bot | grep -o "from DC [0-9]" | sort | uniq -c
+   ```
+   这同时就是用户常看频道的 DC 分布，请把统计结果贴进验收记录，它决定这条优化能覆盖多少流量。挑一条日志里 `from DC 4` 的消息链接；或者直接对候选链接跑 bench，看 `dc` 列。
+2. **对比两条线路**，同一个文件：
+   ```bash
+   docker compose exec bot python -m tgmd.bench '<DC4 文件的链接>' --route both --connections 1,4
+   ```
+   `route=normal` 的行是经代理，`route=media` 的行是直连。如果 `media` 行的 `endpoint` 列显示 `Telethon default`，说明直连没通（日志里会有 `could not open a connection to 149.154.166.111:443` 或 `direct media download broke`）。
+3. **直连稳定且更快**，再在 compose 里设 `TG_DIRECT_MEDIA: "auto"`，重启 `bot`。之后下载日志里 DC4 的文件应带 `via 149.154.166.111:443 media`。
+4. 回退验证（可选）：临时去掉 mihomo 那条规则、重启两个容器，DC4 文件应在约 10 秒后自动改走代理并正常完成，日志里有 `direct media route to DC 4 failed; using the proxy for a while`。
+
+### 怎么回滚
+
+- 只关直连：`TG_DIRECT_MEDIA=off`（或不设），重启 `bot`。mihomo 那条规则留着无害：bot 不再连那个 IP。
+- 整体回滚：镜像 `sha-c758318`（阶段 2b）。
+
+### 后续项（本阶段不做）
+
+- **IPv6 的两个媒体端点**（DC2 `2001:67c:4e8:f002::b`、DC4 `2001:67c:4e8:f004::b`）。要用上它们，需要 mihomo `ipv6: true`、容器网络开启 IPv6，并在代码里放开对 IPv6 端点的过滤（`media_endpoints()` 里一行）。这会让 DC2 的文件也能直连。等 IPv4 这条实测有结论后再评估。
+
+### 待决问题
+
+1. **`TG_DIRECT_MEDIA` 何时改成默认 `auto`。** 按简报，等 Cowork 的实测数字。如果实测直连明显更快且稳定，下一个阶段我把默认值改成 `auto`，或者只在 `deploy/restricted-network/docker-compose.yml` 里设 `auto`（后者不影响其他部署方式，我倾向这个）。
+2. **30 分钟的「直连失败冷却」是拍的数。** 如果 NAS 的线路时好时坏，可能需要调短；目前没有做成配置项。
+
+---
+
+## 阶段 2d · 智能路由与媒体目录
+
+### 这一阶段做了什么
+
+- **新模式 `auto`**（默认模式不变，用户自己 `/mode auto` 选）：
+  - 能转发的 → 走 2a 的快路发回 Telegram（没有缓存频道时下载再上传，和 telegram 模式一样）；
+  - 受限的 → 下载到 **NAS 媒体目录**，回复访问路径，不再推到任何地方；
+  - 直接发给 bot 的媒体 → 存进媒体目录（发回给发送者没有意义）。
+  - `auto` 是落库值，按 i18n 红线本身不翻译；显示名为「auto（能转发就秒传，受限的存 NAS）」，帮助文案里 `/mode auto` 保留英文关键词。
+- **媒体目录**：
+  - 新增 `MEDIA_DIR`，**默认等于 `DOWNLOAD_DIR`**，不设时文件的位置与以前一致。
+  - local 模式、auto 模式里受限的文件、超过 2 GB 上传上限而留下的文件，都落在这里。要留下的文件**直接下载到媒体目录**，不在工作目录里转一手。
+  - **保留原文件名**：新增 `MEDIA_TEMPLATE`，默认 `{chat}/{name}`（按频道名分文件夹，文件名就是原名；同名时自动加 ` (1)`，不覆盖）。`FILENAME_TEMPLATE` 只管工作目录里的临时文件，行为不变。
+  - `DELETE_AFTER_DELIVERY` 对留下的文件永远不生效。
+  - 新增可选 `LOCAL_URL_PREFIX`，例如 `smb://<NAS_IP>/media/`。设了之后，回复里给出的是「前缀 + 媒体目录内的相对路径」（已做 URL 编码，空格是 `%20`），可以直接粘进文件管理器；不设就显示容器内路径。
+- 顺带修正 `deploy/restricted-network/docker-compose.yml` 里一条过时注释：没有公网地址时开 `HTTP_ENABLED` 已经不会 exit 2 了（阶段 1 A2）。
+
+**一处可察觉的行为变化**：以前 local 模式的文件名带消息编号前缀（`频道/123_视频.mp4`），现在是原文件名（`频道/视频.mp4`），这是简报 2d 的要求。已有的旧文件不动。想要旧格式，设 `MEDIA_TEMPLATE={chat}/{message_id}_{name}`。
+
+### NAS 上要改什么
+
+**必须做的：无。** 不设 `MEDIA_DIR` 时一切照旧。
+
+**要把文件放进 NAS 共享文件夹时**（需要先定下面的待决问题 1）：
+
+1. 在 NAS 上确定媒体共享目录的宿主机路径，并让容器用户能写：`chown -R 10001:10001 <该目录>`，或给 uid 10001 写权限。
+2. 在 `deploy/restricted-network/docker-compose.yml` 的 `bot` 服务里，取消注释并填好（模板里已留好占位）：
+   ```yaml
+   environment:
+     MEDIA_DIR: "/media"
+     LOCAL_URL_PREFIX: "smb://<NAS 地址>/<共享名>/"
+   volumes:
+     - ./data:/data
+     - <NAS 上的媒体共享目录>:/media
+   ```
+3. `docker compose up -d bot`（改了 volumes，`up -d` 会重建 `bot`；`proxy` 不用动）。
+
+### 用户需要在 Telegram 里做什么
+
+想用智能路由时发一次 `/mode auto`。不发就保持原来的模式。
+
+### 给 Cowork 的核验手段
+
+1. `/mode auto`，发一个**可转发**频道的视频链接：应秒到（有缓存频道时）或下载后上传（没有时），媒体目录里不出现新文件。
+2. 发一个**受限**频道的视频链接：回复「saved to …」，文件出现在 `<媒体目录>/<频道名>/<原文件名>`；设了 `LOCAL_URL_PREFIX` 时回复里是 `smb://…` 形式，复制到电脑的文件管理器里应能直接打开。
+3. 同一个受限链接再发一次：出现 `原文件名 (1).扩展名`，旧文件不被覆盖。
+4. 验收第二条「受限频道的视频走并行下载并落到媒体目录」：看日志里这个文件的 `downloaded ...` 行，`over 4 connection(s)`，路径在媒体目录下。
+
+### 怎么回滚
+
+- 不想用 auto：`/mode telegram`。
+- 媒体目录：去掉 `MEDIA_DIR`，文件回到 `DOWNLOAD_DIR`。
+- 整体回滚：镜像 `sha-19b2d80`（阶段 2c）。
+
+### 待决问题
+
+1. **媒体目录的宿主机路径**（简报明确要求不猜）。需要用户和 Cowork 确定：NAS 上哪个共享文件夹、SMB 共享名是什么、局域网访问地址（用于 `LOCAL_URL_PREFIX`）。compose 模板里是占位。
+2. **按频道分文件夹是否符合用户习惯。** 默认 `{chat}/{name}`；也可以是按日期（`{date}/{name}`）或全部平铺（`{name}`）。一行配置就能改，需要用户选。
+
+---
+
+## 阶段 2e · 流式与流水线
+
+### 这一阶段做了什么
+
+**PikPak 流式端点（`PIKPAK_STREAM`，默认关闭）**
+
+- 文件服务器新增 `/s/<签名令牌>/<文件名>`。PikPak 请求这个 URL 时，bot **按它要的字节范围直接从 Telegram 读取、原样转发**，不落盘。
+- 支持 PikPak 需要的全部 HTTP 语义：`HEAD`（只回大小，不读 Telegram）、`Range` 单段请求（`bytes=a-b`、`bytes=a-`、`bytes=-n`）、准确的 `Content-Length` 与 `Content-Range`（来自 Telegram 报告的文件大小，不是估计）、越界返回 `416`。多段 Range 按规范可以忽略，回整个文件。
+- 读 Telegram 时对齐到 512 KiB（Telethon 的单次上限，满足 `upload.getFile` 的全部对齐规则），多读的头尾裁掉。只读 PikPak 要的那一段。
+- 每个流同时最多 4 个 PikPak 请求在读（PikPak 可能分段并发拉取；每一段都是用户主账号的一次读取，所以设了上限，超出的排队）。
+- 只对文档生效。照片没有事先可知的单一大小，照旧走落盘；`PIKPAK_STREAM` 关闭时一切照旧（落盘模式保留为回退）。
+- 端到端测试：真实文件服务器 + 真实投递 + 真实 `Downloader.stream`，假的 PikPak 真的去拉这个 URL（先 `HEAD`，再两段并发），拼回来的字节与原文件逐字节相同，磁盘上没有任何文件。
+
+**Telegram clone 路径：保留「下完再传」，不做边下边传。** 理由如下，按简报要求写明：
+
+1. **收益有上限，而且在 NAS 上更小。** 边下边传最多把总耗时缩到接近一半，前提是上传和下载速度相当、且互不抢带宽。NAS 上两者走的是同一条代理出口，互相竞争，实际重叠收益会明显小于一半。
+2. **代价是重写 Telethon 的上传。** 要自己用 `upload.saveBigFilePart` 分片上传，再自己组 `inputFileBig`、媒体属性、缩略图，并处理 `FILE_PART_X_MISSING` 之类的部分失败。这是面向用户的主路径，出错的代价是用户收不到文件。
+3. **这条路径已经很窄了。** 2a 之后，可转发的内容走零字节快路（设了缓存频道时）；2d 之后，`auto` 模式把受限内容留在 NAS。只有「telegram 模式 + 受限内容」还会走 clone，而这部分已经用上了 2b 的并行下载。
+4. 如果以后实测发现 clone 路径仍是大头，再评估；到那时有 2b 的下载日志和 bench 数据可以对照。
+
+**local 路径**：按定义就是落盘，不变。
+
+### NAS 上要改什么
+
+**必须做的：无。** `PIKPAK_STREAM` 默认关闭。
+
+要试流式（前提是 PikPak 能访问到 bot 的公网 HTTPS 地址，即 `HTTP_ENABLED=true` 且 `PUBLIC_BASE_URL` 可用）：在 compose 里设 `PIKPAK_STREAM: "true"`，重启 `bot`。
+
+### 用户需要在 Telegram 里做什么
+
+**无。**
+
+### 给 Cowork 的核验手段
+
+1. 打开 `PIKPAK_STREAM`，`/mode pikpak`，发一个受限频道里几百 MB 的视频链接。
+2. 期望：回复「saved to PikPak …」或「PikPak is still fetching …」；`/data/downloads` 与媒体目录里**都没有**新文件；日志里**没有**这个文件的 `downloaded ...` 行（字节没有落盘，也就不走下载器）。
+3. 和关闭流式时同一个文件对比「从发链接到 PikPak 里出现文件」的总时长，记录两个数字。
+4. 如果 PikPak 那边报错或一直停在「still fetching」：关掉 `PIKPAK_STREAM` 即回到落盘模式，并把 bot 日志里 `/s/` 相关的行贴进待决问题。
+
+### 怎么回滚
+
+- `PIKPAK_STREAM=false`（或不设），重启 `bot`。
+- 整体回滚：镜像 `sha-d0d227d`（阶段 2d）。
+
+### 更正
+
+阶段 2d 的提交信息里写的行数是估计值、写错了。实测是 `tgmd/` 9,060 行、`tests/` 6,805 行（2d 之前是 8,973 / 6,623）。
+
+### 待决问题
+
+1. **流式失败时不会自动回落到落盘。** 回落需要知道「PikPak 拉失败了」，而 PikPak 只会在超时后报 `error`，那时再下载一遍等于总时长翻倍。目前的设计是：流式默认关闭，实测稳定再开；不稳定就整体关掉。如果实测结论是「大多数时候行、偶尔不行」，再考虑做自动回落。
+2. **阶段 2 整体收尾。** 2a–2e 都已交付。三条验收（转发秒到、受限并行落盘的前后数字、DC4 直连前后数字）都需要 Cowork 在 NAS 上实测，命令分别在 2a、2b、2c 三节里。
+
+---
+
+## 阶段 3 · WMS M1：核心链路
+
+阶段 3 的规格是 `CC_BRIEF.md` §5 与 `docs/wms/`（本阶段已从 `Asukamadoka/pikpak-wms` 迁入：`ARCHITECTURE.md`、`ROADMAP.md`、`REFERENCES.md`，各加了一段「并入说明」，其余原样；`config/wms.example.yaml`、`config/rules.example.yaml` 迁到仓库根的 `config/`）。M6（自然语言）按其文件要求排在 M2 之后；它的机器人入口依赖 M3–M5 的集成，所以实际顺序是 M1 → M2 → M3 → M4 → M5 → M6。
+
+### 这一阶段做了什么
+
+新增顶层包 `pikpak_wms/`（与 `tgmd/` 并列，**不 import `tgmd`**，有测试扫描源码保证这一点）：
+
+- `core/`：
+  - `ratelimit.py` 全局令牌桶，默认 4 req/s、突发 8；
+  - `client.py` 唯一接触 PikPak 的地方：每个请求先取令牌；限流类错误指数退避重试（3、6、12 秒）；SDK 异常统一收敛成 `WmsError` / `AuthError` / `RateLimitedError` / `NotFoundError`；SDK 返回的 dict 转成领域模型。它不自己登录，而是接收一个「给我一个已登录客户端」的回调，这样 bot 以后可以直接注入用户已连接的账号；
+  - `auth.py` CLI 单独运行时的登录：从 `PIKPAK_USERNAME` / `PIKPAK_PASSWORD` 或 `PIKPAK_ENCODED_TOKEN` 登录一次，只把 token 写进 0600 文件（密码剥掉，不落盘），之后自动刷新。
+- `store/`：独立 SQLite，默认 `$DATA_DIR/wms.sqlite3`（容器内 `/data/db/wms.sqlite3`）；`files` / `tasks` / `audit` 三张表按原设计，另加一张 `meta`。只加不改（红线 3）。
+- `ops/stocktake.py`：全量与增量盘点；`--verify` 只读地把索引与网盘逐条核对。
+- CLI：`python -m pikpak_wms` → `version` / `doctor` / `login` / `stocktake [--full] [--verify] [--root] [--json]` / `ls` / `quota`。所有输出走 WMS 自己的 `t()`（中英两套；语言跟随 `WMS_LANG`，未设则跟随 bot 的 `TGMD_LANG`），命令名与参数保持英文。
+- 依赖：`pydantic`、`typer`（带 `rich`）、`APScheduler<4`。**镜像会变大几 MB**（主要是 `pydantic-core`）。没有引入 `aiosqlite`、`pydantic-settings`，沿用 bot 的 `sqlite3` + 线程做法。
+
+### 增量盘点的一个假设（需要 Cowork 在真实账号上确认）
+
+按原设计，增量盘点只重新列出 `modified_time` 变了的目录，一个没变的目录**连同整个子树**都跳过。这只有在 PikPak「子孙有变化时会刷新祖先目录的 `modified_time`」的前提下才正确。我在本环境无法验证 PikPak 的行为，所以：
+
+- 做了 `wms stocktake --verify`：不写任何东西，把整个网盘走一遍，与本地索引逐条比对，报告缺、多、变了的条目，不一致时退出码为 1；
+- 测试里把两种情况都跑了：会传播时增量能发现深层变化；不传播时增量会漏，而 `--verify` 能报出来，`--full` 能补齐。
+
+中断保护：一次盘点中途失败，未列完的目录会被标记，下次增量会从任何祖先处发现并补完，不会因为祖先的时间戳没变而永远跳过（测试覆盖，这个 bug 是写测试时抓到并修掉的）。
+
+### 验收数字（测试夹具上）
+
+夹具：1,202 个文件、1,263 条（含目录），分 12 部剧 × 4 季 × 25 集。
+
+| 盘点 | 请求数 | 按 4 req/s 折算 |
+|---|---:|---:|
+| 首次 | 63 | 约 15.8 秒 |
+| 二次（无变化） | 1 | 约 0.25 秒 |
+| 深层新增一个文件后 | 4 | 约 1 秒 |
+
+**真实网盘上的数字需要 Cowork 实测**（见下）。
+
+### NAS 上要改什么
+
+**无。** 这一阶段 bot 还不调用 WMS；镜像里多了 `pikpak_wms/` 和 `config/`，不影响 bot 运行。
+
+### 给 Cowork 的核验手段
+
+bot 当前是通过 Mini App 连接的 PikPak，环境变量里没有 PikPak 密码，所以**独立 CLI 在 NAS 上暂时登不上**。M3 会让镜像里的 `wms` 命令直接复用 bot 已连接的账号，届时按 M3 一节的命令实测即可，无需再输一次密码。
+
+如果现在就想测，需要临时提供凭据（**用完即删**）：
+
+```bash
+docker compose run --rm -e PIKPAK_USERNAME='…' -e PIKPAK_PASSWORD='…' bot python -m pikpak_wms login
+docker compose run --rm bot python -m pikpak_wms stocktake --full    # 记下耗时与请求数
+docker compose run --rm bot python -m pikpak_wms stocktake           # 记下耗时与请求数
+docker compose run --rm bot python -m pikpak_wms stocktake --verify  # 期望：一致
+```
+
+然后在 PikPak 网页端某个深层目录里新建一个文件，再跑一次增量盘点和 `--verify`：如果 `--verify` 报「缺 1」，说明 PikPak 不向上刷新时间戳，增量盘点需要改为依赖 `events` 接口或定期全量（待决问题 1）。
+
+### 怎么回滚
+
+不涉及运行中的 bot。回滚镜像到 `sha-b067192`（阶段 2e）即可。
+
+### 待决问题
+
+1. **PikPak 是否向上传播目录的 `modified_time`**，决定增量盘点能否按原设计工作。Cowork 按上面的步骤测一次即可定论。如果不传播，计划是：M2 做「基于 `events` 接口的增量盘点」（简报里「提过但没写成规格的功能」之一），并让定时任务每天做一次全量兜底。
+2. **镜像体积**：新增依赖约增加十几 MB（未实测，需要 CI 构建后在 GHCR 上看）。如果在意，`typer`/`rich` 可以换成标准库 `argparse`，代价是 CLI 表格输出变朴素。
+
+## 阶段 3 · WMS M2：规则引擎、计划流水线、审计与撤销
+
+规格：`CC_BRIEF.md` §5 的 M2 行、`docs/wms/ARCHITECTURE.md` §4–§5，以及本阶段新写的 `docs/wms/EXTRAS.md`（简报里「提过但没写成规格」的五项：按 hash 去重、归档、出库、star / share、基于 `events` 的增量盘点）。
+
+### 这一阶段做了什么
+
+- **规则层 `pikpak_wms/rules/`**
+  - `schema.py`：规则文件的 pydantic 校验。**未知字段一律报错**（比如把 `min_size` 拼成 `min_sise`，如果静默忽略，规则就会扩大到整个范围）。**规则文件里写不了永久删除。**
+  - `matcher.py`：原设计的 8 种匹配器 `kind` / `name_regex` / `path_glob` / `mime` / `min_size` / `max_size` / `older_than` / `newer_than`，另加 4 种：
+    - `extensions`；
+    - `category`：视频 / 图片 / 音频 / 文档 / 压缩包 / 字幕，按 mime 或扩展名判断；
+    - `empty`：空目录；
+    - `time_field`：默认用 `created`，即文件进网盘的时间。
+    - 这些是 M6 映射 Query 时要用的。
+  - 时长 `30d`，日期 `2026-09-01`，都**按 `schedule.timezone`（默认 Asia/Shanghai）解释，不按容器时区**。
+  - `template.py`：命名模板 `{show|title}`。过滤器有 `title` / `upper` / `lower` / `strip` / `spaces` / `pad2` / `date:%Y-%m`。模板里缺字段就报错，不会填成空串。
+  - `actions.py`：动作原语，每个都有 `plan()` 和 `apply()`（铁律 1），另有 `check()`（执行前确认还该不该做）和 `inverse()`（撤销）。
+    - 规则里可用的：`rename` / `move` / `copy` / `trash` / `star` / `share` / `create_folder` / `outbound`。
+    - 内部用的：`untrash` / `unstar` / `delete_forever` / `inbound`。
+  - `engine.py`：规则加本地索引生成 Plan，**不发任何请求**。求值顺序固定：
+    - 规则按文件顺序求值，一个文件只归第一条命中它的规则；
+    - 命中的目录带走它里面的东西；
+    - 一条规则的各步骤横向执行（先全部改名，再全部移动），这样同一目标目录的移动能合成一个批量请求；
+    - 目标名被占、模板缺字段时，跳过该文件并在计划里写一条备注，不猜。
+- **计划流水线 `ops/plans.py`**（CLI、M4 面板、M5 bot 共用这一条）
+  - 新增 `plans` 表（只加表），计划存为「待确认」，内容相同的待确认计划不重复存。
+  - `apply` 支持断点续跑：每次最多执行 `runtime.max_actions_per_run`（默认 500）个动作，`--limit N` 可以更少，下次从断点接着做。遇到限流或登录失败立即停下并记住位置。
+  - 每个动作执行前对照索引：已经做过的跳过（`done`），计划之后文件又变了的跳过（`changed`）。
+  - 执行后**当场更新索引**，所以紧接着再出一次计划就是空的（铁律 5，测试覆盖）。已执行或已丢弃的计划不能再执行。
+  - 某个文件失败时，只跳过这个文件后面的步骤，其余文件照做。
+  - 批量接口一次最多 100 个 id。
+- **审计与撤销**
+  - `audit` 表加两列 `plan_id`、`undo_of`。迁移只加列（红线 3），旧库启动时自动补上，有测试。
+  - `wms undo <id>` 默认只预览，加 `--apply` 才执行：
+    - rename 改回原名；
+    - move 移回原目录；
+    - trash 从回收站还原（目录还原后，下次增量盘点会重新列出它）；
+    - star 取消星标；
+    - create_folder 把新建的目录放回回收站。
+  - `wms undo` 会**拒绝**以下情况，并说明原因：
+    - 文件在那之后又变过；
+    - 已经撤销过；
+    - share（PikPak 没有取消分享的接口）；
+    - copy（新副本的 id 拿不到）；
+    - 永久删除；
+    - 目录原本就存在，或者已经被放进了东西。
+- **五个业务模块**
+  - `organize`：跑 `stage: organize` 的规则。`--dedupe` 是按 hash 去重：保留 `--keep-under` 下的那份，没有就保留最早的，再没有就保留路径最短的；其余进回收站。hash 相同但大小不同的不处理，只写备注。
+  - `cleanup`：跑 `stage: cleanup` 的规则，只进回收站。`--forever` 需要**同时满足**三个条件：配置 `allow_permanent_delete: true`、命令行 `--forever`、交互确认（或 `--yes`）。**任何定时任务都走不到永久删除**，有测试。
+  - `layout`：建出 `layout.ensure` 里缺的目录。执行时先查一次目录是否本来就在：本来就在的，撤销时不会把它放进回收站。
+  - `inbound`：
+    - 磁力 / URL 走离线下载，PikPak 分享链接走转存；
+    - 同一个来源只入库一次（`tasks` 表唯一约束）；
+    - `--poll` 或定时任务 `inbound-poll` 用一次请求更新离线任务状态。
+  - `outbound`：`none` 只给直链，`aria2` 通过 JSON-RPC 交给 aria2（secret 只从 `ARIA2_SECRET` 读），`local` 先下到 `.part` 文件再改名，已存在同名同大小的文件就跳过。**直链不写进计划，也不写进审计。**
+- **调度 `scheduler/runner.py`**
+  - APScheduler，cron 按 `schedule.timezone` 解释；
+  - 一把锁保证任务串行；上一轮没跑完时本轮跳过，不叠加；
+  - 单个任务出错只记日志，不影响调度，更不会拖垮 bot（M3 会把它放进 bot 进程）。
+  - 可用任务：`stocktake` / `stocktake-full` / `inbound-poll` / `layout` / `organize` / `cleanup`。
+  - organize / cleanup 会先对规则涉及的目录做一次增量盘点；`apply: false` 时只存计划，等人确认。
+- **`wms events --raw`**：原样打印 PikPak `events` 接口的返回。基于它的增量盘点**没有实现**，原因见 `EXTRAS.md` §5：字段没有文档，猜着解析，猜错时会悄悄漏掉变化。示例配置里加了每天一次的 `stocktake-full` 作兜底。
+- **CLI 新命令**：`rules [--check]`、`organize [--rule] [--dedupe --scope --keep-under]`、`cleanup [--forever --yes]`、`layout`、`inbound <链接…> [--to] [--pass-code] [--poll]`、`outbound <路径…> [--to] [--downloader]`、`plans [--all]`、`plan <id>`、`apply <id> [--limit] [--forever]`、`discard <id>`、`audit [--plan] [--json]`、`undo <id>`、`run`、`events --raw`。
+  - 写操作一律默认 dry-run，`--apply` 才执行。配置里 `runtime.dry_run: false` 可以改默认，`--dry-run` 始终可以强制只出计划。
+- **i18n**：新增文案全部走 WMS 的 `t()`，中英两套 key 完全一致。
+  - 计划备注、冲突原因、拒绝撤销的原因**以 key 加参数的形式落库**，展示时才翻译（红线 4），所以同一份计划切换语言后显示对应语言。
+  - `WmsError` 可以带 key：`str(exc)` 是英文，供日志用；`exc.display()` 是用户的语言。这就是简报 §6 要求的做法，WMS 从一开始就这样写。
+- **配置**
+  - `rules.example.yaml` 补齐 M6 要求的预置模板：按类型分类（视频 / 图片 / 音频 / 文档 / 压缩包 → `/Media/…`）、按月归档（`/Archive/{created|date:%Y-%m}`，默认关闭）、星标示例（默认关闭）；清退规则标了 `stage: cleanup`。
+  - `wms.example.yaml` 修了一个会在 M3 踩到的坑：原样例的 `store.database: data/wms.db` 是相对路径，在容器里会落到临时层，重建就丢。现在默认留空，也就是 `$DATA_DIR/wms.sqlite3`。
+  - 新增 `rules_file`、`outbound.local_dir`（默认沿用 bot 的 `MEDIA_DIR`）。
+- **依赖**：加了 `tzdata`（本地安装实测 2.8 MB），slim 镜像万一缺时区数据时，`Asia/Shanghai` 仍然可用。
+
+### 验收证据
+
+`CC_BRIEF` 的 M2 验收流程是「写一份 rules.yaml → dry-run 输出 Plan → apply 生效 → 审计可回溯 → undo 能撤销 rename / move，能从回收站还原」。这个流程就是 `tests/test_wms_m2.py::TestAcceptance`，全程计数写请求：dry-run 阶段为 0。
+
+用仓库自带的 `config/rules.example.yaml`，在假网盘上实测：`/Inbox` 放 100 集剧、1 部电影、100 个短视频、40 张图、1 个广告文件，共 243 个文件。
+
+- 盘点后出计划，**0 个请求**。计划有 348 个动作，涉及 242 个文件，共 132.9 GiB。
+- 执行共 **117 个请求**：
+  - 101 次改名（PikPak 没有批量改名接口）；
+  - 5 次批量移动；
+  - 1 次批量进回收站；
+  - 10 次建目录与查目录。
+- 执行完立刻再出计划：**0 个动作**。
+
+按 4 req/s 折算，执行约 30 秒。**规模和耗时的主要来源是改名**，这正是简报「已知风险」里说的。可以用 `wms apply <id> --limit 50` 分批执行，观察是否触发风控。
+
+测试：新增 78 个（`test_wms_rules.py` 42 个，`test_wms_m2.py` 36 个），全套 790 → 868 个，3.11 与 3.12 均全绿；`ruff check` 零告警。
+
+### NAS 上要改什么
+
+**无。** bot 仍然不调用 WMS（M3 才接入），镜像里只是多了代码。
+
+### 给 Cowork 的核验手段
+
+独立 CLI 在 NAS 上登录受限的问题同 M1（见上一节）。M3 之后可以直接用 bot 的账号。到时候按这个顺序跑：
+
+```bash
+wms stocktake
+wms rules --check                   # 规则文件有效
+wms organize                        # 只出计划：看每一行是不是你想要的
+wms apply <计划号> --limit 20       # 先小批量，观察有无风控
+wms audit                           # 每条改动都在
+wms undo <审计号>                   # 预览撤销
+wms undo <审计号> --apply           # 真撤销：rename / move / trash 各试一次
+wms events --raw --limit 20         # 贴样本（见待决问题 2）
+```
+
+### 怎么回滚
+
+不涉及运行中的 bot。回滚镜像到 M1 的提交 `sha-72249ad` 即可。WMS 库多出的 `plans` 表和 `audit` 的两列，旧代码不读，不影响。
+
+### 待决问题
+
+1. **分享链接转存后文件落在哪**：pikpakapi 的 `restore` 不接受目标目录，所以 `wms inbound <分享链接> --to X` 里的 `--to` 对分享链接不生效，文件会落在 PikPak 默认的位置。bot 现有的转存（`tgmd/pikpak.py`）也是这样。请 Cowork 转存一次，看落在哪个目录。如果不在 `/Inbox` 下，M5 的「入库后自动上架」需要把那个目录也写进规则的 `scope`。
+2. **`events` 接口样本**：请在网盘里新增、改名、移动、删除各做一次，然后跑 `wms events --raw --limit 20`，把输出里的链接和缩略图地址去掉后贴到这里。拿到样本之后，再决定是否实现基于事件的增量盘点（`EXTRAS.md` §5）。
+3. **批量改名的风控阈值**：上面实测的计划里，改名占了 101 个请求。建议第一次用 `--limit 20` 执行，然后逐步加大，看 PikPak 是否返回「操作频繁」。一旦返回，apply 会停下并记住位置，重跑同一条命令即可继续。
+4. **M1 的待决问题 1（目录时间戳是否向上传播）依然有效**。M2 的定时 organize 在出计划前会先做增量盘点；如果时间戳不传播，增量盘点可能看不到新文件，要靠每天的 `stocktake-full` 兜底。
+
+## 阶段 3 · WMS M3：同一个镜像、同一个账号、同一个卷
+
+### 这一阶段做了什么
+
+- **WMS 用 bot 已连接的 PikPak 账号**，不需要第二次登录，也不需要在 `.env` 里放密码。用哪个账号：
+  1. `WMS_ACCOUNT`：一个 Telegram 用户 id；或写 `shared`，固定用 `.env` 里的共享账号；
+  2. 否则用第一个自己连接了 PikPak（Mini App 或聊天内登录）的 admin；
+  3. 否则用 `.env` 里的共享账号。
+  - 账号是**每次调用时现选**的，所以 bot 运行中 admin 刚连上账号，WMS 下一次就会用上。
+  - 用的就是 bot 数据库里的 token，没有另存一份。token 刷新后照旧写回 bot 的库。
+- **`WMS_ENABLED=true`**：bot 启动时顺带启动 WMS 调度器，按 `wms.yaml` 里的 `schedule.jobs` 定时跑。
+  - 默认关闭，旧 compose 一字不改也照常启动（红线 2）。
+  - WMS 配置写错时只记一条错误日志，**bot 照常启动**（有测试）。
+  - 停止 bot 时调度器一起停。
+- **镜像里有 `wms` 命令**：`docker compose run --rm bot wms <命令>`，通过 `python -m tgmd.wms` 用 bot 的账号运行 M1、M2 的全部 CLI 命令。
+  - `wms doctor` 的「凭据」一行会写「bot 已连接的 PikPak 账号」。
+  - 没有可用账号时，给出一句说明并以退出码 1 结束。
+- **配置、规则、索引都在数据卷上**：
+  - 不设 `WMS_CONFIG` / `WMS_RULES` 时，先找 `$DATA_DIR/wms.yaml` / `$DATA_DIR/rules.yaml`（容器里是 `/data/db/`，也就是宿主机的 `./data/db/`），找不到才用 `config/`；
+  - 索引与审计是 `/data/db/wms.sqlite3`。
+  - 所以重建镜像、重启容器，token、索引、计划、审计、规则都不丢。
+- **边界**：tgmd 只 import `pikpak_wms.ops`，有 AST 扫描测试。入口是新的 `pikpak_wms/ops/embed.py`，由它再调用调度器和 CLI。
+- **顺手修的 M1 bug**：CLI 的 `main()` 在非 standalone 模式下丢了 click 返回的退出码，出错的命令也以 0 结束。CliRunner 测的是 typer app 本身，所以没有测出来；换成 `python -m tgmd.wms` 的测试后才暴露。
+
+### 验收证据
+
+在本环境用真实 Docker 构建了镜像。为了让 pip 信任本沙箱的 HTTPS 代理，构建用的是临时 Dockerfile，只多加一张 CA 证书，仓库里的 Dockerfile 没改。实测结果：
+
+- `docker run --rm IMAGE wms version` → `pikpak_wms 0.2.0`。`/usr/local/bin/wms` 就是那两行 shim。
+- 带卷 `-v m3data:/data` 跑 `wms doctor`：生成了 `/data/db/wms.sqlite3`，属主 `tgmd`；换一个新容器再挂同一个卷，文件还在。
+- 在没有任何 PikPak 账号的容器里跑 `wms quota`：输出「WMS has no PikPak account to use: …」，退出码 1。
+- **镜像体积（M1 待决问题 2 的答案）**：本地构建阶段 2e（`b067192`）与本阶段的镜像，解压后分别是 225 MB 和 267 MB，**WMS 带来约 42 MB**；按压缩后大小算是 52.5 MB 和 61.5 MB，**约 9 MB**，也就是 NAS 实际要多拉取的量。
+
+测试：新增 19 个（`tests/test_wms_m3.py`），全套 868 → 887，Python 3.11 与 3.12 均全绿；ruff 零告警。其中两个测试直接对应「重启不丢」：
+
+- **token**：bot 数据库里存的 token，关库、重开（模拟重启）之后，WMS 拿到的客户端用的就是它；
+- **索引**：`wms stocktake` 之后，另起一次 `wms ls` 直接读卷上的索引，不向 PikPak 发请求。
+
+### NAS 上要改什么
+
+**默认什么都不用改**，这一版的行为和上一版相同。想用 WMS 时按下面的步骤来。
+
+1. `docker compose pull && docker compose up -d`，更新镜像。
+2. 把配置和规则放到数据卷上，文件名要对（宿主机路径就是 compose 里 `./data` 挂载的那个目录）：
+
+   ```bash
+   docker compose run --rm bot sh -c 'cp config/wms.example.yaml /data/db/wms.yaml && cp config/rules.example.yaml /data/db/rules.yaml'
+   ```
+
+   然后在宿主机上编辑 `./data/db/rules.yaml`，把规则改成你要的目录结构。
+3. 先手动试（此时 bot 不需要改任何环境变量）：
+
+   ```bash
+   docker compose run --rm bot wms doctor         # 凭据一行应为「bot 已连接的 PikPak 账号」
+   docker compose run --rm bot wms stocktake --full
+   docker compose run --rm bot wms stocktake --verify
+   docker compose run --rm bot wms organize       # 只出计划
+   ```
+
+4. 确认计划没问题之后，想让它定时跑，就在 compose 的 `environment` 里取消注释 `WMS_ENABLED: "true"`，然后 `docker compose up -d bot`。
+   - 日志里会出现 `WMS started: config /data/db/wms.yaml, database /data/db/wms.sqlite3, N job(s) scheduled`。
+   - `wms.yaml` 示例里 organize / cleanup 都是 `apply: false`，也就是只存计划等确认；定时生成的计划用 `wms plans` 查看，用 `wms apply <号>` 执行。
+
+`docker compose run --rm bot wms ...` 和运行中的 bot 同时访问同一个 SQLite 没有问题（WAL 模式）。但**不要在 bot 开着 `WMS_ENABLED` 的同时再手动 `wms apply` 同一个计划**：两边会各执行一部分。已执行过的动作会被跳过，结果仍然正确，只是多花请求。
+
+### 用户需要在 Telegram 里做什么
+
+无。WMS 的 bot 命令（`/wms`）在 M5。
+
+### 怎么回滚
+
+- 只想关掉 WMS：去掉 `WMS_ENABLED` 或设为 `false`，重启 bot。
+- 回滚镜像：回到 M2 的 `sha-12009ef`。`/data/db/wms.*` 可以留着，旧版本不会读它们。
+
+### 待决问题
+
+1. **管理哪个账号**：默认是「第一个连了 PikPak 的 admin」，用户在 Mini App 里连的就是自己的主账号时这是对的。如果要管 `.env` 里的共享账号，设 `WMS_ACCOUNT=shared`。请用户确认要管哪一个。
+2. M1、M2 的待决问题（目录时间戳是否传播、`events` 样本、分享链接转存后文件落在哪、批量改名的风控阈值）依然有效。现在不需要临时密码就能在 NAS 上实测了，命令见上面第 3 步和 M2 一节。
+
+## 阶段 3 · WMS M4：仓储面板（Telegram Mini App）
+
+### 这一阶段做了什么
+
+- `tgmd/wms_panel.py`：挂在 bot 自己的 HTTP 服务器上，`GET /wms/app` 返回页面，`POST /wms/api` 处理操作。
+  - 身份校验和 PikPak 登录 Mini App 完全一样，用 Telegram 签名的 `initData`。**只有 admin 能用**，普通白名单用户会被拒绝（403）。
+  - 功能：
+    - 待确认的计划列表（带索引条数、上次盘点时间）；
+    - 查看计划全文；
+    - 确认执行 / 丢弃；
+    - 审计列表，每条都可以撤销：先预览，确认后执行。
+  - 全部调用和 `wms apply` / `wms undo` 同一条流水线（铁律 6）。所有写操作都拿调度器的同一把锁，所以面板上的操作不会和定时任务交叉执行。
+  - **面板里碰不到永久删除**：含永久删除动作的计划会被拒绝，即使配置开关已经打开也一样（铁律 2），有测试。
+  - 页面文案全部走 `t()`，以一个 JSON 对象注入页面（阶段 4 对 Mini App 文案的要求，这里从一开始就这样做）。有测试验证：文案里即使带 `</script>` 也关不掉脚本。`<html lang>` 跟随语言。
+- `/wms` 命令（admin）：回复仓储状态，并附「打开仓储面板」按钮。没有公网 HTTPS 地址时，改为说明为什么没有按钮。WMS 没开时提示设置 `WMS_ENABLED`。命令已加入菜单和帮助（中英）。M5 会在它下面加子命令。
+- `FileServer` 新增 `routes=[...]` 参数，用来挂面板这类额外路由（旧的 `portal=` 参数不变）。
+- WMS 的语言跟随 bot 的语言。bot 的语言可能写在 `config.yaml` 里而不是环境变量里，所以启动时显式同步一次。
+
+### 验收证据
+
+- 测试：新增 17 个（`tests/test_wms_m4.py` 15 个；另外两个是菜单测试随新命令自动多出来的参数化用例），全套 887 → 904，3.11 与 3.12 全绿；ruff 零告警。
+  - 面板测试走真实 socket：伪造的 initData 返回 401，非 admin 返回 403，WMS 关闭时返回 503；从列表到查看、执行、审计、撤销的完整流程，以及重复撤销被拒；丢弃之后不能再执行；永久删除计划被拒且网盘没有收到删除请求。
+- **真实浏览器实测**：本环境的 Chromium（Playwright）打开中文面板，注入一个签过名的 `Telegram.WebApp` 替身，完整点了一遍：
+  - 列表显示「计划 1（organize）：8 个动作，涉及 4 个文件，共 2.6 GiB」；
+  - 查看计划、确认执行，页面显示「计划 1：执行 8，跳过 0，失败 0，剩余 0」；
+  - 切到审计，撤销最新一条（入回收站），确认框里是「确定撤销这处改动吗？从回收站还原 /Inbox/最新地址广告.txt」，执行后显示「完成。」；
+  - **页面脚本零报错**。截图在会话里核对过：手机宽度下布局正常，长路径自动换行。
+- 改动：10 个文件，代码 +500 / −10 行（`tgmd/wms_panel.py` 275 行），测试 293 行。
+- 更正：M3 提交信息里写的「改动：15 个文件」不对，实际是 17 个（计数之后又改了 `.env.example` 和 HANDOFF）。
+
+### NAS 上要改什么
+
+面板需要 bot 有**公网 HTTPS 地址**，跟 PikPak 登录 Mini App 的前提相同：`HTTP_ENABLED=true` 加 `PUBLIC_BASE_URL=https://…`。NAS 目前没有公网地址（阶段 2d / 2e 的待决问题），所以：
+
+- **现在**：`/wms` 可以用（显示状态，并说明为什么没有面板按钮）；计划的确认用 `docker compose run --rm bot wms apply <号>`。
+- **有了 HTTPS 地址之后**（比如阶段 1 一节里的 Tailscale Funnel 地址可用时）：不需要任何额外设置，`/wms` 自动带上面板按钮。
+
+### 用户需要在 Telegram 里做什么
+
+以 admin 身份私聊 bot 发 `/wms`。有 HTTPS 地址时点「打开仓储面板」，在「计划」页查看并确认执行，在「审计」页撤销。
+
+### 怎么回滚
+
+回滚镜像到 M3 的 `sha-e60ea98`。M4 没有新的数据库改动。
+
+### 待决问题
+
+1. **公网 HTTPS 地址**：面板和 PikPak 登录 Mini App 都卡在这一点上，M4 的手机端验收（CC_BRIEF：「在手机 Telegram 里打开面板，确认一个 Plan」）要等它解决。阶段 1 一节记录过一个 Tailscale Funnel 地址；如果它可用，按那一节的说明设 `HTTP_ENABLED` 和 `PUBLIC_BASE_URL` 即可，面板不需要额外配置。**改之前先看一眼 NAS 上现在的值。**
+
+## 阶段 3 · WMS M5：`/wms` 命令族与入库后自动上架
+
+### 这一阶段做了什么
+
+- **`/wms` 命令族**（只对 admin 开放，普通用户会被明确拒绝）：
+  - `/wms`（或 `/wms status`）：状态，有 HTTPS 地址时附面板按钮；
+  - `/wms stocktake [full]`：刷新索引；
+  - `/wms plan`：按 organize 规则出计划，附 [确认执行] [丢弃] 按钮；`/wms plan <号>`：查看已有计划；
+  - `/wms apply <号>`：执行计划；
+  - `/wms undo <审计号>`：先预览，附 [确认撤销] 按钮；
+  - `/wms rules`：列出规则文件（显示实际路径）；
+  - `/wms help`：用法。
+  - 按钮点下去之后，原消息被改成执行结果，按钮随之消失，所以不会重复执行。旧消息上的按钮再点，会弹出拒绝原因，比如「已执行」。
+  - bot 里碰不到永久删除（铁律 2）。
+- **入库后自动上架**：
+  - 触发条件：一个任务把文件送进 PikPak 并成功结束，包括磁力 / URL 离线下载、分享链接转存、pikpak 模式下的 Telegram 媒体。
+  - 前提：送进的必须是 **WMS 管理的那个网盘**。普通用户连了自己的账号，文件进的是他们自己的网盘，不会被动。
+  - 之后按 `WMS_AUTO_SHELVE` 处理：
+    - `plan`（默认）：先对规则涉及的目录做增量盘点，再出计划，把计划连同 [确认执行] [丢弃] 按钮发到这个任务所在的聊天；
+    - `apply`：直接执行，然后发执行结果；
+    - `off`：不处理。
+  - **防抖**：最后一个任务结束后等 20 秒才上架，所以一次发一批链接只会得到一份计划。
+  - **目录没有被任何规则覆盖时**：转存落在的目录（`PIKPAK_FOLDER`，默认 `/TelegramMedia`）如果不在任何 organize 规则的 scope 里，上架永远找不到这些文件。这时 bot **提示一次**，说明怎么改，而不是默默不做事（有测试）。
+- **顺手修的 M2 bug**：organize 任务出计划前要对每条规则的 scope 做增量盘点。如果 scope 目录在网盘里还不存在（比如还没有 `/Inbox`），整个任务会失败，其他规则也跟着不跑。现在跳过不存在的 scope（有测试）。
+- 实现方式：JobQueue 新增 `after_pikpak` 钩子，钩子出错只记日志，不影响任务本身的结果；按钮用的是新的 `callback_buttons`（Telethon 1.45 的 layer 229 写法，与现有 `webview_button` 放在一起，有序列化测试）。
+
+### 验收证据
+
+`CC_BRIEF` 的 M5 验收是「在手机上转发一条磁力链接，文件按规则落到正确目录」。去掉手机这一步，就是 `tests/test_wms_m5.py::test_a_magnet_link_ends_up_where_the_rules_say`：
+
+- 磁力链接走**真实的 JobQueue**，交给假的 PikPak；假 PikPak 把文件放进 `/Inbox`；
+- 钩子触发自动上架（apply 模式），文件最终出现在 `/Media/Lost/S01/Lost.S01E01.mkv`，聊天里收到「已按规则上架」。
+
+测试：新增 19 个（`tests/test_wms_m5.py` 18 个，`test_wms_m2.py` 1 个），全套 904 → 923，3.11 与 3.12 全绿；ruff 零告警。覆盖了：
+
+- 防抖：两个任务只出一份计划，两处聊天都收到；
+- 两种模式；没有东西可上架时什么都不发；别人的网盘不动；
+- 目录不被规则覆盖时只提示一次；
+- `/wms` 各子命令，包括只有 admin 能用、WMS 关闭时的提示；
+- 按钮：执行后按钮消失，再点给出拒绝原因；丢弃、撤销；拒绝不合规的撤销；非 admin 点按钮被拒绝；乱码数据被忽略。
+
+### NAS 上要改什么
+
+在 M3 那一节的步骤之后（`WMS_ENABLED=true`，规则在 `./data/db/rules.yaml`）：
+
+1. **让转存落在规则能看到的地方**。示例规则的 scope 是 `/Inbox`，所以二选一：
+   - 设 `PIKPAK_FOLDER=/Inbox`（compose 里有注释占位）。**先看一眼 NAS 上现在的值**：如果已经设了别的目录、而且用户习惯那个目录，就改用第二种；
+   - 或者把 `rules.yaml` 里各条 organize 规则的 `scope` 改成现在的 `PIKPAK_FOLDER`。
+2. `WMS_AUTO_SHELVE` 不用设，默认 `plan`，也就是先发计划等确认。观察几天没问题，再考虑改成 `apply`。
+3. `docker compose up -d bot`。
+
+### 用户需要在 Telegram 里做什么
+
+- 像平常一样发磁力链接或分享链接，或在 pikpak 模式下发媒体。转存完成大约 20 秒后，bot 发来一份整理计划，点 [确认执行] 或 [丢弃]。
+- 随时可以发 `/wms`、`/wms plan`、`/wms rules` 等命令，`/wms help` 看全部用法。
+
+### 怎么回滚
+
+- 只关自动上架：`WMS_AUTO_SHELVE=off`。
+- 整个 WMS 都关：`WMS_ENABLED=false`。
+- 镜像回滚到 M4 的 `sha-4df6892`。本阶段没有数据库改动。
+
+### 更正
+
+M4 提交信息里写的「10 个文件」不对，实际是 12 个（计数之后又加了 HANDOFF 和 ROADMAP）。M3、M4 连续两次出现同样的错误，原因相同。本次提交的数字是在最后一次 `git add` 之后统计的。
+
+### 待决问题
+
+1. **离线下载的完成时机**：bot 报告磁力任务「完成」时，PikPak 那边有时还没下完。这时的计划里不会有这个文件，它会在下一次定时 organize（示例配置是每小时）或下一次入库时被补上。如果 Cowork 实测发现磁力的自动上架经常什么都找不到，可以考虑让 bot 等 PikPak 任务真正完成后再触发。
+2. 分享链接转存后文件落在哪（M2 待决问题 1）仍然未知，所以分享链接那一路不参与「目录没有被规则覆盖」的检查。
+3. M4 的公网 HTTPS 地址仍是面板的前提；`/wms` 命令和计划按钮**不需要**它，现在就能用。
+
+## 阶段 3 · WMS M6：自然语言指令
+
+规格：`docs/wms/M6-natural-language.md`（Cowork 起草，原样在仓库里）。
+
+### 这一阶段做了什么
+
+- **核心原则照办：模型只翻译，不执行。**
+  - 翻译器唯一的输出是经过 pydantic 校验的 `Query`（`pikpak_wms/nl/query.py`），字段按 M6 §3。
+  - Query 编译成 M2 的规则（映射按 §3），走同一条流水线：计划 → 确认 → 执行 → 审计。
+  - 有歧义就反问，不猜。永久删除不可达。
+- **三个后端，一个接口** `Translator.translate(text, now, tz) -> Query | Clarification | None`（`pikpak_wms/nl/translator.py`）：
+  - `rules`（`nl/rules_parser.py`，永远第一个跑）：确定性的中文解析器，覆盖 §4 列的全部说法。时间：今天 / 昨天 / 前天 / 本周 / 上周 / 本月 / 上个月 / 今年 / 去年 / 最近 N 天·周·个月 / N 天前 / 具体日期 / 日期区间；此外还有大小（含区间）、类型、扩展名、名称（包含 / 开头 / 结尾）、目录、意图关键词、每天·每周·每月·每小时（含几点）。
+    - **零误判的做法**：只有句子里**每一个**词都被认出来才接；有任何没认出的词（包括「不要」「除了」这类否定）就不接，交给模型；自相矛盾的（「今天和昨天」「两个目录」）也不接；路径里夹着指令词的（「/Media并删除图片」）也不接。
+  - `claude`：官方 `anthropic` SDK，结构化输出（`output_config.format` 绑定 Query 的 JSON Schema），`effort: low`。默认模型 `claude-opus-5`，可用 `NL_CLAUDE_MODEL` 改。用默认模型时带上服务端的拒答回退（`fallbacks: "default"`），被安全策略拒答时由服务端换模型重试；换成其他模型时不带这个参数。
+  - `ollama`：`/api/chat`，`format` 传同一份 JSON Schema（约束解码），`temperature 0`。默认 `qwen2.5:3b`，地址 `OLLAMA_URL`。
+  - 配置：`NL_BACKEND=rules|claude|ollama`（默认 rules），`NL_FALLBACK=none|claude|ollama`。顺序永远是 rules → NL_BACKEND → NL_FALLBACK；某个模型挂了就记日志、跳过，不影响 rules 能接的句子。
+- **Bot 入口**：
+  - `/do <一句话>`；admin 在私聊里发的纯文本（不是链接、不是命令）也进翻译器。发链接下载的老行为不变：链接优先匹配。普通用户和群聊不受影响。
+  - 计划消息附 [确认执行] [修改] [取消]。
+  - 反问之后直接回复就行，回复会接在原句后面重新理解；点 [修改] 同理。
+  - 按钮只对发起人有效，用过就作废；[取消] 会把存下的计划一起丢弃。
+- **计划里写明怎么理解的**：
+  - 意图；
+  - 范围；
+  - 时间的起止和时区；
+  - 一句「「转存 / 入库」按文件进网盘的时间（created_time）判断」；
+  - 大小、类型、扩展名、名称条件；
+  - 目的地（下载会写出 NAS 上的完整路径）；
+  - 命中多少个文件、共多大、前几个文件名（新的在前）。
+  - 这些说明以 key 加参数的形式落库，展示时才翻译（红线 4）。
+- **定时**：「每天……」「每周……」这类句子不生成一次性计划，而是生成规则。
+  - 确认后以追加文本的方式写进规则文件，原文件的注释和格式都保留；原句会作为注释写在规则上方。写完立即校验，失败就还原原文件。
+  - 写入后立即排进调度，不用重启；每条规则可以有自己的 `schedule: {cron, apply}`。
+  - 为了铁律 1，`apply` 默认是 false：每次到点只生成计划，然后**主动发给所有 admin**，附确认按钮。同一份计划只发一次；手动触发的运行不会重复通知。
+- **预置规则模板**：M2 已经放进 `config/rules.example.yaml`。M6 的「分类 / 归档 / 下载」分别对应哪个目录，写在 `wms.yaml` 的 `nl:` 段（`classify`、`archive_root`、`download_to`），有默认值。
+  - 「按类型分类」会跳过已经在分类目录里的文件，不会把 `/Media/视频` 里的东西再搬一遍。
+- **定向下载 = 出库 local**：规则的 `outbound` 动作新增 `via`，NL 的「下载」固定走 `local`，也就是下载到 NAS 媒体目录下的 `PikPak/` 子目录，不受 `outbound.downloader` 默认值影响。
+- **命令行**：`wms do "<一句话>" [--apply]`。有了它，Cowork 不用手机也能测完整流程。
+- **README 写明了隐私边界**：模型只收到那句话、schema 和当前日期时间时区。文件名、目录列表等网盘内容一概不发。默认的 `NL_BACKEND=rules` 什么都不外发。
+- **依赖**：`anthropic>=1.8,<2`。
+
+### 验收证据
+
+- **评测集** `tests/nl/cases.yaml`：70 条中文，其中 48 条给出期望的 Query（包括用户原话）、14 条应当反问、8 条应当拒绝。三类里一共混有 5 条专门挑出来的易错句（否定句、一句两个动作、两个时间、路径吞掉后半句），用作回归。
+- **rules 后端**：覆盖率 **80.0%**（56/70），**零错误**，平均 0.4 ms。这项有测试（`test_rules_covers_seventy_percent_with_zero_wrong`），将来谁改坏了 CI 会拦住。
+  - 过程中抓到并修掉了 4 类误判：路径被转成小写；「昨天下载的图片」被当成下载指令；路径吞掉后半句；后面的条件悄悄覆盖前面的条件。前 3 类都已写进评测集回归；第 4 类由 `删除今天和昨天的视频` 等条目覆盖。
+- **端到端**（`test_wms_m6.py::TestTheUsersSentence`）：「下载今天转存到网盘的所有大于1GB的视频」→ rules 解析 → 计划里写着「进网盘时间晚于 2026-09-24 00:00（Asia/Shanghai）」「按文件进网盘的时间（created_time）判断」「命中 2 个文件，共 5.0 GiB」和两个文件名；昨天的、不到 1GB 的、今天的大图片都没算进去 → 执行 → 两个文件落到 NAS 媒体目录的 `PikPak/` 下 → 审计里有两条 `outbound`，`downloader: local`。
+- **Bot 流程**（`test_wms_m6_bot.py`，12 个）：`/do`、admin 私聊纯文本、普通用户和群聊不受影响、WMS 关闭时的行为、反问后合并、修改、取消、别人的按钮无效、定时规则写入并排程、定时计划发给 admin 且只发一次、PikPak 出错时给出说明而不是崩溃。
+- **模型后端**都用假的测（不联网）：
+  - 请求里只有「Now: … (time zone …)」和那句话；
+  - schema 只用结构化输出支持的写法；
+  - 有拒答、乱码、没有凭据、模型反问这几种情况的测试。
+- **真实镜像**（本地 Docker）：`python -m pikpak_wms.nl.eval --backend rules` 在镜像里跑，结果同上；`anthropic 1.8.0` 可导入；没有 key 时 `--backend claude` 70 条都报「没有凭据」的错，程序不崩。
+  - **镜像体积**：M3 时 267 MB → 294 MB（解压后），61.5 → 64.6 MB（压缩后），主要是 anthropic SDK。
+  - 本次构建时 Docker Hub 限流（429），基础镜像改从 `mirror.gcr.io/library/python:3.12-slim`（Docker 官方镜像在 Google 上的镜像）拉取；仓库里的 Dockerfile 没改。
+- 测试 923 → 961（+38：`test_wms_m6.py` 24、`test_wms_m6_bot.py` 12；另外 2 个是菜单测试随 `/do` 自动多出的参数化用例），3.11 与 3.12 全绿；ruff 零告警。
+
+### NAS 上要改什么
+
+前提是 M3 那一节的 `WMS_ENABLED=true`。
+
+- **只用 rules 后端**：什么都不用加。admin 私聊发一句话，或者 `/do 一句话`，就能用。
+- **加 Claude**：在 `.env` 里加 `ANTHROPIC_API_KEY=…`（**只放 .env，绝不入库**）和 `NL_BACKEND=claude`，然后重启 bot。流量走现有的 mihomo 代理。
+- **加 Ollama**：compose 文件末尾有一段注释掉的 `ollama` 服务，带 `mem_limit: 4g`、`cpus: 2`。取消注释后：
+  1. `docker compose up -d ollama`；
+  2. `docker compose exec ollama ollama pull qwen2.5:3b`；
+  3. bot 的环境变量里设 `NL_BACKEND=ollama`（或者把它作为 `NL_FALLBACK`）和 `OLLAMA_URL`（见待决问题 1）。
+- 「下载」会落到 bot 的 `MEDIA_DIR`（没设就是 `DOWNLOAD_DIR`）下的 `PikPak/`。**媒体目录的宿主机路径仍是阶段 2d 的待决问题**，在它确定之前，文件落在容器的 `/data/downloads/PikPak/`，也就是宿主机的 `./data/downloads/PikPak/`。
+
+### 用户需要在 Telegram 里做什么（端到端验收，M6 §7）
+
+1. 以 admin 身份私聊 bot，发：`下载今天转存到网盘的所有大于1GB的视频`。
+2. 收到计划：核对时区（Asia/Shanghai）、「按文件进网盘的时间判断」这一句、命中数、总大小、文件名，看是否和 PikPak 里今天的文件一致。
+3. 点 [确认执行]。文件会出现在 NAS 媒体目录的 `PikPak/` 下。
+4. `/wms`，或者面板的「审计」页，能看到 `outbound` 记录。
+
+### 给 Cowork 的核验手段
+
+```bash
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend rules          # 期望：覆盖率 0.8，wrong 0
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend claude --json  # 需要 .env 里的 ANTHROPIC_API_KEY
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend ollama         # 需要 OLLAMA_URL，CPU 上会慢
+docker compose run --rm bot wms do 下载今天转存到网盘的所有大于1GB的视频          # 只出计划，不执行
+```
+
+eval 报告里有模型后端的准确率和平均延迟，请把两个模型的这两个数字贴回这里。rules 后端「不接」的句子，正是模型后端要处理的部分。
+
+### 怎么回滚
+
+- 只关自然语言：没有单独的开关；不设 `NL_BACKEND` 就只剩本地解析器，什么都不外发。要完全不接收纯文本，关掉 `WMS_ENABLED`。
+- 删掉 `/do` 生成的定时规则：在 `./data/db/rules.yaml` 里删掉那几条（每条上方都有原句注释），重启 bot。
+- 镜像回滚到 M5 的 `sha-d3cabb3`。本阶段没有数据库改动。
+
+### 以后再说（M6 §8）
+
+把 WMS 的 ops 包装成 MCP server，让用户在 Claude 应用里说一句话就能管网盘。这一阶段按要求**不做**。要做的话，公网暴露之前必须先设计鉴权：至少要有单用户令牌和来源限制，并且与 Telegram 的 admin 身份打通。
+
+### 待决问题
+
+1. **bot 容器能不能访问 Ollama**：bot 用的是 `network_mode: service:proxy`（和 mihomo 共用网络栈），compose 服务名 `ollama` 能不能解析、mihomo 的 TUN 会不会拦截 `11434` 端口，我没法在这里验证。建议先试 `OLLAMA_URL=http://<NAS 局域网地址>:11434`；如果 mihomo 拦截了，就在 mihomo 规则里给这个地址加一条 `DIRECT`。
+2. **Claude 模型的选择**：默认 `claude-opus-5`（效果最好）。句子很短，按一句几百 token 算单次花费很低，但用户如果想更省，可以设 `NL_CLAUDE_MODEL=claude-haiku-4-5`。这要用户来决定，我没有替用户降级。
+3. **「最近 N 个月」按 N×30 天、「去年」按日历年**，是 rules 后端的约定，计划里会写明。用户若希望「上个月」「最近一个月」表示别的意思，告诉我改。
+4. **媒体目录的宿主机路径**（阶段 2d 的待决问题）决定了「下载到 NAS」最终落在哪里。
+
+## 阶段 4 · 中文化第二批
+
+范围按 CC_BRIEF §6：`setup.py`、`portal.py`、`verify.py`，以及用户会直接看到的异常消息。
+
+### 这一阶段做了什么
+
+- **异常：带 key，展示时翻译**（`tgmd/i18n.py` 的 `Explained` 和 `describe()`）。
+  - 用户会看到的异常类都继承 `Explained`：`ResolveError`、`PikPakError`、`LinkError`、`DeliveryError`（含 `TooLargeToUpload`）、`DownloadError`、`BotTokenError`、`ClaimError`、`QueueFull`，另外新增一个 `SessionError`（`/setup telegram` 收尾时接管会话失败）。
+  - 抛出时只写 `key` 和参数，比如 `ResolveError(key="err.resolve.no_username", name=...)`。英文原文只在目录里存一份，`str(exc)` 取的就是这份英文，所以**日志和数据库里仍是英文**（红线 4）。
+  - 展示给人看的地方一律用 `describe(exc)`，按当前语言出文本。涉及 handlers、tasks、setup、verify、portal、links，以及 WMS 的「没有账号」提示。
+  - 包在外面的错误会把里面的错误一起翻译。例如 PikPak 的错误经 `DeliveryError` 转一手，读者看到的是整句中文。
+  - 共 68 处抛出点，覆盖 CC_BRIEF 估的约 76 条；差额是阶段 1 删掉的那部分，加上几处重复文案合并成同一个 key。
+  - 仍保持英文、只进日志的有：`ConfigError`、`TokenError`、`InitDataError`，这是原计划。
+  - 顺手修了一处：`QueueFull` 以前把**已翻译**的文字写进 `jobs.error`，现在写英文。批量任务的失败摘要同理：给人看的是译文，落库的是英文。
+- **`setup.py`**：整个向导（状态、PikPak 登录、Telegram 登录、超时、重试）改成走 `t()`。新增 43 条目录项，英文原文一字未改。
+- **`verify.py` 和 `/verify`**：
+  - 每条检查结果和总评都走 `t()`。
+  - 检查名分两层：`Check.name` 仍是稳定的英文 id（测试和代码都按它找），另加一个 `Check.label` 负责显示。
+  - `python -m tgmd.verify` 也按 `TGMD_LANG` 或配置里的 `language` 说话。配置加载失败时的报错也一样。
+- **命令行对齐**：`ljust` 按字符数补空格，中文一个字占两列，列就歪了。新增 `tgmd.utils.display_width`（全角和宽字符记 2 列，组合符记 0 列），按显示宽度补齐。实际输出：
+
+  ```
+  ✓ 配置        已加载，各项配置互相一致
+  ✓ 机器人令牌  格式正确，对应机器人 ID 123456789
+  ! 用户会话    未配置。没有它，只能读取机器人自己所在的聊天。请在 Telegram 里用 /setup telegram 登录一个。
+  - 缓存聊天    未配置；每次请求都会重新下载（设置 CACHE_CHAT_ID）
+  ✓ HTTP 服务   已绑定 0.0.0.0:8080
+  ```
+- **PikPak 登录 Mini App（`portal.py`）**：
+  - 页面文案走 `t()` 并做 HTML 转义。
+  - JS 要用的文案放在 `<script type="application/json">` 里，以 JSON 注入，`</` 已转义，做法与 M4 仓储面板一致。
+  - 连接成功后的页面改用 DOM 节点加 `textContent` 拼出来，不再拼 `innerHTML`。
+  - `<html lang>` 跟随语言。CC_BRIEF 说的两处硬编码，另一处在阶段 1 已随「一次性登录链接」页面一起删除，现存的只有这一处。
+  - 接口返回的错误和 `unavailable_reason()` 都已翻译。
+- **投递结果摘要**（已发送、已保存到…、已存入 PikPak、PikPak 仍在拉取、已加入离线下载）也进了目录。这几条原本不在 §6 的清单上，但用户每次下载都会看到。
+- **目录规模**：178 → 397 条（+219：setup 43、异常 64、verify 88、portal 22、会话 2），en 和 zh 两边键完全一致。
+
+### 验收证据
+
+- 新增 `tests/test_i18n_batch2.py`，26 个测试：
+  - **AST 扫描 `tgmd/` 全部源码**：上面每个异常类的每一处抛出都必须带 `key=`、不带位置参数的英文消息，而且 key 在 en 和 zh 里都存在（目前 68 处）。
+  - **AST 扫描所有 `t("…")` 字面量**：key 必须存在于目录中。当前零缺失。
+  - `str(exc)` 是英文、`describe(exc)` 是中文；嵌套错误整句翻译；外部库的错误原样透传；链接解析错误以中文进入回复。
+  - verify 报告：检查 id 不变而标签翻译；en 和 zh 下详情列按显示宽度对齐；`TGMD_LANG=zh` 时命令行输出「配置错误：…」。
+  - Mini App 页：`lang` 跟随语言；中文页上除 PikPak、Telegram 和 `/pikpak logout` 以外没有可见的英文；译文里写 `</script>` 也关不掉脚本；标题里的 HTML 会被转义。
+- `tests/test_tasks.py` 加了 1 个测试：中文环境下任务失败时，状态消息是中文，`jobs.error` 是英文。
+- `tests/test_i18n.py` 的占位符一致性和命令名不翻译两项测试照常通过（`{value!r}`、`{needed:.0f}` 这类带转换或格式的占位符，两种语言也一致）。
+- 测试 961 → 988（+27），3.11 与 3.12 全绿；ruff 零告警。
+- 改动（代码与测试，不含 README 和本文件）：21 个文件，+1384 / −470 行。大头是 `tgmd/i18n.py` 的目录（+759）和新测试（+259）。
+
+### NAS 上要改什么
+
+什么都不用改。语言仍由 `TGMD_LANG`（或 `BOT_LANG`、配置里的 `language`）决定，没有新增环境变量。已经设了 `TGMD_LANG=zh` 的，更新镜像、重启之后，向导、`/verify` 和登录页就是中文。
+
+### 用户需要在 Telegram 里做什么
+
+1. `/verify`：检查名和说明都应是中文，末尾一句中文总评。
+2. `/setup`：状态页和每一步提示都是中文。
+3. `/pikpak login` 打开 Mini App：标题「连接你的 PikPak 账号」；故意输错密码，红字提示应以「PikPak 拒绝了这组凭据：」开头，冒号后面是 PikPak 返回的原文。
+4. 发一个不存在的频道链接，比如 `https://t.me/nosuch_channel_xyz/1`：应回复「不存在名为 @nosuch_channel_xyz 的聊天」或「无法解析 @nosuch_channel_xyz」，具体是哪一句取决于 Telegram 返回哪种错误。
+
+### 给 Cowork 的核验手段
+
+```bash
+docker compose run --rm -e TGMD_LANG=zh bot python -m tgmd.verify   # 中文、列对齐
+docker compose run --rm -e TGMD_LANG=en bot python -m tgmd.verify   # 英文输出与阶段 3 相同
+docker compose logs bot | grep -P '[\x{4e00}-\x{9fff}]'              # 红线 4：除文件名、聊天标题这类用户数据外，日志里不应有中文
+```
+
+### 怎么回滚
+
+镜像回滚到 M6 的 `sha-6ba289b`。本阶段没有数据库或配置改动。
+
+### 待决问题
+
+1. **Mini App 用哪种语言**：现在跟随 bot 的全局语言，和仓储面板一致。Telegram 的 initData 里带有用户自己的 `language_code`，但页面在拿到它之前就已经渲染好了。要不要做成按用户语言显示，需要用户决定；目前全局只有一个语言，我没有扩大范围。
+2. **外部原文不翻**：PikPak 库和 Telethon 返回的错误原文（如 `invalid_grant`、RPC 错误名）会原样出现在中文句子里。这些文本来自外部，没法可靠地翻译。
+3. **`python -m tgmd.verify` 的「配置提示」行仍是英文**：内容来自 `Config.validate()`，写给运维看，里面全是环境变量名，和 `ConfigError` 一样按原计划只用英文。如果希望这些提示也出中文，需要再开一批。
+
+## 阶段 3 · WMS M7：按用户规则整理网盘
+
+规格：`docs/wms/M7-organize-rules.md`（Cowork 起草）。所有功能都以 bot 为入口；命令行等价命令给 Cowork 核验用。
+
+### 这一阶段做了什么
+
+- **§1 白名单**（`pikpak_wms/ops/protect.py`），优先级最高：
+  - 受保护的有两类：`protect.paths`（默认 `/收藏`、`/Cosplaytales Nako EP#1-24`、`/小千`，外加 `/wms protect add` 加进来的、减去 `rm` 掉的，存在索引库的 meta 表里，不改 `wms.yaml`）；以及 `protect.shared: true` 时，每次生成计划前实时读取 `GET /drive/v1/share/list` 得到的分享内容。分享列表分页读完，过期的也算，每个 `file_id` 用本地索引解析成路径，整棵子树受保护。
+  - pikpakapi 没有读分享列表的接口，`WmsClient.shares()` 借 SDK 自带的鉴权 GET 调用。
+  - **统一在计划层过滤**：`plans.save()` 保存任何计划之前都会过一遍白名单，不管这份计划是规则引擎、整理任务、去重还是一句话生成的。被丢弃的动作包括：
+    - 来源或目标在受保护范围内的；
+    - 会移动、改名或删除一个「里面有受保护内容」的目录的（移动父目录等于移动子目录，只按字面判断路径不够）。
+    - 只为被丢弃的移动建的空目录也一起去掉。计划里会记一行「白名单豁免 N 项」。
+  - **执行时再查一次**：计划生成之后才分享出去的文件，执行时跳过，计入 `skipped.protected`。
+  - **读不到分享列表时**：沿用上一次成功读到的列表，并在计划里注明；连一次都没读到过，就不生成计划。宁可不动，也不能把分享过的文件当成没分享。
+  - **去重**：受保护的副本一律保留，并作为保留份，同组里只删不受保护的那些。
+- **§2 一级目录里的散落文件**（`pikpak_wms/rules/names.py` 和 `ops/tidy.py`）：
+  - 文件名先归一化：去掉扩展名、编号（`(1)`、`_01`、`-part2`、`EP03`、`第3集`、`S01E02`）、分辨率和编码标签、日期、方括号和圆括号里的站点标签（带域名的一律去掉；去掉括号后什么都不剩时，保留括号里的内容作标题）、首尾标点。
+  - 相机和手机的默认前缀（`IMG`、`VID`、`DSC`、`微信`……）、纯数字、像哈希的串，都算「杂乱名称」，不参与分组。
+  - 分组方法：键排序后，相邻的键相同、或共同前缀不少于 `min_prefix`（4）个字符的，归为一串；一串有 `min_group`（2）个或以上就成组，移到 `/<A>/<组名>/`。组名是共同前缀，不会停在英文单词中间（`Cosplay_Nak` 会截成 `Cosplay`）。同样的输入永远得到同样的计划，有测试守着。
+  - 一个文件的键和已有子目录同名时，单个文件也会放进那个子目录。
+  - 没进组的视频放 `/<A>/杂/`，图片放 `/写真/杂/`（重名时文件名后加 `_<短哈希>`），其他文件放 `/<A>/其他/`。
+- **§3 二级目录里的内容**：
+  - **精简**（都是进回收站）：
+    - 深度 ≥ 2 的空目录；
+    - 垃圾文件：扩展名 `url/html/txt/lnk/apk` 的不论大小，名字带「最新地址 / 防屏蔽 / 更多资源」的小于 1 MiB；
+    - 单链嵌套压平：内容上提到链的最上层，再删掉空壳。
+  - 本次计划清空的目录（大文件移走、垃圾删光之后）也一起删掉，所以执行完再生成一次计划是空的，有测试验证。
+  - **大目录**：一级目录下 ≥ 50 GiB 的二级目录，整体移到 `/大文件/<A>/<目录名>/`。
+  - **大文件**：深度 ≥ 3、≥ 4 GiB、所在二级目录没有被整体移走的，移到 `/大文件/<A>/`。先压平再移动时，计划用的是压平之后的路径。
+  - **分批确认**：organize-tree 一个一级目录出一份计划，bot 里每份计划各有 ✅（执行）和 📄（明细）两个按钮。
+  - 阈值、词表、别名都写在规则文件的 `tidy:` 段（`config/rules.example.yaml` 有全部默认值），没有规则文件时用默认值。
+- **§4 入口目录定期上架**：
+  - `/Telegram` 和 `/Pack From Shared` 里的每个条目，名字里含某个一级目录名或它的别名（`tidy.inbox.aliases`），就移进那个一级目录。匹配规则：最长的名字优先；英文名按单词边界匹配，`_` 也算边界；短于 2 个字符的名字不单独匹配。
+  - 移进去的文件接着参与那个目录的散落文件归集。没匹配上的，在入口目录内部按 §2 整理。
+  - **内置定时**：organize-inbox 每小时，organize-tree 每天 04:30，dedupe 每周一 05:00（`apply: true`），big-report 每周一 10:00。`wms.yaml` 里 `schedule.jobs` 列出同名任务就以列出的为准，`schedule.builtin: false` 就一个都不加。
+  - 默认只出计划，推送给 admin，附 [确认执行] [查看明细] [丢弃]。去重按你的要求自动执行，每轮受 `max_actions_per_run` 限制，剩下的下一轮继续，执行结果也会推送。
+  - 同一任务新一轮的计划出来后，上一轮还没确认、这次也没再出现的计划会被标为「已丢弃」，免得有人点到按旧索引生成的计划。
+- **§5 大文件报告**（`/wms big`，以及每周推送）：
+  - 内容：最大的 20 个文件、最大的 10 个目录（不会同时列父目录和子目录）、90 天没变化的大文件，以及可腾出空间的估算。估算 = 久未变化的大文件 + 重复副本占用。
+  - 每项一个 🗑 按钮，点一下走一份「单个动作」的计划，经过白名单、写进审计，可以撤销。不会自动删除任何东西。
+- **§6 bot 入口**：
+  - 命令：`/wms organize tree [/目录]`、`/wms organize inbox`、`/wms dedupe`、`/wms big`、`/wms protect ls|add|rm <路径>`、`/wms plans`，`/wms apply <号>` 原来就有。
+  - 自然语言：新增意图 `organize_tree`、`organize_inbox`、`dedupe`、`big_report`。rules 解析器能听懂「整理一下 Pack From Shared」「把大文件单独放一起」（只做大文件部分）「去重」「看看最大的文件」这类说法；加了定时或筛选条件的，会反问而不是猜。
+  - 评测集从 70 条扩到 94 条（新增 24 条 M7 句子）。M6 里「帮我把重复的文件去掉」原本标的是 reject，现在是 dedupe。
+- **§7 顺带的三处**：
+  1. **直连媒体线路关掉**：`TG_DIRECT_MEDIA=auto` 启动时打一条错误日志，按 `off` 处理。`tgmd.bench --route media|both` 默认拒绝运行，必须加 `--same-egress-ip`，帮助里写明风险。原因见下面「这次的事故」。
+  2. **读取账号被吊销**：启动时 Telegram 拒绝了会话（`AuthKeyDuplicatedError` 一类，或未授权）：
+     - 会话来自聊天内登录的：清掉数据库里失效的 `user_session_string`；
+     - 私聊每个 admin，提示用 `/setup telegram` 重新登录；会话来自 `TG_USER_SESSION` 的，还会提醒把它从 `.env` 删掉；
+     - 没打开过私聊的 admin 收不到，只记日志。
+  3. **自然语言新增 `openai` 后端**（OpenAI 兼容接口）：
+     - 环境变量：`NL_BACKEND=openai`，`NL_OPENAI_BASE_URL`、`NL_OPENAI_MODEL`、`NL_OPENAI_API_KEY`（可以为空）。
+     - 先用 `response_format: json_schema`。服务端返回 400/404/415/422（比如 DeepSeek 不支持 schema）时，改用 `json_object`，并把 schema 写进提示词；之后的请求也直接用这个模式。两种情况都会在本地按 schema 校验。
+     - 原来的 `ollama` 后端保留；`eval` 增加了 `--backend openai`。
+
+### 这次的事故（§7.1，要记下来）
+
+2026-09-25 在 NAS 上实测直连媒体线路时，读取账号的会话被 Telegram 吊销（`AuthKeyDuplicatedError`）。
+
+- 原因：`tgmd/parallel.py` 的直连连接复用了主会话的 auth key（本 DC 用 `session.auth_key`，其他 DC 用借来的 exported key）。直连从电信 IP 出去，主连接走代理 IP，Telegram 看到同一把 key 同时出现在两个 IP 上，就吊销了它。
+- `d338f20` 已经让 bot 在这种情况下不再崩溃循环，这一阶段补上了关闭开关和通知 admin。
+- **以后如果要重做**：只能用新协商的独立 auth key（ExportAuthorization/ImportAuthorization，加上新的 DH 握手），而且只用于非本 DC。在此之前不要打开这条线路。
+
+### 验收证据
+
+- **§0 夹具**（`tests/m7_fixture.py`）按真实网盘的数字构造，数字由 `test_the_fixture_has_the_numbers_of_section_0` 逐项断言：
+  - 80,964 个条目，9.7 TiB，45 个一级目录；
+  - 751 个散落文件，分布在 19 个目录，最多的一个 467 个；类型是 698 mp4、28 mov、16 zip/7z/rar、2 jpg；
+  - 435 个二级目录，其中 40 个超过 50 GiB，合计 6.4 TiB；155 个超过 4 GiB 的文件，合计 1,070 GiB；
+  - 20 个被分享的文件，对应 40 条分享（一半已过期）。
+- **每条规则都有计划快照**（`tests/snapshots/m7/`）：
+  - 内容：tree 的 slim、big、loose 三部分，加上 inbox、dedupe、big-report；
+  - 每份快照记录：每种动作的数量、前 12 行计划文本、整份计划的 sha256；
+  - 规则一改，快照就会对不上；确认新结果正确后，用 `WMS_UPDATE_SNAPSHOTS=1` 重写。
+  - 在夹具上的结果：
+    - big：38 份计划，27 个大目录、64 个大文件（受保护目录和入口目录里的不动）；
+    - inbox：上架 100 项，归集 268 个；
+    - 所有计划里碰到白名单的动作都是 0。
+- **白名单性质测试**：60 个随机种子，每个都随机构造目录树、分享、白名单增删和规则，跑 organize-tree、organize-inbox、dedupe 和规则引擎，断言存下来的计划里没有一个动作碰到受保护内容。
+- **在 80,964 个条目上生成计划的耗时**（沙箱，秒）：
+
+  | 任务 | 耗时 |
+  | --- | --- |
+  | 完整的 organize-tree | 2.4 |
+  | 其中 slim | 2.0 |
+  | 其中 big | 1.3 |
+  | 其中 loose | 1.1 |
+  | organize-inbox | 1.4 |
+  | dedupe | 0.8 |
+  | 大文件报告 | 1.4 |
+
+  白名单判断原来是逐个比对受保护路径，改成集合查找加一次 `startswith` 之后，报告从 4.1 秒降到 1.4 秒。
+- **bot 端到端**（`test_wms_m7_bot.py::TestTheAcceptanceFlow`）按 §8 的流程走一遍：`/wms organize inbox` → 收到带三个按钮的计划 → 点 [查看明细] → 点 [确认执行] → 审计里出现这些移动 → `/wms undo <号>` 预览 → [确认撤销] → 文件回到原处。
+- **测试**：999 → 1130（+131）。3.11 与 3.12 全绿，ruff 零告警。
+  - 新增：`test_wms_m7.py` 107 个（含 60 个性质测试用例）、`test_wms_m7_bot.py` 18 个、`test_wms_m7_fixture.py` 4 个、`test_bench.py` +2。
+  - 改动的旧测试，改的是预期值，没有删除任何测试：
+    - `test_wms_m2`、`test_wms_m3` 各 1 个：定时任务列表现在多了 4 个内置任务；
+    - `test_bench` 1 个：`config` 路线不再跟随 `TG_DIRECT_MEDIA=auto`，因为这个功能按 §7.1 关掉了；
+    - `test_app` 的假 `start_clients` 补上了新参数 `on_rejected`；
+    - 评测集那一条从 reject 改为 dedupe。
+
+### NAS 上要改什么
+
+- **不改也能跑**：新配置全部有默认值，没有新增必填的环境变量，数据库没有结构变化（白名单增删记在 meta 表里）。
+- **升级之后，只要 `WMS_ENABLED=true`，4 个内置任务就会自动开始跑**：
+  - organize-inbox 每小时出一次计划并推送给 admin；
+  - organize-tree 每天 04:30；
+  - big-report 每周一上午；
+  - **dedupe 每周一 05:00 会自动执行**（这是简报 §4 的要求，前提是白名单已经生效）。
+
+  想先观察一段时间，就在 `wms.yaml` 里加：
+  ```yaml
+  schedule:
+    jobs:
+      - {name: dedupe, cron: "0 5 * * 1", apply: false}
+  ```
+- **一定要确认的**：`.env` 里如果还有 `TG_DIRECT_MEDIA=auto`，删掉或改成 `off`。不改也不会再出事（启动时会拒绝并打错误日志），但留着容易误会。mihomo 里给 DC4 媒体线路开的 DIRECT 规则已经撤掉了，保持撤掉。
+- **可选**：
+  - 在 `wms.yaml` 里写 `protect:` 段（例子见 `config/wms.example.yaml`）；
+  - 在 `rules.yaml` 里写 `tidy:` 段，比如给 `/写真` 加别名、调整阈值；
+  - 要用 LM Studio、DeepSeek 或通义千问，就设 `NL_BACKEND=openai` 和 `NL_OPENAI_*` 三个变量。**API key 只放 `.env`。**
+
+### 用户需要在 Telegram 里做什么
+
+1. `/wms protect ls`：核对 3 个固定目录，以及分享过的内容（按实测应当解析出 20 个路径）。
+2. `/wms organize inbox`：看计划，点 [查看明细]，确认无误后点 [确认执行]；再用 `/wms undo <审计号>` 撤回其中一条，验证可以撤销（§8 的端到端验收）。
+3. `/wms organize tree`：会收到一条消息，列出每个一级目录的计划。可以逐个点 📄 查看，再逐个点 ✅ 执行。第一次运行会包含那 40 个大目录中不在白名单和入口目录里的部分。
+4. `/wms big`：看报告，需要删的点对应的 🗑。
+5. 用自然语言说「整理一下 Pack From Shared」「把大文件单独放一起」「去重」「看看最大的文件」，确认 bot 能听懂。
+
+### 给 Cowork 的核验手段
+
+```bash
+docker compose run --rm bot wms stocktake                      # 先把索引更新到最新
+docker compose run --rm bot wms protect ls                     # 3 个固定目录 + 分享解析出的路径
+docker compose run --rm bot wms organize-tree --sample 20      # §8：每个一级目录抽 20 条移动，人工判断
+docker compose run --rm bot wms organize-tree --part big       # 只看大目录和大文件那部分
+docker compose run --rm bot wms organize-inbox                 # 入口目录的上架计划
+docker compose run --rm bot wms big                            # 大文件报告
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai   # 需要 NL_OPENAI_*
+```
+
+以上命令都只生成计划，不执行（`--sample` 连计划都不存）。按 §8 的要求，分组误判率不能超过 5%；抽查结果请贴回这里。
+
+### 怎么回滚
+
+- 镜像回滚到 M7 之前最后一次构建的 `sha-d338f20`（包含 `a46f095`、`d338f20` 两个修复；简报那次提交只改了文档，没有构建镜像）。数据库没有结构变化。M7 生成的计划留在 plans 表里，旧版本会忽略它们。
+- 只想停掉 M7 的定时任务：在 `wms.yaml` 里写 `schedule: {builtin: false}`，重启即可。
+
+### 待决问题
+
+1. **默认白名单写在了代码里**：`/收藏`、`/Cosplaytales Nako EP#1-24`、`/小千` 是 `protect.paths` 的代码默认值。这样即使 NAS 上没有 `wms.yaml`，首次自动去重也不会碰到它们。代价是这三个目录名会出现在公开镜像里（它们已经写在仓库的简报里了）。如果不希望这样，请在 `wms.yaml` 里显式写上这三个路径，我再把代码默认值改成空列表。
+2. **§2.4「其他文件夹 存入其他文件夹」**：按简报的临时解释处理，只移动其他**文件**，一级目录本身一律不动。
+3. **垃圾扩展名不看大小**：`txt/html/apk` 不论多大都会进回收站，这是按简报字面的理解；「最新地址」这类词只对 < 1 MiB 的文件生效。担心误删大的 txt 小说或 apk 的话，告诉我把大小上限也用到扩展名上。进回收站可以撤销。
+4. **入口目录里不做 §3**：organize-tree 跳过 `/Telegram`、`/Pack From Shared` 和 `/大文件`。所以 `/Pack From Shared` 里的大目录不会移到 `/大文件`，§4 也只要求对入口目录按 §2 整理。要不要也对入口目录做精简和大文件处理，请用户定。
+5. **空目录**：从深度 2 起算，二级目录本身是空的也会进回收站。
+6. **压平单链**：一次运行压一层，更深的在下一次运行时处理，结果会收敛。
+7. **§2.1 的「可选：用模型给组起名」没有做**：简报说默认关闭。现在的组名来自文件名的共同前缀，要做的话需要单独给模型加一个起名用的调用。
+8. **分享列表接口的返回格式**：按 PikPak 网页端的格式解析（`data` 列表、`file_id` 字段，也兼容 `file_ids`）。我没法连真实账号验证，请先跑 `wms protect ls`：如果解析出的路径数不是 20，把 `docker compose logs` 里的相关内容贴回来。
+9. **M5 的「入库后自动上架」仍然跑原来的 organize 规则**，不是 organize-inbox；organize-inbox 靠每小时的定时任务。要不要让 bot 转存完成后也立刻触发一次 organize-inbox，请用户定。
+10. **big-report 的「可腾出空间」是粗略估算**（久未变化的大文件 + 重复副本），不代表建议全部删除。
+
+## 阶段 3 · WMS M7.1：M7 规则修订 + 直连媒体线路 v2
+
+规格：`docs/wms/M7.1-revisions.md`。A 部分改的是 M7 的整理规则；B 部分重做直连媒体线路，这次每条直连用它自己的 auth key。
+
+### 这一阶段做了什么
+
+**A. 整理规则的修订**（`pikpak_wms/ops/tidy.py`、`rules/schema.py`）
+
+- **A1 大目录整体移动**：
+  - 二级目录满足下面任一条件，就整个移到 `/大文件/<A>/<目录名>/`：
+    - 总大小 ≥ `big.folder`（50 GiB）；
+    - 里面有一个 ≥ `big.file`（4 GiB）的文件。
+  - 不再把深层的大文件单独拎出来；一级目录里直接放着的 ≥ 4 GiB 文件仍移到 `/大文件/<A>/`。
+  - 精简只在二级目录内部进行：空目录和垃圾文件从深度 3 起算，二级目录本身不会被删。
+- **A2 全局 `/其他`**：
+  - 既不是视频也不是图片的散落文件，从所有一级目录统一移到 `/其他/`。重名时文件名后加 `_<短哈希>`。
+  - 审计记下 `source_top` 和 `source_folder`，撤销时回到原处。
+  - `/其他` 自动加入 `layout.ensure`（`wms layout` 会建它）；即使没建，organize-tree 的计划里也会自带一条建目录。
+  - 规则文件里 `tidy.loose.other` 写成不带 `/` 的名字（如 `其他`），就退回到「每个一级目录各一个」。
+  - 所有一级目录共用一个计划器，两个目录里的同名文件不会抢同一个目标路径。
+- **A4.1 防嵌套**：
+  - 归一化之后，组名和所在一级目录名互相包含的（`Nako` 与 `Nako合集`、`小千` 与 `小千合集`），这组文件原地不动，计入计划摘要里的「留在原处」。
+  - 同名的已有子目录也不再吸收文件。入口上架同样遵守这条。
+- **A4.2 广告文件**：
+  - 判定条件是两条同时满足：
+    - 类型：图片、压缩包、可执行文件，或小于 `ads.video_max`（30 MiB）的视频；
+    - 名字：带域名，或含词表里的词（`二维码`、`QR`、`发布器`、`最新地址`……；英文词按单词边界匹配）。
+  - 这些文件进一份单独的计划，来源是 `organize-tree-ads:/A` 或 `organize-inbox-ads`，动作全是移进回收站。
+  - **任何定时任务都不会自动执行它**，只能人工点确认。命令行 `--apply` 也跳过它。
+  - 词表和阈值在规则文件 `tidy.ads`；`enabled: false` 关掉。
+- **A4.3 `--sample --json`**：
+  - `wms organize-tree --sample N --json` 输出一个 JSON 数组，每项是 `{plan, action, rule, from, to}`，不会被折行打断。
+  - 不加 `--json` 时每条一行：`from  →  to`，广告的是 `🗑 path`。
+
+**更正 M7 的一处说法**：M7 的 HANDOFF 写着 `--sample` 连计划都不存，实际上当时存了。这一版改好了：`--sample` 只在内存里生成计划、过一遍白名单、抽样打印，不写库。
+
+**B. 直连媒体线路 v2**（`tgmd/direct.py`，`TG_DIRECT_MEDIA=v2`，默认 `off`）
+
+- **只给非本 DC 用**：
+  - 下载器发现文件在本 DC，就直接走普通路线；
+  - `DirectRouteV2.sources()` 被要求连本 DC 时直接抛 `AssertionError`；
+  - 读不到本 DC 编号时也不用 v2。
+- **独立 key**：
+  - 在直连的 `MTProtoSender(None)` 上做 DH 握手，得到一把新 key。连接显式传 `proxy=None`，只连 `media_only` 端点。
+  - 主连接（经代理）调用 `auth.exportAuthorization(dc)`，得到的授权在直连连接上用 `auth.importAuthorization` 导入。经过代理的只有这份一次性的授权字节，key 本身不经过。
+  - 代码里完全不碰 Telethon 的 `_borrow_exported_sender`，也不碰 `session.auth_key`。
+- **持久化**：新表 `direct_keys`，主键是（账号 id, dc_id, 出口），存 key 和创建时间。
+  - 出口分 `ipv4` 和 `ipv6`，各用各的 key，所以一把 key 只会从一种地址出去。
+  - 带上账号 id，是为了换读取账号后不会误用旧账号的 key。
+  - 重启后直接复用，不再握手。两个下载同时第一次用某个 DC 时，只协商一次。
+- **出错回落**：
+  - key 被拒（`AUTH_KEY_UNREGISTERED` 这类 401、`AuthKeyDuplicatedError`、`AuthKeyNotFound`）：删掉这把 key，该 DC 冷却 24 小时。
+  - `importAuthorization` 失败：不存 key，冷却 24 小时。
+  - **FloodWait**（无论出在导出、导入还是下载途中）：
+    - 该 DC 冷却 24 小时；
+    - **先等满 FloodWait 要求的秒数，再改走普通路线**，不会换条路接着请求；
+    - 超过 300 秒的，这个文件按原有规则报错。
+  - 所有媒体端点都连不上：冷却 30 分钟。
+  - 冷却记录存在 `kv` 表，重启后仍然有效。
+  - 以上每种情况，这个文件都会回落到普通路线，照常下完。
+- **护栏**：
+  - 同一 DC 同时最多 4 条直连（按 DC 计，bot 账号和读取账号合计）；
+  - 直连条数取 `DOWNLOAD_CONNECTIONS` 和剩余名额中的较小值，不会额外增加连接；
+  - 日志里每个文件一行，末尾是 `route direct-v2` 或 `route proxy`。
+- **IPv6**：`media_endpoints()` 不再过滤 IPv6 端点，排序时 IPv4 在前。
+- **bench**：
+  - `python -m tgmd.bench <链接> --route v2` 不需要 `--same-egress-ip`；
+  - 输出多了一列 `via`，显示每次实际走的是 `direct-v2` 还是 `proxy`；
+  - 和 bot 共用数据库里的 key，测速不会另外生成 key，也不会留下多余的 key；
+  - v1 的 `media`/`both` 仍要加 `--same-egress-ip`；
+  - `TG_DIRECT_MEDIA=auto` 仍然拒绝。
+- **部署文档**：
+  - `deploy/restricted-network/mihomo/config.example.yaml`：
+    - 新增 `TG` fallback 组；
+    - 三条 DIRECT 规则写在 Telegram 大段之前；
+    - Telegram 全部 IP 段走 `TG`；
+    - `ipv6: true`，`dns.ipv6` 保持 `false`。
+  - `docker-compose.yml`：加了一段注释掉的 IPv6 网络配置。
+  - `README.md`：新增「Telegram 固定一个出口」「直连媒体线路 v2」「IPv6」三节。
+
+### 验收证据
+
+- **测试**：1130 → 1191（+61）。3.11 与 3.12 全绿，ruff 零告警。
+  - 新增：
+    - `test_direct.py` 34 个，包括：
+      - 本 DC 永远不走 v2；
+      - 新 key 通过直连 DH 生成，`proxy=None`，export 走主连接、import 走直连；
+      - key 从不是 Telethon 的，也从不借 exported sender；
+      - 重启后复用 key；
+      - IPv6 用单独的 key；
+      - 并发时只协商一次；
+      - 两种 key 被拒、import 失败、FloodWait（先等后回落）、长 FloodWait、连不上，每种都会冷却并回落；
+      - 冷却期内一次都不尝试，冷却记录重启后仍在；
+      - 每个 DC 最多 4 条，并计入 `DOWNLOAD_CONNECTIONS`；
+      - 日志里的 route；
+      - 旧库自动加上新表；
+      - 用到的 Telethon 私有行为有测试钉住。
+    - `test_wms_m71.py` 22 个：全局 `/其他`（含撤销、`layout.ensure`）、防嵌套、广告、`--sample --json`。
+    - 另外：`test_wms_m7.py` +1、`test_wms_m7_bot.py` +1（v2 的装配）、`test_bench.py` +2、`test_config.py` +1。
+  - **改了预期值的旧测试**（功能按规格改了，按红线 7 在这里写明；没有删除任何测试）：
+    - `test_wms_m7.py`、`test_wms_m7_bot.py`、`test_wms_m7_fixture.py`：
+      - 其他文件改去 `/其他`；
+      - 深层大文件不再单独提取，改成整个二级目录移走；
+      - 精简不再删除二级目录本身；
+      - 入口上架遵守防嵌套；
+      - inbox 现在返回计划列表；
+      - `sample_moves` 返回字典。
+      - 夹具的不变量按新规则重写，4 份快照重新生成。
+    - `test_parallel.py` 4 处：`media_endpoints` 现在也返回 IPv6 端点，排在 IPv4 后面。
+    - `test_wms_m2.py` 2 处：`layout` 现在总会带上 `/其他`（A2），执行数从 2 变成 3；另一处按路径取审计记录，不再取第一条。
+- **夹具上的结果**（80,964 个条目）：
+  - big：38 份计划，82 个二级目录整体移走（M7 是 27 个目录加 64 个单独文件）；
+  - loose：1 个广告文件进了单独的计划；
+  - inbox：一份 556 个动作的上架计划，外加一份 1 个动作的广告计划；
+  - 白名单拦下的动作：3 个；
+  - 耗时（沙箱，秒）：完整 organize-tree 2.8（41 份计划，804 个动作），organize-inbox 1.3，dedupe 0.7，大文件报告 1.3。
+- **没法在沙箱里验证的**：v2 在真实 Telegram 上的握手、导入和速度。全部测试都用假 client，没有联网。这部分由 Cowork 在 NAS 上测。
+
+### NAS 上要改什么
+
+- **不改也能跑**：`TG_DIRECT_MEDIA` 默认 `off`。数据库只新增了一张表 `direct_keys`，启动时自动创建。没有新增必填的环境变量。
+- **organize-tree 定时任务**：NAS 上现在是 `enabled: false`（简报开头说的）。按 A3，先由 Cowork 用下面的 `--sample 20 --json` 和 `--part big` 抽查，误判率不超过 5% 再打开。
+- **整理规则会变**（organize-inbox 和重新打开后的 organize-tree 都按新规则出计划）：
+  - 其他文件去 `/其他`；
+  - 大目录整体移走；
+  - 广告单独成计划，不会自动执行。
+  - 旧的待确认计划会被新一轮计划标为「已丢弃」。
+- **要用 v2**（建议等 Cowork 测过再在 bot 上长期开）：
+  1. mihomo：照 `deploy/restricted-network/mihomo/config.example.yaml` 核对规则顺序。三条 DIRECT **在 Telegram 段之前**：
+     ```
+     - IP-CIDR,149.154.166.111/32,DIRECT,no-resolve
+     - IP-CIDR6,2001:67c:4e8:f002::b/128,DIRECT,no-resolve
+     - IP-CIDR6,2001:67c:4e8:f004::b/128,DIRECT,no-resolve
+     ```
+     `TG` 组保持 `fallback`（你们已经改好了）。
+  2. **只用 DC4 的 IPv4**：到这一步就够了。
+  3. **要连 DC2（只有 IPv6）和 DC4 的 IPv6**（Docker 29）：
+     - 在 compose 里取消 `networks: default: enable_ipv6: true` 那段的注释，子网用一个 ULA `/64`。
+       - bot 用 `network_mode: service:proxy`，和 proxy 共用一个网络栈，所以只需要给 proxy 所在的 `default` 网络开 IPv6。
+       - Docker 27 起 `ip6tables` 默认打开，容器的 IPv6 出站会 NAT 成宿主机的 `240e:` 地址。
+       - 如果 `daemon.json` 里写过 `"ip6tables": false`，要删掉。
+     - mihomo 设 `ipv6: true`（`dns.ipv6` 保持 `false`）。
+     - 网络要重建：`docker compose down && docker compose up -d`。只 restart 不生效。
+     - 验证命令见 `deploy/restricted-network/README.md`「IPv6」一节。
+  4. `.env` 设 `TG_DIRECT_MEDIA=v2`，然后 `docker compose up -d bot`。
+- **注意**：`data/db` 里现在多了直连 key，和会话一样是凭据，备份时照同样的标准保管。
+
+### 用户需要在 Telegram 里做什么
+
+1. `/wms organize tree`：
+   - 看计划：大目录应当整个移到 `/大文件/<A>/`，其他文件应当去 `/其他`，不应再出现 `/<A>/<和 A 几乎同名>/`；
+   - 如果某个一级目录多了一份「广告」计划，点 📄 看明细，确认都是广告再点 ✅。
+2. `/wms organize inbox`：同样检查，广告计划单独确认。
+3. v2 打开后，发一个 DC4 频道里的受限视频给 bot。回来后 `/verify`，确认用户会话一行正常。
+
+### 给 Cowork 的核验手段
+
+```bash
+docker compose run --rm bot wms stocktake
+docker compose run --rm bot wms organize-tree --sample 20 --json > sample.json   # 不存计划；每项 {plan, action, rule, from, to}
+docker compose run --rm bot wms organize-tree --part big                         # 应当只有「整个二级目录 → /大文件/<A>/」和一级目录里的大文件
+docker compose run --rm bot wms organize-inbox
+
+# v2 实测（M7.1 §B3）：挑一个 DC4 文件，普通路线和 v2 各跑 1 条和 4 条连接。
+# 全程盯着 bot 里 /verify 的用户会话一行；只要出现一次会话异常，立即设 TG_DIRECT_MEDIA=off 并回报。
+docker compose exec bot python -m tgmd.bench '<DC4 文件链接>' --route normal --connections 1,4
+docker compose exec bot python -m tgmd.bench '<DC4 文件链接>' --route v2     --connections 1,4
+docker compose logs bot | grep -E 'direct-v2|route (direct-v2|proxy)'
+```
+
+- `via` 列显示 `direct-v2` 才说明这一行真的走了直连。显示 `proxy` 的话，看日志里 `direct-v2 not used for DC 4 (...)` 括号里的原因。
+- 第一次跑 v2 会有一行 `negotiated a new key for DC 4 over ipv4`，之后的运行不应再出现。
+- DC5 文件跑 `--route v2` 应当全部是 `proxy`（本 DC 不走 v2）。
+
+### 怎么回滚
+
+- 镜像回滚到 `sha-6414f95`（M7）。
+  - 新表 `direct_keys` 留在库里，旧版本不认识它，也不会读它；
+  - 旧版本见到 `TG_DIRECT_MEDIA=v2` 会报配置错误，所以回滚前先把它改回 `off`；
+  - 整理计划方面，旧版本会重新按 M7 的规则出计划。
+- 只关 v2：`TG_DIRECT_MEDIA=off`，重启 bot。要连 key 一起清掉，就在库里执行 `DELETE FROM direct_keys`；不清也无害。
+
+### 待决问题
+
+1. **bot 账号的下载也走 v2**：
+   - bot 自己收到的文件也在它自己的 DC 之外时，同样用 v2，key 按账号分开存；
+   - 冷却和「每 DC 最多 4 条」按 DC 计，两个账号合计，这是偏保守的做法。
+   - 只想给读取账号用的话告诉我。
+2. **连不上的 DC 每 30 分钟试一次**：DC1、DC3、DC5 的媒体端点从 NAS 连不上。DC5 是本 DC，不会试。DC1 的文件每 30 分钟会有一个多等最多约 20 秒（IPv4 和 IPv6 各 10 秒超时），然后照常走代理。嫌多的话可以把这个间隔调长，或者只对 DC2、DC4 启用。
+3. **IPv6 网络配置默认注释掉**：`default` 网络开 IPv6 要重建网络、会断一下 bot，所以让你们自己决定什么时候开。
+4. **v2 的速度没有实测**：DC4 直连到底比经代理（4 条约 1.0 MiB/s）快多少，等 Cowork 的数字。
+5. **A4.2 的词表**：按简报给的例子起步（`二维码`、`QR`、`发布器`、`最新地址`、`防屏蔽`、`扫码`、`加群`、`福利群`……，全部在规则文件里）。真实索引上误判的，直接改 `tidy.ads.words`。
+6. **分组误判率**：还是等 `--sample --json` 的抽查结果，§8 的要求是不超过 5%。
+
+## 阶段 3 · WMS M7.2：大目录判定更正、缓存频道作为投递入口、直连 v2 手动端点
+
+规格：`docs/wms/M7.2-big-folder-and-channel.md`（基线 `cb65da6`）。
+
+### 这一阶段做了什么
+
+- **A. 大目录只按总大小判定（用户的更正）**：
+  - 用户原话：「所有的二级目录都是一个整体。」
+  - M7.1 A1 里「二级目录里有一个 ≥ 4 GiB 的文件，这个目录就算大目录」这一条是我对用户规则的误读，这次删掉了。
+  - 现在的规则：
+    - 二级目录**总大小 ≥ 50 GiB** 才整个移到 `/大文件/<A>/`，里面有大文件不算；
+    - 一级目录里直接放着的 ≥ 4 GiB 的文件，照旧移到 `/大文件/<A>/`；
+    - 二级目录永远不拆。
+  - 模块和 `BigSpec` 的文档字符串、`config/rules.example.yaml` 的注释同步改了。
+- **B. 缓存频道也能投递**（`tgmd/handlers.py` 的 `_on_channel_post`）：
+  - **只认缓存频道**：`chat_id == delivery.cache_chat_id`，并且 bot 的某个管理员管理这个频道（`_channel_run_by_admin`，结果缓存 10 分钟）。
+    - `/cache` 自己仍然每次现问 Telegram，免得刚把管理员加进频道，还被缓存里的旧结果挡住。
+    - 别的频道一律不响应。
+    - 是缓存频道但不是管理员管理的，回复一句拒绝原因。
+  - **不当作请求的**：
+    - 带 `fwd_from` 的转发（包括读取账号转发进来的）；
+    - `via_bot`；
+    - `out=True`；
+    - `post_author` 是 bot 自己（署名）；
+    - 只有文字、但没有链接的；
+    - 视频以外、又没有文字的媒体（照片、贴纸等）。
+  - **请求**：
+    - 文字里的 Telegram 链接和磁力链接。普通网址和 PikPak 分享链接在频道里**不算**，免得随手贴的网页被当成离线下载。
+    - 直接发的视频文件（不是转发的）。
+    - 发起人算作第一个 admin，用他的模式、PikPak 账号和配额。
+  - **视频按 auto 模式**：
+    - 频道没有「限制保存内容」：bot 在服务器端把它复制给第一个 admin 的私聊，不下载；
+    - 频道限制了：下载后存到 NAS；
+    - 复制失败时也改为下载。
+  - **反馈**：
+    - 进度和结果回复在频道里那条消息下面；
+    - 同时私聊第一个 admin 一句（`CHANNEL_REPLY_DM=false` 关掉）；
+    - 频道里的请求消息处理完不删。
+  - **防止重复发帖**：链接请求在频道里被转发器处理时，读取账号转发进缓存频道的那一条就是交付，bot 不再发第二份，缓存照常记下。缓存条目仍由 `media_cache` 表管理。
+- **C. 直连 v2 手动端点**：
+  - 新增 `TG_DIRECT_ENDPOINTS`，格式 `4=149.154.166.111:443,4=149.154.166.110:443`，IPv6 写成 `2=[2001:…]:443`。
+  - 手动端点排在 Telegram 下发的端点前面，按写的顺序，重复的去掉；只对 v2 生效。
+  - 本 DC 的条目被忽略，并打一条警告。
+  - 格式错误的条目在启动时警告并跳过。
+  - 某个 DC 只有手动端点也能用。
+  - 端点其实不属于这个 DC 时 `importAuthorization` 会失败：按原逻辑冷却 24 小时，日志写明是哪个端点，并提示它来自 `TG_DIRECT_ENDPOINTS`。
+  - 独立 key、只用于非本 DC、冷却和回落这些规则都不变。
+
+### 验收证据
+
+- **测试**：1191 → 1219（+28）。3.11 与 3.12 全绿，ruff 零告警。
+  - 新增：
+    - `test_channel_requests.py` 18 个：链接和磁力进队列；发起人是第一个 admin；回复在原消息下面；私聊通知及开关；视频的复制和下载两种情况；转发、`via_bot`、自己发的、署名是 bot 的都不触发；照片和无链接文字不触发；非缓存频道不响应；非 admin 管理时说明原因；10 分钟缓存。
+    - `test_direct.py` +5：手动端点在最前面、本 DC 的被忽略、只有手动端点也可用、端点不属于该 DC 时冷却并写明端点、其余规则不变。
+    - `test_config.py` +2：解析和格式错误警告。
+    - `test_tasks.py` +2：频道视频复制，以及复制失败改为下载。
+    - `test_forwarder.py` +1：请求来自缓存频道时不发第二份。
+  - **改了预期值的旧测试**（用户更正了规则，按红线 7 写明；没有删除任何测试）：
+    - `test_wms_m7.py::test_big_folders_move_whole`：`/A/Mid`（共 9 GiB，里面有一个 5 GiB 文件）不再移动；执行后断言 `/大文件/A/Huge/part1.mkv`、`part2.mkv` 存在，`/A/Mid` 下的文件都在原处。
+    - `test_one_folder_or_one_part`、`test_applying_then_planning_again_finds_nothing`、`TestCommandLine` 的夹具：原来用 5 GiB 单文件构造「大目录」的地方，改成 55 GiB。
+    - `test_wms_m7_fixture.py` 的不变量改成 `total >= 50 GiB and not protection.holds(path)`。
+- **快照** `tree-big.json` 重新生成，和 Cowork 本地的结果一致：
+  - 总动作 120 → 54；
+  - big-folder 移动 82 → 27；
+  - 计划 38 → 27；
+  - 第一份计划里 `/Cosplay/Yuki 合集` 不再移动。
+- 夹具上完整 organize-tree 用时 2.2 秒（41 份计划，734 个动作）。
+
+### NAS 上要改什么
+
+- **不改也能跑**：新配置都有默认值，数据库没有结构变化。
+- **缓存频道**：升级后就能在频道里发链接了，前提是频道由 bot 的管理员管理（`/cache` 时已经检查过）。不想收私聊通知就设 `CHANNEL_REPLY_DM=false`。
+- **直连 v2**：
+  - `.env` 加上 `TG_DIRECT_ENDPOINTS=4=149.154.166.111:443,4=149.154.166.110:443,4=149.154.166.120:443`；
+  - mihomo 规则里也给 `.110` 和 `.120` 加 DIRECT，写在 Telegram 段之前（示例配置已更新）；
+  - `TG_DIRECT_MEDIA=v2` 保持或打开，然后 `docker compose up -d bot`。
+
+### 用户需要在 Telegram 里做什么
+
+1. 在缓存频道里发一个受限频道的消息链接：频道里那条消息下面应当出现进度和结果，私聊里收到一句通知。
+2. 在缓存频道里直接发一个视频：频道没开「限制保存内容」时，私聊里会秒收到这个视频。
+3. `/wms organize tree`：大目录计划应当只剩总大小 ≥ 50 GiB 的二级目录。
+
+### 给 Cowork 的核验手段
+
+```bash
+docker compose run --rm bot wms organize-tree --part big            # 只有总大小 ≥ 50 GiB 的二级目录和一级目录里的大文件
+docker compose run --rm bot wms organize-tree --sample 20 --json
+# 直连 v2 带手动端点：挑一个 DC4 文件，盯着 /verify 的用户会话一行
+docker compose exec bot python -m tgmd.bench '<DC4 文件链接>' --route v2 --connections 1,4
+docker compose logs bot | grep -E 'direct-v2|TG_DIRECT_ENDPOINTS'
+```
+
+- `via` 列显示 `direct-v2`、`endpoint` 列显示 `149.154.166.110:443` 或 `.111`，才是真的直连了。
+- 如果日志出现 `refused at 149.154.166.x:443 (from TG_DIRECT_ENDPOINTS …)`，说明那个地址不属于 DC4。把它从列表里删掉，再等冷却结束，或者清掉 kv 表里的 `direct_v2_cooldown`。
+
+### 怎么回滚
+
+- 镜像回滚到 `sha-cb65da6`（M7.1）。旧版本会忽略 `TG_DIRECT_ENDPOINTS` 和 `CHANNEL_REPLY_DM`，频道里的请求又会没有反应。
+- 只关频道入口：目前没有单独的开关，只能 `/cache off`（上传缓存会一起关掉），见下面待决问题 1。
+
+### 待决问题
+
+1. **频道入口没有单独的总开关**：频道只要是缓存频道、并且由 admin 管理，就接请求。要不要加一个 `CHANNEL_REQUESTS=false`？
+2. **「纯媒体、没有文字的消息不算请求」和「直接发的视频也算请求」两条的取舍**：我的理解是视频算请求，其他没有文字的媒体（照片、贴纸、文档）不算。要是也想让文档或压缩包算请求，告诉我。
+3. **视频「能转发的秒传」发到哪里**：频道里的视频已经在 Telegram 上了，再发回同一个频道只会多一份，所以我把它复制到第一个 admin 的私聊。你们如果想要的是别的去处（比如转存 PikPak），告诉我。
+4. **频道里的普通网址和 PikPak 分享链接不处理**：简报只点名了 Telegram 链接和磁力链接。要处理的话是一行改动。
+5. **缓存命中时会在频道里再发一份**：如果频道里请求的文件之前已经缓存过，bot 会从缓存把它复制到频道，也就是频道里出现第二份。一般是同一个链接发了两次才会这样，暂时没处理。
+
+## 阶段 3 · WMS M8：局域网模型主机、小模型输出规范化、M7.2 遗留
+
+规格：`docs/wms/M8-lan-model-hosts.md`（基线 `52b697e`）。
+
+### 这一阶段做了什么
+
+- **A. openai 后端支持多个主机**（`pikpak_wms/nl/hosts.py`、`translator.py`）：
+  - `NL_OPENAI_BASE_URL` 可以写多个地址，逗号分隔，按顺序优先。`NL_OPENAI_MODEL` 写一个表示所有主机共用，写多个就要和主机一一对应；数量对不上是配置错误，翻译时会明确报出来。
+  - **判断在线**：请求 `GET <base>/models`，超时 1.5 秒。任何 HTTP 回应都算在线，连不上或没有回应算离线。在线和离线的结论都记 60 秒，所以离线的主机一分钟内不会再拖慢句子。
+  - **记忆在进程级**（`hosts.BOARD`）：bot 每处理一句话都会新建翻译器，所以结论不能放在翻译器里。
+  - **顺序**：第一个在线的接活；翻译过程中主机掉线（连接被断、超时），按离线处理，改试下一个，不会让用户等两遍。
+  - **全部离线**：抛出 `nl.error.offline`，中文是「模型主机离线（Mac/PC 未开机），这句我没听懂，换个说法或稍后再试。」此时 rules 解析器照常先答，答得了的句子不受影响；没人等生成。
+  - **超时分开设**：连接 1.5 秒；生成由 `NL_OPENAI_TIMEOUT` 控制，默认 60 秒。
+  - `json_schema` 被拒后改用 `json_object`，现在按主机分别记，一台不支持不影响另一台。
+  - **`/verify` 和 `wms doctor` 各加了一行**：每个主机在线与否、模型名、上次响应的延迟。`wms doctor` 说明里原来写的「不联网」现在有一个例外，就是这一行，每个主机最多 1.5 秒。
+  - **`eval --backend openai --base-url <地址>`** 一次只测一台，模型取 `NL_OPENAI_MODEL` 里和这个地址对应的那个。
+- **B. 小模型输出的鲁棒性**（`nl/query.py` 的 `normalize_wire`）：
+  - 在 schema 校验之前做一次宽松规范化：
+    - 字符串 `"null"`、`""`、`"none"`（不分大小写）当作 null，对顶层字段和 `scope`、`filters`、`action_args`、`schedule` 里的字段都生效；
+    - `schedule.cron` 是 6 位或 7 位的 Quartz 表达式，去掉秒位和年位，`?` 换成 `*`（`'0 0 * * ? *'` → `'0 * * * *'`）；`cron` 是 `"null"` 则整个 `schedule` 当作没有；
+    - 规范化之后仍然不合法，才报错。
+  - 系统提示里加了 3 条正确示例、2 条错误示例（Quartz、字符串 `"null"`），并写明「不确定就填 needs_clarification」。示例里只用 ASCII 标点，因为 ruff 不让提示词里出现全角标点。
+  - **评测同时统计两项**：`schema_invalid_as_answered`（模型原样给出、不规范化就通不过的答案数）和 `schema_invalid_after_normalizing`（规范化后仍失败、这句话真的失败了的答案数）。
+- **C1. 直连 v2 的 bench 崩溃**：
+  - 按简报，**v2 保持 `off`，不再投入**。
+  - 握手中途被断（`asyncio.IncompleteReadError`）、对方回的不是 MTProto（`InvalidBufferError`，也就是 NAS 上看到的 `HTTP/1.1 404`），以及 `SecurityError`，现在都当作「这个端点不行」：换下一个端点，都不行就冷却 24 小时，回落到代理路线。
+  - 已经确认这个测试在旧代码上会失败（两种错误都会冒泡），新代码上通过。
+- **C2. M7.2 的待决问题，按简报都做了**：
+  - **`CHANNEL_REQUESTS=true|false`**（默认 true）：false 时缓存频道又只是缓存，里面发的东西都不算请求，也不会去查管理员。
+  - **频道里的普通网址和 PikPak 分享链接**也处理了，和私聊里一样：网址走 URL 转存，分享链接走 restore_share。M7.2 里我只放行了 Telegram 链接和磁力链接。
+  - **缓存命中时不再往频道里发第二份**，改为直接复制到发起人（第一个 admin）的私聊。
+
+### 验收证据
+
+- **测试**：1219 → 1248（+29）。3.11 与 3.12 全绿，ruff 零告警。
+  - 新增：
+    - `test_wms_m8.py` 24 个：
+      - 多个主机按顺序选在线的、都在线时用第一个；
+      - 离线主机的 60 秒冷却和恢复；
+      - 全部离线时立刻回答、没有发起生成，中文提示文字正确；
+      - 全部离线时 rules 照常回答，rules 答不了的才报离线；
+      - 主机翻译到一半掉线时改用下一个；
+      - 超时的两个设置；
+      - 模型数量对不上；
+      - 翻译器重新创建后离线记录仍在；
+      - `/verify` 和 `wms doctor` 的主机行；
+      - cron 规范化（真实出现过的 `'0 0 * * ? *'`，另外 Quartz 六位和七位的写法）、`"null"` 字符串；
+      - 规范化前后的两项统计；
+      - 系统提示的示例；
+      - 评测的两项统计和 `--base-url`。
+    - `test_direct.py` +2：`IncompleteReadError` 和 `InvalidBufferError` 都回落到代理并冷却。
+    - `test_channel_requests.py` +2：网址和分享链接进队列，`CHANNEL_REQUESTS=false` 时无反应。
+    - `test_tasks.py` +1：缓存命中时，请求来自缓存频道的复制给发起人，频道里不发第二份。
+  - **改了预期值的旧测试**（按红线 7 写明；没有删除任何测试）：
+    - `test_channel_requests.py::test_a_web_address_is_not_a_request` 改成 `test_a_web_address_goes_to_pikpak`：简报要求频道里的网址也要处理。
+    - `test_wms_m7_bot.py` 里 openai 翻译器的辅助函数补上了「主机在线」的桩，因为现在每次翻译前都要先问一次主机是否在线。
+  - `tests/conftest.py` 加了一个自动生效的夹具：测试里的在线探测一律失败、每个测试开始时在线记录清空，保证没有测试会联网问真实的模型主机（红线 1）。
+- **没法在沙箱里验证的**：准确率和延迟。目标是准确率 ≥ 80%、平均每句 ≤ 5 秒，要 Cowork 在装好模型的 Mac 上测。
+
+### NAS 上要改什么
+
+- **不改也能跑**：新配置都有默认值。数据库没有结构变化。
+- **要用局域网模型**：`.env` 里
+  ```
+  NL_BACKEND=openai
+  NL_OPENAI_BASE_URL=http://<MODEL_HOST>:11434/v1,http://192.168.0.50:11434/v1
+  NL_OPENAI_MODEL=qwen2.5:7b-instruct
+  ```
+  模型名换成 Mac 上实际装的。Mac 上的 Ollama 要监听局域网（`OLLAMA_HOST=0.0.0.0`），并且防火墙放行；Windows PC 一样。
+- **NAS 上原来的 Ollama**（Qwen2.5-3B，已停用）可以删掉，`NL_BACKEND=ollama` 也不用了。
+- **频道入口**：不想让缓存频道收请求就设 `CHANNEL_REQUESTS=false`。频道里的网址和分享链接现在也会被处理，如果频道里有人随手贴网页地址，会被当成离线下载去 PikPak。
+- **直连 v2**：`TG_DIRECT_MEDIA` 保持 `off`（结论是这台 NAS 做不通）。mihomo 里给 `.110`、`.120` 加的 DIRECT 规则可以不加；已经加了的也无害。
+
+### 用户需要在 Telegram 里做什么
+
+1. `/verify`：看「模型主机」那几行。Mac 开机时应当显示在线；关机后再发一次 `/verify`，应当变成离线。
+2. 用一句 rules 解析不了的话试一下：Mac 开机时应当由模型回答；Mac 和 PC 都关着时，应当马上收到「模型主机离线」。
+3. 在缓存频道里发一个之前已经缓存过的链接：应当收到私聊里的文件，频道里不会再多一份。
+
+### 给 Cowork 的核验手段
+
+```bash
+docker compose run --rm bot wms doctor                                   # 「模型主机」行，每个最多 1.5 秒
+# Mac 上装好模型后，一次测一台：
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
+    --base-url http://<MODEL_HOST>:11434/v1 --json
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
+    --base-url http://192.168.0.50:11434/v1 --json
+```
+
+- 目标：准确率 ≥ 80%，平均每句 ≤ 5 秒。
+- 输出里 `schema_invalid_as_answered` 和 `schema_invalid_after_normalizing` 两项，分别是规范化前后不合格的答案数。差得越多，说明规范化帮的忙越大；后一项不为零的，看 `errors`。
+- 这个模型如果 `json_schema` 被拒（日志里有 `refused json_schema`），会自动改用 `json_object`，不用管。
+
+### 怎么回滚
+
+- 镜像回滚到 `sha-52b697e`（M7.2）。旧版本不认识逗号分隔的多个地址（会把整串当成一个地址），回滚前先把 `NL_OPENAI_BASE_URL` 改成只留一个。旧版本会忽略 `CHANNEL_REQUESTS`。
+- 只关模型：`NL_BACKEND=rules`。
+
+### 待决问题
+
+1. **在线判断按「有任何 HTTP 回应」算**：`GET /models` 返回 401 或 404 也算在线，因为这说明主机开着。真正的问题（模型没装）会在翻译时暴露，表现为一次失败的翻译，而不是离线。
+2. **主机掉线的判断比较宽**：翻译时的任何网络异常（包括生成超时）都会把这台标成离线 60 秒。好处是一台卡住的机器不会让每句话都等 60 秒；代价是慢但没坏的机器偶尔会被误判，60 秒后自动恢复。
+3. **`wms doctor` 不再完全不联网**：现在会去问每个模型主机。没配 `NL_OPENAI_BASE_URL` 时和以前一样。
+4. **`NL_OPENAI_MODEL` 数量对不上时整个 openai 后端不可用**，而不是猜着用。这是刻意的：把 A 模型请求发给只装了 B 模型的主机比直接报错更难排查。
+5. **频道里的网址现在都当离线下载**：包括随手贴的网页链接。如果不想要，改回只认 Telegram 链接和磁力链接是一行改动，或者用 `CHANNEL_REQUESTS=false` 整个关掉。
+6. **C1 的 EOFError、BufferError 是按类型整体捕获的**：这两类异常在下载连接里也可能出现，但都发生在建连阶段，进了 `ENDPOINT_ERRORS` 也只是换端点，不影响已经在传的下载。
+
+## 阶段 3 · WMS M8.1 + M8.2：索引靠事件流保持最新；自然语言结果的规范化与安全护栏
+
+规格：`docs/wms/M8.1-index-freshness.md` 和 `docs/wms/M8.2-nl-normalize-and-safety.md`（基线 `bfa7d63`）。两份简报说可以一起做，所以一起交。
+
+### 这一阶段做了什么
+
+**M8.1 · 索引靠事件流保持最新**（`pikpak_wms/ops/eventsync.py`）
+
+- **先说一个前提**：简报要求「先打印样本再写映射表」，但这个环境连不上真实账号，仓库里也没有 `wms events --raw` 的样本。所以我没有按事件类型名写映射表，而是这样设计：
+  - 事件只用来告诉我们**哪些文件被动过**（取事件里的 `file_id`，或 `reference_resource.id` 等几个可能的位置）；
+  - 然后向 PikPak 问这个文件**现在**是什么样（`GET /drive/v1/files/<id>`）：还在，就写进索引（是目录就列出整棵子树，祖先目录索引里没有的也一并补上）；不在了，或者 `trashed`，就从索引里删掉。
+  - 所以事件类型叫什么（`TYPE_RESTORE`、`TYPE_SOMETHING_NEW`……）不影响结果。简报里列的类型名没有用在代码里。
+  - 事件字段猜错了也不会悄悄漏掉：新事件全都取不出文件 id 时，回落到增量盘点，并在日志和通知里说明原因。
+- **游标**存在 meta 表的 `events_cursor`（最近处理过的 400 个事件 id）。每次从事件流的头（最新的一端）往回读，读到一个处理过的事件就停；没处理过的就是新的。
+- **什么时候回落**（都会在报告里写明原因）：
+  - 第一次运行（没有游标）：记下游标，做一次增量盘点，不通知；
+  - 游标丢了（新事件多到一次读不完 1000 条，翻页被拒，或者一次涉及超过 300 个文件）：做一次**全量盘点**，并通知 admin；同一个原因 24 小时内只通知一次；
+  - 事件流看起来是从最旧的一端开始排的：增量盘点；
+  - 新事件全都没有文件 id：增量盘点。
+- **定时任务**：`stocktake` 现在是内置任务，每 10 分钟一次，跑的是事件同步。`wms.yaml` 里自己列了 `stocktake` 的，以自己写的时间为准（也会跑事件同步）。`stocktake.events: false` 回到旧做法。
+- **带时间条件的 `/do`、作用于入口目录的问题**，生成计划前先读一次事件流；计划里加一行「索引更新于 HH:MM（事件同步）」。organize-inbox（定时任务、`/wms organize inbox`、命令行）的计划也带这一行。organize-tree、去重、大文件报告的定时任务和 bot 入口，以及命令行的 `organize-tree`、`organize-inbox`、`big`，用同一个刷新函数，不再只靠按 `modified_time` 剪枝。
+- **0 个结果时**：除了「目前没有匹配的文件」，还写出索引的更新时间，以及按进网盘时间统计的「今天 N 个、昨天 M 个」。
+- **相对日期**（§C，和 M8.2 §B3 合用同一份代码）：见下面。
+
+**M8.2 · 规范化与安全护栏**
+
+- **B. 翻译结果的规范化**（`nl/query.py` 的 `normalize_wire`，在 schema 校验之前）：
+  1. `min_size`、`max_size` 为 0 → null；
+  2. 只写日期（`2026-09-24`）或没写时区的时间 → 补成 `+08:00`（用配置的时区）；
+  3. `today`、`yesterday`、`今天`、`昨天`、`本周`、`本月`、`上个月`、`去年`、`今年` 等 → 换算成那一段时间**开头**的具体时间。用在 `created_before` 上时同样是开头（「本月之前」= 本月 1 号 0 点）；
+  4. 意图是 trash、list、dedupe、organize_*、big_report 时丢掉 `action_args.dest`；
+  5. `kinds` 和 `extensions` 同时给了，且扩展名全都属于这些类型 → 丢掉 `extensions`（不会漏掉 ass、m2ts）。
+  - 另外：`1m`、`1y` 换成 `30d`、`365d`。系统里 `m` 是分钟，而提示词里说一个月是 30d，模型写 `1m` 基本都是指一个月。
+- **C. 时间方向的双保险**（`nl/guard.py`）：
+  - 按原句的用词判断方向：出现「之前 / 以前 / 前的 / N 天前 / 超过 N 天 / 早于」，并且没有「最近 / 以来 / 之内 / N 天内 / 以后 / 过去」→ 这是**更早**的条件，必须是 `created_before`；出现「最近 / 之内 / 以来 / 今天 / 本周 / 昨天」等 → 必须是 `created_after`。两类词同时出现就不表态。
+  - 模型给反了，且只给了一个时间 → 换过来，计划里写「已按原句更正时间方向」。
+  - `created_after` 和 `created_before` 是同一个时长 → 改成反问「是要 N 天以内，还是超过 N 天？」。
+  - 只对**模型**的结果用；rules 解析器自己读同样的词，不需要第二道。
+  - **trash 的计划第一行用白话写时间**：「创建于 7 天以前（早于 09-17 12:00）」或「最近 7 天内创建（09-17 12:00 以来）」。
+- **D. 规则层拦截**：问候和闲聊（你好、天气、讲笑话）、查空间和配额、清空回收站，都在规则层直接回复，不交给模型。清空回收站回复「请在 PikPak 里手动清空回收站」。
+  - **一个需要你们知道的发现**：简报里说的「整理一下 Telegram」「Pack From Shared 整理一下」「把大文件单独放一起」，rules 解析器本来就能认（M7 做的）。上次 Mac 评测判错的那几句，是因为 `eval --backend openai` 是**单独测模型**（没有把 rules 放在前面），而 bot 里 rules 一直是在前面的。所以 bot 真实用起来的准确率会比评测数字高。新增了 `--with-rules`，按 bot 的真实做法测。
+  - few-shot 增加 4 条：「超过 7 天」→ `created_before`，「最近 7 天」→ `created_after`，「上个月」→ 两个具体日期，「以 X 开头」→ `name_regex: ^X`。
+- **A. 评测改成按语义比较**（`nl/eval.py`）：
+  - 三类结果：`right`（完全一样）、`equivalent`（写法不同，意思一样）、`wrong`；`dangerous` 是 `wrong` 里会造成伤害的那部分。
+  - 等价的规则：日期统一成 `+08:00`；时长统一成天数（1w=7d，1m=30d）且允许差 1 天；列表排序；`kinds` 已经覆盖的扩展名去掉；`dest` 只对 move、archive、download 比较；「今天」「本月」这类多出来的、正好是下一个自然边界的 `created_before` 视为没有。
+  - `dangerous` 是：trash 或 archive 的时间方向反了；`max_size` 为 0；该反问或拒绝的句子却给出了 trash 或 archive。
+  - 评测句里相对「现在」的日期改成了模板（`{today}`、`{yesterday}`、`{week_start}`、`{month_start}`、`{last_month_start}`、`{last_year_start}`、`{year}`、`{mm}` 等），运行时按 `--now` 展开，命令行默认用当前时间。写明了年月日的句子（2026 年 9 月 20 日）不变。
+  - 用几个不同的「现在」（跨年、闰日、月初）跑过 rules，都是 0 个错。
+- **E. 主机探测的抖动**：探测失败先再探一次，连续 2 次失败才判定离线；生成失败后立刻重新探测，主机还在就把这句话再试一次，两次都失败才判定离线并换下一台。
+
+### 验收证据
+
+- **测试**：1248 → 1385（+137）。3.11 与 3.12 全绿，ruff 零告警。
+  - 新增：
+    - `test_wms_m81.py` 30 个：
+      - 重现那个 bug：父目录 `modified_time` 不变，新文件放进已有目录，旧的增量盘点漏掉，事件同步收进来；
+      - 整个目录转存，一次列目录覆盖里面所有文件的事件；
+      - 祖先目录索引里没有；
+      - 事件类型是没见过的名字；
+      - 垃圾桶、永久删除、改名、移动；
+      - 游标：续读、分页读、第一次运行、丢了 → 全量、翻页被拒、文件太多、丢了之后从头开始；
+      - 事件流不符合预期时的回落：取不出文件 id、文件 id 嵌在别的字段里、从最旧的一端排；
+      - 定时任务：`stocktake` 跑事件同步、游标丢了 → 全量 + 通知一次、`events: false`、通知 admin；
+      - `/do` 带时间条件会先同步、入口目录也会、普通问题不会；
+      - 0 个结果时的诊断，以及有结果时没有诊断；
+      - organize-inbox 的计划带「索引更新于」。
+    - `test_wms_m82.py` 102 个：period 词表、五条规范化、方向判断的各种说法（含 2026 年 1 月 1 日之前）、方向更正与反问、白话时间行、规则层拦截、评测的模板与等价和 dangerous 计数、端到端一个模型答案、`--with-rules`。
+    - `test_wms_m8.py` +4：抖动（探测失败一次、生成失败一次、两次失败、失败后探测也失败）。
+  - 手工做了两处变异检查：去掉方向更正，去掉「大小为 0」的处理，各有 3 个测试变红；恢复后全绿。
+  - **改了预期值的旧测试**（行为按新简报改了，按红线 7 写明；没有删除任何测试）：
+    - `test_wms_m6_bot.py::test_not_understood`：原来用的「今天天气怎么样」现在由规则层直接回复（M8.2 §D）；改用另一句 rules 读不懂的话，并新增一个测试覆盖闲聊的新回复；
+    - `test_wms_m6.py`：评测集里的日期是模板了，读取时先展开；
+    - `test_wms_m7.py::test_the_builtin_schedule`：内置任务多了 `stocktake`；
+    - `test_wms_m2.py::test_events_raw_prints_pikpaks_answer`：假网盘现在会把自己的改动记进事件流，预期值改成「原样返回它的事件」；
+    - `test_wms_m8.py` 两处：一台关机的主机现在会被探测两次才判定离线，翻译途中掉线的主机会先被再探测、再试一次。
+- **假网盘** `tests/wms_fakes.py`：现在有事件流（新的在前、分页），改动（新增、改名、移动、进回收站、还原、永久删除）都会记一条；`add(touch=False)` 重现「放进已有目录但不更新目录的 modified_time」；`offline_file_info` 回答单个文件。事件的字段是按简报和猜测写的，见下面待决问题 1。
+- **评测**（沙箱里只能测 rules）：94 句，rules 处理 83 句（覆盖率 0.883，原来 0.85 左右，多出来的是闲聊、查空间、清空回收站），零错误，`dangerous` 为 0。模型的数字要等 Cowork 重跑。
+
+### NAS 上要改什么
+
+- **不改也能跑**：新配置都有默认值，数据库没有结构变化（游标和最近一次同步都存在 meta 表里）。
+- **`wms.yaml` 里如果列了 `stocktake`**（示例里是每 30 分钟），改成 `"*/10 * * * *"`，或者干脆删掉那一项让内置的生效。`stocktake-full`（每天 05:00）**保留**：它是事件同步和增量盘点的兜底。
+- **升级后第一次事件同步**只会记下游标并做一次增量盘点；从第二次起才是事件同步。等第一个 10 分钟周期就行，或者发一条带时间条件的 `/do` 立刻触发。命令行的 `wms stocktake` 还是原来的盘点，不读事件流，也不设游标。
+- 不需要改 `.env`。
+
+### 用户需要在 Telegram 里做什么
+
+1. 在 PikPak 里转存几个视频到已有的目录，过几分钟发 `/do 下载今天转存的视频到指定位置`：应当能找到它们，计划里有一行「索引更新于 HH:MM（事件同步）」。
+2. 发 `/do 列出明天转存的视频`：应当没有结果，但回复里有「今天 N 个、昨天 M 个」，一眼能看出是条件的问题。
+3. 发 `/do 删除 /Temp 里超过 7 天的文件`（看计划，不要确认）：计划的第一行应当是「创建于 7 天以前（早于 …）」。
+4. 发「你好」「网盘还剩多少空间」「清空回收站」：应当各有一句明确的回复。
+
+### 给 Cowork 的核验手段
+
+```bash
+# 最要紧的一步：把事件流的真实样本贴回 HANDOFF（去掉链接和缩略图地址）
+docker compose run --rm bot wms events --raw --limit 20
+# 转存几个文件后再看一次，对照 created_time，确认「新的在前」
+docker compose logs bot | grep -E 'event sync|events'        # 回落时有一行 warning 和原因
+# 按 bot 的真实做法测（rules 在前）和只测模型，两个数字都要
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
+    --base-url http://<MODEL_HOST>:11434/v1 --with-rules --json
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
+    --base-url http://<MODEL_HOST>:11434/v1 --json
+```
+
+- 目标：等价准确率 ≥ 85%，`dangerous` = 0，平均每句 ≤ 5 秒。
+- 输出里的 `dangerous_cases`（如果有）请整条贴回来。
+
+### 怎么回滚
+
+- 镜像回滚到 `sha-bfa7d63`（M8）。数据库没有结构变化；meta 表里多出来的 `events_cursor`、`last_sync`、`events_last_alert` 旧版本不会读。
+- 只想停掉事件同步：`wms.yaml` 里 `stocktake: {events: false}`，重启。
+
+### 待决问题
+
+1. **事件流的字段和顺序没验证过**（最重要）：我不知道真实事件里文件 id 叫什么、事件是不是新的在前。代码认 `file_id`、`reference_id`、`reference_resource.id`、`resource.id`、`file.id`，并假定「新的在前」；不符合时会回落到增量盘点（日志里有原因），不会漏了还假装正常。请 Cowork 把 `wms events --raw --limit 20` 的输出贴回来，我再按样本收紧。
+2. **读文件的当前状态，每个变动的文件一次请求**：一次转存涉及上百个文件时，限速器会让这一步慢一些（整个目录转存只需要一次列目录，不在此列）。超过 300 个文件就放弃逐个跟，改做全量盘点。
+3. **「全量盘点」有多久**，我在沙箱里没法量；在 NAS 上看 `wms stocktake-full` 的用时。游标丢了会触发它，24 小时内同一个原因只通知一次。
+4. **第一次运行不做全量盘点**：只记游标加增量盘点。要是升级时索引本来就有漏，得等每天 05:00 的全量盘点才补上。
+5. **已移入回收站的判断**：看 `trashed` 字段，以及文件信息接口返回「找不到」。`phase` 不是 `PHASE_TYPE_COMPLETE`（还在下载）的不进索引，等下一次事件。真实账号的回答长什么样请一起核对。
+6. **「本月之前」「去年之前」按那一段的开头算**，比如「去年」作上界是去年 1 月 1 日。要是期望的是那段的结尾，告诉我。
+7. **`1m` 按一个月（30 天）读**，不再是一分钟。要按分钟过滤文件的创建时间，目前做不到，也没有人这样问过。
+8. **白话时间行只给 trash**；archive、download 这些不删东西的没有。要不要也加？
+9. **方向判断里「内」只认「N 天内 / 周内 / 月内 / 年内 / 小时内」**，不认单独的「内」（比如「网盘内超过 7 天的」），否则「网盘内」会被当成「最近」。
+10. **`dangerous` 的定义**是我按简报写的：删除或归档的时间方向反了、`max_size` 为 0、该拒绝的句子却给出了删除或归档。觉得还应该算上别的，告诉我。
+11. **命令行的 `wms organize-tree`、`organize-inbox`、`big`** 现在先读事件流，不再是按 `modified_time` 剪枝的增量盘点。行为更准，但如果事件流有问题，这些命令会多一次回落。
+
+---
+
+## 阶段 3 · WMS M8.3：确认执行后台化、资源库默认落盘、模型标注与更换、模型失控与时间方向
+
+规格：`docs/wms/M8.3-runaway-and-direction.md`（修订版，基线 `f951cb8`）；派工单 `docs/briefs/2026-10-01-m8.3-dispatch.md`。简报的 G、H、I、J、K、A、B、C、D 都做了；E 的回答已落实（见下），F 是 Cowork 的部署工作，没有碰。
+
+### 这一阶段做了什么
+
+**G · 点「确认执行」后立刻有反馈，后台执行，可停止、可续**（`ops/runs.py`、`ops/plans.py`、`ops/embed.py`、`tgmd/wms.py`、`tgmd/handlers.py`）
+
+- 点按后：马上 `answer("开始执行")`，消息改成「⏳ 计划 58 执行中：已完成 0/1」加一个【停止】按钮（`wms:stop:<id>`），计划在后台任务里跑。
+- **进度**：一个 watcher 编辑这条消息：每 10 秒一次（`progress_every`），另一个动作完成时也可以提前编辑，但两次编辑至少隔 5 秒（`min_gap`）。内容是「已完成 k/N · 当前文件 · xx% · 速度 · 预计剩余」。速度取最近 15 秒的平均。Telegram 拒绝的编辑（没变化、限流、消息被删）一律跳过，不会让执行失败。
+- **结束**：消息改成结果摘要；有失败的列出前三个文件和原因；还有剩余动作（单次上限 500）时带【继续】按钮。**出错**：写明原因和「已完成 k/N」，计划保持可以继续。
+- **防重复**：内存里按计划 id 登记（同一秒内的连点）+ 数据库 `meta` 里的 `running:<id>`（重启后留下的是「过期标记」）。执行中再点，提示「计划 58 正在执行」；`discard` 也会拒绝。
+- **【停止】**：取消后台任务，等它收尾。做完的动作保留并且已经逐个写进审计；`.part` 文件和它旁边的 `.part.state` 保留，下次续传；计划状态回到 `pending`，`progress` 保留，`meta` 里记 `stopped:<id>`，列表里显示「已停止」。
+- **进度写库**：`plans.apply` 现在每个动作批次后写一次计划进度（原来只在最后写），所以停止、出错、重启之后都从中断处接着做；`on_step` 回调给界面用。
+- **bot 重启**：正常停机时 `running:<id>` 标记保留；下次启动 `Runs.recover()` 把它们变成 `interrupted:<id>`，bot 私聊每位 admin「计划 58 因重启中断，已完成 k/N」，带【继续】按钮。列表和计划详情里显示「已中断」。
+- **按钮重启后还能用**：`/do` 的提案（原句、翻译者、计划 id、规则）存进 `meta` 的 `nl:<id>`（计数器 `nl_next`，保留最近 200 条），不再只在内存里。**偏差**：简报说回调数据直接带 `plan_id`；我保留 `wms:nl:<verb>:<提案 id>` 的形式，提案 id 现在是持久的，再由它查到 `plan_id`。这样规则（定时任务）和列表提案也能共用同一条路，旧按钮格式不变。
+- **同样的问题也修了**：`wms:apply:<id>`（含 organize-tree 的批量计划）、`/wms apply`、`wms:undo` 都是同样的「立即回应、后台执行」。批量消息（列了很多计划的那条）里点【✅ #n】时，进度显示在**新的一条消息**里，不覆盖原来的列表。撤销先同步检查（被拒绝的仍然是即时提示），通过后在后台做。
+- **锁**：只有出库（outbound）的计划不再占着调度器的锁（下载不改网盘），所以事件同步等定时任务不会被一个 40 分钟的下载挡住。含其他动作的计划还是持锁执行。
+- **多连接下载**（`ops/fetch.py`，outbound 的 `local` 模式）：把文件分成 `OUTBOUND_CONNECTIONS` 段（默认 8；小文件按每段至少 4 MiB 少开几条）同时用 HTTP Range 下，各写在同一个 `.part` 的各自偏移；旁边的 `.part.state` 记每段做到哪。
+  - 续传：有 `.part.state` 就接着做；只有 `.part`（旧的单线程残留）且比整个文件短，就当作已完成的前缀，其余分段；长度已经等于整个文件却没有 state，不可信，从头来。
+  - 链接过期（403/410）：重新取一次链接，该段从断点接着做；一个文件最多换 3 次。其他网络错误每段重试 3 次。
+  - 服务器不支持 Range：退回单个流。
+  - 完成后校验：`OUTBOUND_VERIFY=off|size|hash`，默认 `size`。`hash` 用 PikPak 的内容 id（gcid：按块 SHA-1 再 SHA-1，块大小 256 KiB 起翻倍至最多 512 块、上限 2 MiB）；只在 `hash` 字段是 40 位十六进制时比较，否则没有可比的，跳过。
+  - 取消或出错不删 `.part`（下次续传）；大小不对才删。
+  - 一个文件下载失败（任何异常）只算这个动作失败，不再中断整个计划（原来非 `WmsError` 的异常会让整个 apply 带着没写进度的状态退出）。
+
+**H · 默认落盘到 资源库/资源/整理/年/年.月/年.月.日**（`ops/library.py`、`ops/outbound.py`、`nl/compile.py`、`tgmd/config.py`、`tgmd/tasks.py`、`tgmd/delivery.py`）
+
+- 设了 `LIBRARY_DIR`（或 `outbound.library_dir`）就进入资源库模式；没设，一切照旧（`MEDIA_DIR` + 子目录，旧测试原样通过）。设了显式的 `outbound.local_dir` 时也不进入资源库模式。
+- **没指定位置**：`LIBRARY_DIR/资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}`，月日不补零，按 `Asia/Shanghai` 的**执行当天**（`make_deliver` 里每次下载时取当前时间；计划里显示的是生成计划那天，执行日不同时会变，已在计划说明里写明）。模板在 `outbound.default_layout`。
+- **指定了位置**：「资源库/电影/日剧」「/电影/日剧」「电影/日剧」「/library/电影/日剧」都解析成 `LIBRARY_DIR/电影/日剧`；带 `..`、`~`、盘符，或第一段是 `etc`、`usr`、`var`、`tmp`、`mnt`、`media`、`volume*` 之类的绝对路径，一律拒绝并说明（`library.outside`）。**这一类「库外绝对路径」是靠一份很短的名单识别的**（容器和 NAS 的系统目录名），不在名单里的 `/xxx` 一律当作资源库里的目录——这是简报「`/电影/日剧` 要算库内路径」不得不带来的歧义，见待决问题 1。
+- 计划里写 `下载到 NAS：资源库/资源/整理/2026/2026.10/2026.10.1`（动作行和「理解为」都是），目录不存在时加一行「将新建目录 资源库/电影/日剧」。不再出现 `/media/PikPak`。
+- 没有写入权限：「没有写入权限：资源库/资源」（报的是库里第一层目录）。
+- bot 自己把内容落盘到 NAS 的那条路（受限视频存到 NAS、太大传不了的）：`DOWNLOAD_LAYOUT=dated|flat`，默认 `dated`；只有同时设了 `LIBRARY_DIR` 才生效。`dated` 时文件放进当天的整理目录，文件名保持原样（**不再按频道分子目录**），回复里的链接是 `LOCAL_URL_PREFIX` + 相对 `LIBRARY_DIR` 的路径（要求把 `LOCAL_URL_PREFIX` 改成 `smb://<NAS_IP>/资源库/`）。早先存进缓存的文件不搬，路径照旧可用（链接不在库里就回落成容器路径，不会拼出错的 smb 地址）。
+- 新增环境变量 `DOWNLOAD_DEFAULT_LAYOUT`、`TIMEZONE`（bot 一侧的模板和时区，默认同上）。
+
+**I · 计划里写清楚「由谁理解」**
+
+- `NL_OPENAI_NAMES`（逐主机对应，如 `Mac,WinPC`；不设用 base_url 的主机名）。
+- 「由规则理解」「由本地模型 qwen3.6-35b-a3b（Mac）理解」「由规则 + 本地模型（Mac）理解」。**「规则 + 模型」目前只在模型的结果被规则层的方向检查或依据检查改过时才出现**（现在没有别的两者都参与的路径）。
+- `/verify` 和 `wms doctor`：「本地模型 {model}（{name}，{url}）：在线」。评测输出里的 backend 名称仍是 `rules` / `openai` 这种后端名（它标识的是协议，不是计划里给人看的那句话），见待决问题 4。
+
+**J · 新模型的配套**（`nl/translator.py`）
+
+- `NL_OPENAI_THINK=off|on`，默认 `off`：请求体加 `"reasoning_effort": "none"`。**如果服务器对这个字段回 400/422**（别的 OpenAI 兼容服务不认它），记住该主机，去掉它再请求一次，之后一直不带——否则换到 DeepSeek 之类的主机会整个坏掉。
+- 解析前去掉 `<think>…</think>`（没有结束标签的，从 `<think>` 起整段去掉）；`reasoning_content` 本来就不读。
+- `NL_OPENAI_MAX_TOKENS`（见 A）逐主机对应，和 `NL_OPENAI_MODEL` 同样的「一个值给所有 / 每台一个」规则。
+- `NL_OPENAI_RETRY_MODEL`（默认不开）：同一台主机上，第一个模型 `cut off`、schema 不合法或反问时，用这个模型再看一次；标注「qwen3.8-27b（Mac）复核」。第二次也失败时，保持第一次的结果（原来的错误或原来的反问）。
+
+**K · 补充说明后合并出来的条件**
+
+- 规则层认「完整文件名」：一串没有空格、以视频/图片/压缩包扩展名结尾的字（含 `【】`），**从原文里原样取出**（不经过 NFKC 归一化，否则全角括号会变）。有它时直接生成 `name_equals`（Filters 和 Match 里新增，文件名完全相等），描述它的词（「示例影像的视频」）不再要求规则层读懂，只要有一个动作词；但出现「以外、除了、不是」等转折词就不接，交给模型。带 `/` 的是路径，不是文件名。
+- 「只要一个 / 只下载两个 / 前 N 个 / 最新的 N 个 / 最新的」→ `filters.limit`（按进网盘时间从新到旧取前 N 个；schema 的 wire 格式也加了 `limit`，`name_equals` 没有加进给模型填的格式）。计划里用 `Match.file_ids` 把规则限定在这 N 个文件上；定时任务带数量会被反问（一个数量对明天没有意义）。
+- 规则「依据检查」（C）用的是「原句 + 补充」合起来的文字（`Chain.translate` 拿到的就是合并后的句子）。
+
+**A · 模型失控**
+
+- 请求体加 `max_tokens`（默认 512）；`finish_reason: length` → `CutOff`（`nl.error.cut_off`，「这句我没理解好，换个说法试试」），只算这一句失败，不重试，不改变主机状态。
+- 生成超时：先立刻探测，探测正常 → `GenerationTimeout`（只失败这一句，不重试，不判离线）；探测也失败才判离线并换下一台。连接被拒绝、被重置仍然是离线路径（原有的「再探一次再试一次」）。
+- `NL_OPENAI_TIMEOUT` 默认 30 秒。
+- 评测：每一句开始前 `BOARD.reset()`；`errors` 按 `cut_off`、`timeout`、`offline`、`other` 分开计数（`errors_by_kind`）。
+
+**B · 时间方向（两个边界）**：原句是「更早」方向，模型给了 `created_after`，而 `created_before` 没给或离现在不到一天 → 改成 `created_before = 原来的 created_after`，删掉 `created_after`，标注「已按原句更正时间方向」。「半年前到一个月前」这种真实区间不动。顺带：模型把 `created_before` 写成 `now`/`现在` 时，规范化成当前时刻（原来会直接过不了 schema）。
+
+**C · 去掉没有依据的条件**（`nl/guard.py` 的 `ground`，只对模型结果）：没有大小词去掉 `min_size`/`max_size`；没有时间词去掉 `created_after`/`created_before`；`min_size == max_size` 而没有「等于」，两个都去掉；每去掉一类记进 `corrections`，计划里写「已去掉原句没有提到的条件：大小、时间」。判断依据的文字会先去掉文件名和引号里的内容（名字里的「2026」不算时间词）。**名字条件我比简报更保守**，见待决问题 2。
+
+**D · 规则层**：否定句（「不要/别/不用/不必/无需 + 动作」）→ 回复「好的，不做任何操作」；评测的等价比较认「当天 23:59:59」；系统提示补「一周从周一开始」。
+
+**E · 对待决问题的回答已落实**：(1) 事件流的字段已核实，见下；(8) archive、move、classify 的计划也先用白话写时间（原来只有 trash）；(10) move 的时间方向写反也算 `dangerous`。其余（4、6、7、11）无需改动。
+
+> 事件流字段（简报给的真实样本）：我没有去改 `eventsync.py` 的取 id 逻辑，它本来就先认 `file_id`；收紧到只认 `file_id` 是简报「可以」做的，不是必须做的，而且现有的几个兜底位置（`reference_resource.id` 等）不会取错，所以没有动。如果要收紧，是一个单独的小改动。
+
+### 验收证据
+
+- **测试**：1385 → 1487（+102）。3.12 全绿，ruff 零告警。（3.11 这里没有装，CI 会跑；没有用 3.12 以后才有的语法。）
+  - `test_wms_m83.py`（分段下载：拼接正确、续传只补缺的、链接过期重取、一直过期放弃、取消后能续、旧的单流 `.part`、无 Range、小文件不开 8 条、gcid 的定义；出库用分段下载；后台 run：立即返回/完成、重复启动被拒、停止保留已做的并可继续、重启后 running→interrupted 并能继续、出错后计划保持打开、进度逐步写库；H 的模板、跨年、三种写法、越界拒绝、23:59 生成/00:01 执行落到第二天、权限、旧布局不变）。
+  - `test_wms_m83_bot.py`（1 秒内回应与进度显示、重复点被拒、停止后显示和续做、失败列出原因；提案的按钮在「重启」后还能用；中断后启动时通知 admin 带【继续】）。
+  - `test_wms_m83_nl.py`（A：max_tokens、cut off 不动主机、超时但探测正常、超时且探测失败、被拒绝仍是离线、评测重置与分类；B：三句；C；D；K；I；J）。
+  - `test_tasks.py` +2（bot 落盘按日期、`flat` 不变；`Harness` 新增 `library_dir`、`layout` 两个选项）。
+- **变异检查**：去掉「大小词依据」判断，2 个测试变红；去掉重复启动的拒绝，2 个测试变红；恢复后全绿。
+- **规则评测**（这里只能测 rules）：97 句（新增 3 句），处理 87 句（覆盖率 0.897），零错误，`dangerous` = 0。模型的数字要等 Cowork 重跑。
+- **改了预期值的旧测试**（按红线 7；没有删除任何测试）：
+  - `test_wms_m5.py` 四处：`/wms apply`、`wms:apply:<id>`、`wms:undo` 现在是「先回应、后台做」，所以先看到「执行中」/「撤销中」，`settle()` 之后才是结果；`/wms apply` 的结果在自己那条进度消息的编辑里，不再是一条新回复。
+  - `test_wms_m6_bot.py` 两处：确认后先「开始执行」+「执行中」，结果在 `settle()` 之后；「由 rules 理解」改为「由规则理解」（I）。
+  - `test_wms_m7_bot.py` 三处：同样先显示执行中，结果在后；撤销和「从列表点 ✅」要等 `settle()`。
+  - `test_wms_m8.py::test_timeouts`：默认超时 60 → 30（A3）。
+  - `tests/nl/cases.yaml` 末尾新增 3 句；`tests/conftest.py` 的环境变量清单加了 `LIBRARY_DIR`、`DOWNLOAD_LAYOUT`、`DOWNLOAD_DEFAULT_LAYOUT`（只是不让环境变量漏进测试）；`pyproject.toml` 给两个新测试文件加了 `RUF001`（它们断言中文全角标点，和已有的做法一致）。
+
+### NAS 上要改什么（部署清单，给 Cowork）
+
+1. **compose 加挂载**：`<NAS_VOLUME>:/library`（`/media` 即 `<NAS_VOLUME>/Telegram` 的挂载**保留**，旧的缓存路径要用）。
+2. **新环境变量**（都有默认值，不设也能起来，但不设 `LIBRARY_DIR` 就是旧行为）：
+
+   | 变量 | 建议值 | 默认 | 作用 |
+   |---|---|---|---|
+   | `LIBRARY_DIR` | `/library` | 空（旧行为） | 打开资源库模式，`/do` 下载和 bot 落盘都按日期归档 |
+   | `DOWNLOAD_LAYOUT` | （不用设） | `dated` | 设 `flat` 回到 `MEDIA_DIR` 旧做法 |
+   | `LOCAL_URL_PREFIX` | `smb://<NAS_IP>/资源库/` | 现为 `…/media/` | `dated` 时它指向资源库本身，路径是相对 `LIBRARY_DIR` 的；**必须同时改，否则回复里的链接打不开** |
+   | `OUTBOUND_CONNECTIONS` | `8` | `8` | 每个文件的并行 Range 连接数 |
+   | `OUTBOUND_VERIFY` | `size` | `size` | `off`/`size`/`hash` |
+   | `NL_OPENAI_NAMES` | `Mac,WinPC`（和 `NL_OPENAI_BASE_URL` 同顺序） | 主机名 | 计划里显示「（Mac）」 |
+   | `NL_OPENAI_MAX_TOKENS` | `400` 或不设 | `512` | 一个值或每台一个 |
+   | `NL_OPENAI_THINK` | （不用设） | `off` | Qwen3.x 的混合思考 |
+   | `NL_OPENAI_RETRY_MODEL` | 想让 27b 复核时设 | 关 | 同一台主机上的第二个模型 |
+   | `NL_OPENAI_TIMEOUT` | 可以删掉临时的 `25` | `30` | |
+   | `DOWNLOAD_DEFAULT_LAYOUT`、`TIMEZONE` | 不用设 | 见 H | bot 一侧的模板和时区 |
+
+3. **权限**：容器里是 uid 10001。见文末「路径更正」：`资源/整理` 已经存在，不需要新建或改属主。
+4. **数据库**：没有结构变化（只在 `meta` 表里多了 `running:*`、`interrupted:*`、`stopped:*`、`nl:*`、`nl_next`，旧版本不会读）。
+5. **改 `wms.yaml` 要用 `docker compose exec bot` 在容器里改**，不要在宿主机上 `sed -i`（会丢掉 ACL，WMS 启动失败）。本阶段 `wms.yaml` **不需要改**；`stocktake-full` 照 F 的安排到时候改回每天 05:00。
+6. **升级后第一次**：正在跑的老版本里没有「执行中」标记，所以不会有「中断」通知；之后每次重启才会有。
+
+### 用户需要在 Telegram 里做什么（对应简报的 NAS 验收）
+
+1. `/do 只下载一个示例影像的视频`，在被反问后回复完整文件名：计划里应当有「文件名完全等于…」和「只取最新的 1 个」，**没有**多出来的时间和大小；点【确认执行】：1 秒内消息变成「执行中」，大约每 10 秒更新一次；再点一次，提示「正在执行」；点【停止】能停；点【继续】从 `.part` 接着下。
+2. 不指定位置的下载：落在 `资源库/资源/整理/2026/2026.10/2026.10.2/`（执行当天）；`/do 把…下载到 资源库/电影/日剧`：落到对应目录，计划里有「将新建目录」。
+3. 计划第一行：「由本地模型 qwen3.6-35b-a3b（Mac）理解」。
+4. 下载速度明显高于单线程的 0.2～1.1 MiB/s。
+5. 下载到一半重启 bot：admin 收到「计划 N 因重启中断」和【继续】；重启前发出的「确认执行」按钮仍然能用。
+
+### 给 Cowork 的核验手段
+
+```bash
+# 评测：不加任何补丁，原样跑
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
+    --base-url http://<MODEL_HOST>:11434/v1 --json                  # 只测模型
+docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
+    --base-url http://<MODEL_HOST>:11434/v1 --with-rules --json     # bot 的真实做法
+# 看 errors_by_kind：不应该有 offline 连坐；cut_off 应当很少
+docker compose exec bot ls -la /library/资源/整理                 # 容器里能写（靠 group_add 10）
+# 在 bot 里发 /wms plans：执行中的计划显示「执行中」（命令行的 wms plans 不读这个状态）
+```
+
+- 目标：只测模型，覆盖率 ≥ 95%、等价准确率 ≥ 80%；`--with-rules`，等价准确率 ≥ 95%、`dangerous` = 0；都不能有 offline 连坐。`dangerous_cases` 请整条贴回来。
+
+### 怎么回滚
+
+- 镜像回滚到 `sha-9edb961`（M8.1 + M8.2；`f951cb8` 只是文档）。数据库没有结构变化，`meta` 里新增的键旧版本不会读。
+- 只想回到旧的落盘方式：去掉 `LIBRARY_DIR`（或设 `DOWNLOAD_LAYOUT=flat`，不过 `/do` 的下载只看 `LIBRARY_DIR`），并把 `LOCAL_URL_PREFIX` 改回 `…/media/`。
+- 只想回到单连接下载：`OUTBOUND_CONNECTIONS=1`。
+
+### 待决问题
+
+1. **「库外绝对路径」靠一份系统目录名单识别**（`etc usr var tmp root home proc sys dev bin sbin opt mnt media boot lib srv run`、`volume*`、盘符、`~`）。`/电影/日剧` 要算库内，所以别的 `/xxx` 都被当成库内目录。如果想更严：只认 `资源库/…`、`/library/…` 和不带前导 `/` 的相对写法，告诉我。
+2. **C 的名字条件比简报保守**：简报是「没有『名字/名为/叫/包含/开头/结尾/带』、没有引号或文件名，就去掉 `name_contains`/`name_regex`」。我改成「条件里的文字**在原句里原样出现**就保留」（`下载示例影像的视频` 里的「示例影像」本来就是在说名字）；只去掉原句里根本没有的。理由：直接按简报去掉会让一个删除计划**匹配更多文件**，这个方向是不安全的。
+3. **下载失败的动作算「失败」**（和之前一样，计划状态是已执行、失败 1 个），不是「保持待执行」：简报说「出错…计划保持可以重试」，我只对**整个任务**出错（比如数据库、鉴权）保持可继续；单个文件的下载失败仍然列在结果里。想重试：重新发一次 `/do`，`.part` 和它的 state 还在，会接着下。
+4. **评测输出里的 backend 名称**没有改成「本地模型…（Mac）」，因为评测的 `backend` 字段是后端名（`rules`、`openai`），脚本和报告都在读它。计划、`/verify`、`wms doctor` 都改了。
+5. **gcid 校验没有在真实账号上验证过**（`OUTBOUND_VERIFY=hash` 是可选的，默认 `size`）：算法是按我对 PikPak 内容 id 的理解写的，`hash` 字段不是 40 位十六进制时直接跳过。请 Cowork 用一个已知文件试一次，对不上就把 `hash` 的样子贴回来。
+6. **Mini App 面板里的「执行」还是同步的**（`wms_panel.py` 调的是旧的 `EmbeddedWms.apply`）：它不在简报范围里，而且面板自己有加载状态。执行中的计划它会拒绝（`plan.running`）。
+7. **`最新的`（没有数字）按 1 个算**，因为简报把它和「一个」并列；「下载最新的视频」只会下 1 个。
+8. **日期是执行时的日期，计划里显示的是生成计划那天的**：23:59 生成、00:01 执行的计划，文件落在第二天的目录，计划里写的是前一天。想让计划里写「执行当天」而不是具体日期，告诉我。
+9. **bot 落盘 `dated` 时不再按频道分子目录**（文件都在当天目录里，重名自动加 `(1)`）。
+10. **没有测过真实的 Telegram 编辑限流**：用了 5 秒的最小间隔，跳过被拒绝的编辑；真实表现要 NAS 上看。
+11. **没有在真实网络上测多连接下载**：这里只有假服务器，下载速度的提升要 NAS 上实测（验收第 5 条）。
+
+### 路径更正（后续修订）
+
+默认目录是 `资源库/资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}`（模板 `资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}`），不是 `资源库/整理/…`：Saki 已有的目录就是 `资源/整理/2026/2026.9/2026.9.27` 这样。上文所有「整理」路径都以此为准；其他行为没有变。NAS 上要这样挂载和授权：
+
+- 挂载改成 `<NAS_VOLUME>/资源:/library/资源` 和 `<NAS_VOLUME>/Telegram:/library/Telegram`（`LIBRARY_DIR=/library` 不变；原来的 `/media` 挂载仍保留）。上文第 1 条的 `<NAS_VOLUME>:/library` 以这里为准。
+- bot 容器要加 `group_add: ["10"]`（NAS 的 admin 组），因为 `资源/整理` 是 `drwxrwx--- 1000:10`，容器用户 10001 不在这个组里就写不进去；不需要改属主。
+
+## Stage 3 · M9: proxy traffic meter, `/traffic`, budgets, download gate and rate limits
+
+Spec: `docs/wms/M9-traffic-monitor-and-control.md` (baseline `b4e8ee6`). Dispatch brief: `docs/briefs/2026-10-02-m9-dispatch.md`. Sections A–D are implemented; F's tests are in `tests/test_traffic.py` and `tests/test_traffic_gate.py`.
+
+### What was done
+
+**A · Meter** (`tgmd/traffic/`, new package)
+
+- `service.py` polls `GET {MIHOMO_API}/connections` every `TRAFFIC_POLL_SECONDS` (plain `urllib` in a worker thread, no new dependency). `meter.py` keeps the last `(upload, download)` per connection id and adds the difference. A connection that already existed at the first snapshot only sets the baseline; one that appears later counts in full. A global-counter difference that the connections do not explain is stored as category `unattributed` (outbound `unknown`, not priced). A counter that goes backwards means the proxy restarted: rebaseline, one warning, every live connection counts from zero.
+- `classify.py`: outbound (`direct` / `proxy`), node, group, category (first match wins: `telegram`, `pikpak`, `model`, `lan`, `proxy-sub`, `other`) and the route-leak flag.
+- `pricing.py`: `(\d+(\.\d+)?)\s*元\s*/\s*G` after NFKC (so full-width digits, `．` and `／` work). A node without a price uses `TRAFFIC_DEFAULT_PRICE`; direct traffic costs 0.
+- `store.py`: `traffic_hour` and `traffic_host_day` in `traffic.sqlite3` (own file, WAL). Flush every 60 s and on shutdown; retention 400 days (hours) and 90 days (hosts); a host is kept for a day only above 1 MB. Days and months are Asia/Shanghai (`TRAFFIC_TIMEZONE`).
+- If mihomo is unreachable: one warning per outage, back-off up to 60 s, nothing raised into the bot. If the meter cannot even start (say, an unwritable data dir) the bot still starts, `/traffic` answers "not running", and the gate and limits still work.
+
+**B · Report**
+
+- `/traffic` (admins only, in the menu as `流量`): today by default; buttons `今天 本周 本月`, `暂停下载`/`恢复下载`, `限速`. Layout as in the spec, plus the top 5 proxied hosts (with node) and, when there are any, "other" hosts over 100 MB through the proxy ("consider a rule").
+- The daily summary goes to every admin at `TRAFFIC_DAILY_REPORT_AT` (default `09:00`, set-but-empty = off), covering yesterday. It is marked sent *before* it is sent, so it can arrive at most once; it is skipped when yesterday had no proxied bytes and no alert.
+- CLI for Cowork, run inside the container: `python -m tgmd.traffic report --period today|7d|month [--json]`. It reads `traffic.sqlite3` directly (works with the bot stopped) and prints the same numbers.
+
+**C · Budgets and alerts** (all proxied traffic only)
+
+- Budgets: `TRAFFIC_BUDGET_DAILY_CNY`, `TRAFFIC_BUDGET_MONTHLY_CNY`, `TRAFFIC_BUDGET_DAILY_PROXY_GB`; alert at 80 % and 100 % once per period. The totals are kept in memory and updated on every poll, so a budget can trip within one poll, not one flush.
+- Spike (`TRAFFIC_SPIKE_MBPS`, a 60 s average above it for 5 consecutive minutes, once per episode) and single connection (`TRAFFIC_CONN_ALERT_MB`, once per connection); both name host, category and node.
+- Route leak: a `pikpak` or `lan` connection, or one to the Mac model host `<MODEL_HOST>:11434`, whose outbound is `proxy`; once per host per day. An Ollama pull through the proxy is *not* a leak (it is expected and billed; see open decision 2).
+- Which alerts were already sent is stored in the bot database, so a restart does not repeat them.
+
+**D · Gate and rate limits** (`tgmd/traffic/gate.py`)
+
+- States `open`, `paused` (manual) and `over_budget` (automatic). With `TRAFFIC_ON_BUDGET=pause` (default) the 100 % alert also closes the gate; `warn` only alerts. `over_budget` clears by itself when the period rolls over or the budget is raised (on the next evaluation). `恢复下载` reopens the gate by hand and is not undone by the *same* budget in the same period.
+- Who waits: Telegram **downloads** (before each file, and before every part in `parallel.download_parts`; the single-connection fallback and `Downloader.stream` check in their per-chunk hook) and Telegram **uploads** (before each send in `delivery.to_telegram`, and the cache-chat upload; per part through Telethon's progress callback). They wait, they do not fail or drop, and the status line shows `已暂停（流量闸门）`. A gated job can still be cancelled.
+- Never gated: commands and replies, PikPak API calls, WMS planning, the PikPak → NAS outbound download. The last one is held back only by the optional `TRAFFIC_DIRECT_DAILY_GB` (direct bytes today, LAN and model traffic excluded), through a small hook `pikpak_wms.ops.fetch.throttle` that the bot sets at startup.
+- Rate limit: two token buckets (downloads shared by every worker and part; uploads separate). `TG_MEDIA_RATE_LIMIT_MBPS` / `TG_UPLOAD_RATE_LIMIT_MBPS`, and `/traffic` → `限速` offers `不限 2 5 10 20` for each. The runtime value is stored in the bot database (`kv` key `traffic:state`, together with paused, forced and the sent alerts) and wins over the environment until it is changed.
+- The bot only **reads** mihomo (`/connections`, `/proxies/<group>` for the "current exit" line). Nothing in the code can change a group, config or provider.
+
+### Environment variables (all optional; the old compose starts unchanged)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MIHOMO_API` | `http://127.0.0.1:9090` | mihomo controller (read only) |
+| `TRAFFIC_ENABLED` | `true` | `false` stops the polling; gate and limits still work |
+| `TRAFFIC_POLL_SECONDS` | `5` | |
+| `TRAFFIC_BYTES_PER_GB` | `1073741824` | bytes in a billed GB; also the "GB" of the volume budget and the direct cap |
+| `TRAFFIC_DEFAULT_PRICE` | `0.10` | CNY/GB for a node without a price in its name |
+| `TRAFFIC_BUDGET_DAILY_CNY` / `_MONTHLY_CNY` / `_DAILY_PROXY_GB` | off | proxied traffic only |
+| `TRAFFIC_ON_BUDGET` | `pause` | `pause` or `warn` |
+| `TRAFFIC_SPIKE_MBPS` | `0` (off) | |
+| `TRAFFIC_CONN_ALERT_MB` | `500` | |
+| `TRAFFIC_DAILY_REPORT_AT` | `09:00` | empty = off |
+| `TRAFFIC_DIRECT_DAILY_GB` | off | holds the PikPak → NAS download |
+| `TG_MEDIA_RATE_LIMIT_MBPS` / `TG_UPLOAD_RATE_LIMIT_MBPS` | `0` | megabytes (MiB) per second; 0 = unlimited |
+| `TRAFFIC_TIMEZONE` | `Asia/Shanghai` | day and month boundaries |
+
+### Deploy steps (for Cowork)
+
+1. Pull the image, restart `bot` only. Nothing else changes; no compose edit is needed because `bot` shares `proxy`'s network namespace and `127.0.0.1:9090` is mihomo.
+2. Add to the bot's env (suggested, from the spec): `TRAFFIC_BUDGET_DAILY_CNY=2`, `TRAFFIC_BUDGET_MONTHLY_CNY=30`, `TRAFFIC_CONN_ALERT_MB=500`.
+3. After 10 minutes: `/traffic` in Telegram, and `docker compose exec bot python -m tgmd.traffic report --period today`. The two must show the same numbers. Look at the "current exit" line and at the node names it prints (see my question 3).
+4. Database: no change to `tgmd.sqlite3` except one new `kv` row, `traffic:state`. The meter's own file is `traffic.sqlite3` next to it and can simply be deleted to start over.
+5. Rollback: previous image (`b4e8ee6`). Nothing to undo; the extra `kv` row and `traffic.sqlite3` are ignored by the old version.
+
+### The two open decisions for Saki (from the spec §G)
+
+1. Should Telegram prefer `TG-TOKYO` (0.01–0.02 元/G) over `TG-OTHER` (0.07–0.09 元/G)? That cuts Telegram cost by 4–9×; latency is higher. It is a mihomo config edit by Cowork; the bot does not do it.
+2. Should Ollama pulls on the NAS go DIRECT or be blocked? The NAS model service is normally stopped; the Mac is the model host. Until decided, a pull through the proxy shows up as `model` / `proxy` in the report and is billed.
+
+### Verification evidence
+
+- Tests: 1487 → 1591 (+104), Python 3.12, `ruff check .` clean. (3.11 is not installed here; CI runs both.)
+- `test_traffic.py`: prices (the names in the spec, no price, full-width), one classifier case per category (including a `dl-a10b-123.mypikpak.com` DIRECT case and `pikpak` through the proxy as a leak), delta accounting (growth, disappearing, reappearing under a new id, counter reset, unattributed remainder), hour and Shanghai day/month boundaries and retention, 80 %/100 % alerts once each, `pause` vs `warn`, raise-the-budget and rollover clearing the gate, restart persistence, spike / single-connection / leak alerts, the daily summary once, the report text for today / week / month, and the meter surviving a real HTTP server going away and coming back.
+- `test_traffic_gate.py`: token bucket average rate within 10 % (virtual time with mixed request sizes, and real time over four concurrent workers); a gated `download_parts` waits and resumes bit for bit; a gate that closes mid-file stops the next parts; the acceptance case "a forced small budget pauses a Telegram download, `恢复下载` lets it finish intact"; a gated download can still be cancelled; gated uploads; the PikPak outbound download unaffected by a budget pause and held only by the direct cap; buttons, `/traffic`, the CLI.
+- Mutation checks: removing the per-part gate call fails 2 tests; making the budget never close the gate fails 6.
+- Not done here (needs the NAS): real mihomo output, a real Telegram download being paused and resumed, the rate limit on a large real file, and the daily summary at 09:00.
+
+### Deviations from the spec and my own open questions
+
+1. **No `AGENTS.md` or `CLAUDE.md` exists in the repo.** I read `CC_BRIEF.md` (the file the dispatch names) for the red lines instead.
+2. **Database location.** The spec says `data/db/traffic.sqlite3`; the code puts it at `<DATA_DIR>/traffic.sqlite3`, next to `tgmd.sqlite3`. If the deployment sets `DATA_DIR=/data/db` these are the same file. Please confirm.
+3. **`chains` order.** The spec says the node is the *last* element of `chains` and the group the first. In mihomo's own JSON I believe it is the other way round. So the node is the element whose name carries a price (either end), and only a name without any price falls back to the spec's rule. Please look at one real `/connections` sample and tell me if the fallback should flip.
+4. **`traffic_host_day` has an extra `node` column** (and it is part of the key), so the top-host list can show the node. The spec's column list did not have it.
+5. **"本周" is the last 7 days including today** (the heading says 近 7 天), so the button and `--period 7d` show the same numbers. It is not the calendar week.
+6. **Defaults.** The meter is on by default and `MIHOMO_API` defaults to `127.0.0.1:9090`, so the NAS needs no new env to start metering. Anywhere else (dev, Render) it logs one warning per outage and backs off to 60 s. `TRAFFIC_ENABLED=false` turns it off.
+7. **MB/s is MiB/s** for the rate limits.
+8. **Waiting inside a transfer.** The single-connection Telethon fallback and `Downloader.stream` wait for the gate inside their per-chunk hook. A long pause there can outlast a connection or, for `PIKPAK_STREAM`, PikPak's own request timeout; the transfer then fails normally and the job reports it. The parallel route waits between parts and does not have this problem. Not tested against the real services.
+9. **Server-side forwards are not gated**: a forward through the bot's `Forwarder` moves no bytes through this machine, so there is nothing to meter or limit.
+10. **A budget pause is not undone by the same budget.** After `恢复下载` against `daily_cny:2026-10-02`, that budget does not close the gate again that day; another budget, or the same one the next day, still does.
+11. **The route-leak rule** treats a `model` connection as a leak only when it is the Mac host (`<MODEL_HOST>:11434`), because an Ollama pull through the proxy is expected. Say if Ollama through the proxy should also alert.
+12. **The direct cap** counts direct bytes that are neither LAN nor model (that is, internet bandwidth on the NAS), not only PikPak.
+13. **Process-wide hook.** `pikpak_wms.ops.fetch.throttle` is a module global set by the bot. It is a small, explicit seam; if you prefer it passed through `Context`, that is a separate change.
+14. **Existing test changed:** `tests/test_tasks.py`'s `FakeDownloader.download` now accepts `on_gated=None`, because the job queue passes it. No test was removed.
+
+## Stage 3 · M9.1: node selection, direct-first routing, two-link adaptive PikPak fetch
+
+Spec: `docs/wms/M9.1-nodes-direct-first-pikpak-speed.md` (baseline `82c6ee1`). Sections A–D are implemented. **This replaces M9 §D.4**: the bot may now write to mihomo, but only through a strict whitelist.
+
+### What was done
+
+**A · Node selection** (`tgmd/traffic/{mihomo,probe,nodes,proxy_ui}.py`)
+
+- **Write whitelist** (`MihomoClient._write`, checked *before* any request is made; everything else raises `ForbiddenWrite`):
+  `PUT /proxies/{FAST|TG-PICK|PROXY|PROBE}`, `DELETE /connections/<id>`, `PUT /providers/rules/direct-auto`. Reads are `GET` only (`/connections`, `/proxies/<name>`, `/proxies/<node>/delay`, `/providers/proxies/main`). There is no code path for `PUT /configs`, a restart, or any other group or provider. Tests send every call to a real local HTTP server and assert nothing else reaches it.
+- **Probe** (`probe.py`): every `PROXY_PROBE_HOURS` (default 6; the first one 5 minutes after start when there is no earlier result; 0 turns the schedule off) and on demand. Per node, one after another: `PUT /proxies/PROBE`, latency by `GET …/delay`, an 8 MB download (≤ 10 s) and a 2 MB upload through the `probe` listener (`PROXY_PROBE_LISTENER`). Skips notice entries (the same filter as the `PROXY` group), nodes priced above `PROXY_PROBE_MAX_PRICE` (0.09), dead nodes. Cheapest nodes go first and a run stops adding nodes before it would pass `PROXY_PROBE_MAX_MB` (150). `PROBE` is always put back on `DIRECT`. Results (`latency_ms`, `down_mbps`, `up_mbps`, `price`, `alive`, `tested_at`) are in `traffic.sqlite3`, table `proxy_node`. Speeds are megabits per second.
+- **Probe traffic is metered**: a connection whose `metadata.inboundName` is `probe` is category `probe` (`/traffic` shows it as 测速), ahead of every other category.
+- **Picking**: best download speed; among nodes within 15 % of it, the cheapest. In auto-speed the bot points `FAST` at it, but only if the current `FAST` node is dead or the new one is at least 25 % faster, and at most once per `PROXY_SWITCH_MIN_MINUTES` (30; manual switches are not limited). `FAST` is only updated while some group is in auto-speed.
+- **`/proxy`** (admins, menu label `节点`): the two groups (访问 = `PROXY`, 下载/Telegram = `TG-PICK`) with mode, node, latency, speed and price; the provider's alive count; the last probe time. Per group: `自动·延迟最低`, `自动·速度最快`, `手动选择…` (pages of alive nodes, fastest first, with latency and speed). `立即测速` runs a probe and reports in the same message. Defaults when nothing was chosen: `PROXY` = auto-latency (`AUTO-LATENCY`), `TG-PICK` = auto-speed (`FAST`). A manual pick stops auto re-picks for that group; modes and picks are in the bot DB (`kv` key `traffic:nodes`) and re-applied to mihomo at start (only groups the owner chose).
+- **Telegram exit safety**: after changing `TG-PICK`, or `FAST` while `TG-PICK` is on `FAST`, every live connection whose chain includes `TG` is closed (`DELETE /connections/<id>`), so Telethon reconnects through one exit. Nothing is switched while a Telegram upload is in its last 2 MiB (`TrafficControl.upload_final`): an automatic switch waits for the next probe, a manual one answers "有 Telegram 上传正在收尾，请稍后再试。".
+- **Subscription health** (alert only): the provider endpoint failing with 5xx or listing no real nodes, or ≥ 80 % of the real nodes dead for 10 minutes → one alert (the exact text from the spec, with `存活 N/M`); one recovery note. Persisted, so a restart does not repeat it. mihomo itself being unreachable says nothing about the subscription.
+
+**B · Direct-first routing** (`tgmd/traffic/direct.py`)
+
+- Candidates: hosts that moved more than `DIRECT_CANDIDATE_MB` (50) through the proxy in the last 24 h (from `traffic_host_day`), plus `DIRECT_PROBE_HOSTS`. Never Telegram domains/CIDRs, `bujidao`, LAN or IP addresses (`validate_host`; also enforced when writing the file and by `apply`).
+- Test: through the probe listener twice (`PROBE=DIRECT`, then `PROBE=<AUTO-LATENCY's current node>`): TCP + TLS with a verified certificate + `HEAD`; 2xx–4xx is reachable. Throughput only when `DIRECT_TEST_URLS` has a URL for the host. Direct works when TLS is valid, nothing reset or timed out, latency ≤ 3× the proxy's and, when measured, throughput ≥ 70 % of the proxy's or 2 MiB/s.
+- Apply: the bot writes `DIRECT_RULES_FILE` (default `/mihomo-rules/direct-auto.txt`; one `+.host` per line, so subdomains match) with a temp file and `os.replace`, then calls `PUT /providers/rules/direct-auto`. The file is rewritten from the stored state at start.
+- `/proxy` → `直连检测` runs the tests and lists them with `设为直连` / `保持代理` (and `恢复代理` for hosts already direct). `DIRECT_AUTO_APPLY=true` (default false) routes hosts that pass without asking and notes it. Applied hosts are re-tested weekly; if direct breaks, the owner gets one alert with a `恢复代理` button. Discovery runs once a day (only does anything with `DIRECT_AUTO_APPLY`).
+
+**C · Faster PikPak → NAS** (`pikpak_wms/ops/fetch.py`, `core/client.py`, `ops/outbound.py`)
+
+- One `get_download_url` call now yields the web link and the `is_origin` media link (`WmsClient.download_links`; `download_url` still returns the web link). Only the URLs the API returned are used, and never modified.
+- The origin link is used only if it reports the same total size and the same SHA-256 of the first 256 KiB as the web link; otherwise the reason is kept (`FetchStats.origin_note`) and the web link carries everything.
+- Starts with `OUTBOUND_CONNECTIONS` (default **12**), adds 4 while the aggregate speed rose by more than 15 % over the last 20 s, up to `OUTBOUND_MAX_CONNECTIONS` (default 16, hard cap 32), drops 4 on HTTP 429/503 or repeated resets. A file is cut into ranges of about 64 MiB (more ranges than connections), so after 20 s the ranges not yet started are handed to the faster link (weights = measured per-connection speed). A 403/410 asks for **both** links again and re-checks the origin.
+- Per file the plan result (audit `after`) gets `fetch: {avg_mib_s, links, peak_connections, hosts}`; `ApplyReport.fetches` carries them to the final summary; the progress message shows `平均 X MB/s · 连接 N · 源 web+origin`.
+- `wms bench-fetch <path> [--seconds 10] [--connections 1,4,8,16]` reads each link for a few seconds per connection count, discards the bytes and prints host (never URL), connections and MiB/s. It looks the file up in the local index.
+- Unchanged: `.part` / `.part.state` resume (the state format is the same), the M9 direct-cap hook, the library layout, `OUTBOUND_VERIFY`.
+
+### Environment variables (all optional)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PROXY_PROBE_HOURS` | `6` | speed test of every node; `0` = only on demand |
+| `PROXY_PROBE_URL` / `PROXY_PROBE_UP_URL` | Cloudflare `__down?bytes=8000000` / `__up` | |
+| `PROXY_PROBE_LISTENER` | `http://127.0.0.1:7899` | the `probe` mixed listener |
+| `PROXY_PROBE_MAX_PRICE` | `0.09` | skip nodes dearer than this (CNY/GB) |
+| `PROXY_PROBE_MAX_MB` | `150` | cap on the bytes of one run |
+| `PROXY_SWITCH_MIN_MINUTES` | `30` | minimum gap between automatic switches |
+| `DIRECT_CANDIDATE_MB` | `50` | |
+| `DIRECT_PROBE_HOSTS` | the seven in the spec | comma list |
+| `DIRECT_TEST_URLS` | empty | `host=url,host=url` for throughput tests |
+| `DIRECT_AUTO_APPLY` | `false` | |
+| `DIRECT_RULES_FILE` | `/mihomo-rules/direct-auto.txt` | |
+| `OUTBOUND_CONNECTIONS` | **12** (was 8) | starting connections per file |
+| `OUTBOUND_MAX_CONNECTIONS` | `16` | ramp ceiling, max 32 |
+
+### The mihomo config for Cowork
+
+The bot relies only on these names. Edit `./mihomo/config.yaml` in the proxy container (backup first), `main` being the existing provider. `<FILTER>` is the `exclude-filter` the `PROXY` group already has: `'充值|分割线|群 |官网|失联|0[.]10元'`.
+
+```yaml
+listeners:
+  - name: probe            # the bot's speed and direct tests; metered as category "probe"
+    type: mixed
+    listen: 127.0.0.1
+    port: 7899
+
+proxy-groups:
+  - name: AUTO-LATENCY     # lowest latency
+    type: url-test
+    use: [main]
+    exclude-filter: '<FILTER>'
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+  - name: FAST             # the bot points this at the fastest node (PUT /proxies/FAST)
+    type: select
+    use: [main]
+    exclude-filter: '<FILTER>'
+  - name: PROXY            # general access; default AUTO-LATENCY (first entry)
+    type: select
+    proxies: [AUTO-LATENCY, FAST]
+    use: [main]
+    exclude-filter: '<FILTER>'
+  - name: TG-PICK          # Telegram's first choice; default FAST; set by the bot
+    type: select
+    proxies: [FAST, AUTO-LATENCY]
+    use: [main]
+    exclude-filter: '<FILTER>'
+  - name: TG               # keeps Telegram up if the picked node dies
+    type: fallback
+    proxies: [TG-PICK, AUTO-LATENCY]
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+  - name: PROBE            # reachable only through the probe listener
+    type: select
+    proxies: [DIRECT]
+    use: [main]
+    exclude-filter: '<FILTER>'
+
+rule-providers:
+  direct-auto:
+    type: file
+    behavior: domain
+    format: text
+    path: ./rules/direct-auto.txt     # = ./mihomo/rules/direct-auto.txt on the host
+
+rules:
+  - IN-NAME,probe,PROBE               # 1. first of all
+  # ... the existing LAN rules (DIRECT) ...
+  - RULE-SET,direct-auto,DIRECT       # 2. after the LAN rules, before Telegram
+  # ... the existing Telegram rules (-> TG), PikPak DIRECT, bujidao.cc DIRECT ...
+  - MATCH,PROXY                       # last, as today
+```
+
+Notes: remove the old `TG` group's members if it still lists `TG-OTHER`/`TG-TOKYO` (the spec's `TG` replaces it). `AUTO-LATENCY` must exist before `PROXY` lists it. mihomo only accepts a rule-provider `path` inside its home directory, so `./mihomo/rules` must be the same directory the proxy container sees as `<home>/rules`.
+
+### Deploy steps (Cowork)
+
+1. `mkdir ./mihomo/rules`, owned by 10001 and readable by root; create an empty `direct-auto.txt` in it.
+2. Add to `bot`: volume `./mihomo/rules:/mihomo-rules`. (`MIHOMO_API` is already right.)
+3. Apply the config block above in the proxy container, reload (`PUT /configs?force=true`), then restart `bot` only. Until the groups exist, `/proxy` shows what it can, a probe fails with a note ("PROBE… 404") and nothing else is affected.
+4. `/proxy` → `立即测速`; check that one run costs under 150 MB and shows as 测速 in `/traffic`. Try each mode and a manual pick and watch `/connections` (Telegram must stay up after a switch). `/proxy` → `直连检测`; `设为直连` on `registry.ollama.ai` and check a new connection to it is `DIRECT`.
+5. A large PikPak → NAS download: first with `OUTBOUND_VERIFY=hash` (the gcid check) to prove the output is identical; compare the average with the M8.3 single-link speed and with `wms bench-fetch` (the table in the spec).
+6. Rollback: previous image (`82c6ee1`); set `OUTBOUND_CONNECTIONS=8` for the old connection count. No existing table or key changes: new `kv` keys `traffic:nodes`, `traffic:direct`; new tables `proxy_node` and `direct_host` in `traffic.sqlite3`. The rule file can be emptied.
+
+### Verification evidence
+
+- Tests: 1591 → 1715 (+124), Python 3.12, `ruff check .` clean. New files: `tests/test_traffic_nodes.py` (picking, probe skip rules and the MB cap, hysteresis and the minimum interval, modes persisting and being re-applied, the write whitelist against a real HTTP server, closing Telegram connections, the upload guard, subscription incident and recovery, probe category, `/proxy` snapshots, direct verdicts, the validator, atomic file write and reload, auto-apply, weekly re-test) and `tests/test_fetch_links.py` (identical / mismatched-size / mismatched-content origin, rebalancing, ramp, ceiling and hard cap, 429 and reset back-off, relink asking for both links, resume, no-range server, `download_links`, the progress and summary text, bench).
+- **Not verified here** (needs the NAS): every real mihomo response shape (`/providers/proxies/main`, the `alive` field, `/delay`), a real probe through the listener, the numbers in the spec's table, TLS to the real hosts, the Telegram exit switch on a live session, a real PikPak origin link, and the gcid check on a big file.
+
+### My open questions and deviations
+
+1. **"Provider refresh fails"**: refreshing the provider (`PUT /providers/proxies/main`) is not on the whitelist, so the bot cannot trigger or observe a refresh. I treat a 5xx from the provider endpoint or an empty node list as the failure, plus the 80 %-dead-for-10-minutes rule.
+2. **Manual switches during the last upload part** are refused too ("Never switch while…" read literally); say if the owner's explicit pick should win.
+3. **"Final part" of an upload** = the last 2 MiB.
+4. **Nodes without a price** in their name are not skipped by the price filter (their price is unknown, not above 0.09) and sort last when picking among equals.
+5. **Probe speeds are Mbps** (megabits); the fetch numbers are MiB/s as in the spec's table.
+6. **"Last 24 h"** for candidates is today plus yesterday (the Shanghai days), because `traffic_host_day` is per day and keeps only hosts above 1 MB.
+7. **Defaults without a saved choice**: `PROXY` = auto-latency and `TG-PICK` = auto-speed, as the spec's config implies; the bot writes to mihomo only after the owner chooses (or after a probe in auto-speed moves `FAST`).
+8. **Probe traffic through `PROBE=DIRECT`** (direct tests) is also category `probe`, outbound `direct`.
+9. **Origin check cost**: two extra range probes and 2 × 256 KiB per link refresh (including after each 403/410).
+10. **`bench-fetch` and the origin link** have only run against fakes here. The aiohttp transport is unchanged (still `# pragma: no cover`).
+11. `DIRECT_RULES_FILE` is a `domain`/`text` provider written as `+.host`; if mihomo wants plain hosts for an exact match, tell me.
+12. The first scheduled probe happens 5 minutes after start when no result exists, so a fresh deploy spends up to 150 MB by itself. `PROXY_PROBE_HOURS=0` prevents that.
+
+### M9.1a: live fixes after the first NAS run
+
+Found on the NAS (mihomo v1.19.31); tests 1715 → 1722, ruff clean.
+
+1. **Latency** used `GET /proxies/<node>/delay`, which answers 404 for provider nodes, so the first automatic probe marked every node dead. It now reads `GET /providers/proxies/main/<url-quoted node>/healthcheck?url=…&timeout=5000` → `{"delay": ms}`. Still a read-only GET; the write whitelist is unchanged.
+2. **Browser User-Agent** on every request `UrllibNet` makes (download, upload, and the HEAD of the direct tests): `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36`. speed.cloudflare.com answers `Python-urllib` with 403 / error 1010.
+3. **CLI**, run inside the container, text by default, `--json` optional:
+   - `python -m tgmd.traffic probe [--apply] [--json]` runs one probe exactly like `立即测速`, saves the results to `proxy_node`, prints node / latency / down and up Mbps / price / alive (skipped nodes with the reason) and the MB used. It points `FAST` at the best node only with `--apply`.
+   - `python -m tgmd.traffic direct-test HOST [HOST...] [--json]` runs the direct-vs-proxy test and prints a verdict per host. It never writes the rules file, reloads the provider or stores a verdict (it only moves `PROBE`, and puts it back on `DIRECT`). Telegram, bujidao, LAN and IPs are refused as in the bot.
+4. **After deploying**: the nodes the first probe stored as dead are overwritten by the next probe; run `python -m tgmd.traffic probe` (or `/proxy` → `立即测速`) once to refresh them, and note it spends the probe's bytes (≤ 150 MB).
+
+## Stage 3 · M9.2: download log, skip what is on the NAS, files in parallel, per-file cancel, NL exclusions, probe confirm
+
+Spec: `docs/wms/M9.2-download-log-parallel-nl-exclusions.md` (baseline `54e3f70`). Dispatch brief: `docs/briefs/2026-10-02-m9.2-dispatch.md`. Sections A–D and F are implemented; E is the ops note below. M9.1b (confirm before probing) is §F.
+
+### What was done
+
+**A · Download log** (`pikpak_wms/store`, `ops/downloads.py`)
+
+- New table `downloads` (`schema.sql`, `CREATE TABLE IF NOT EXISTS`; no existing table or column changed): `id, file_id, name, size, hash, dest_path, plan_id, status, reason, started_at, finished_at, avg_mib_s, links, peak_connections, source, user_id`. Statuses: `done | failed | cancelled | skipped_exists | marked`; sources: `plan | manual | backfill | scan`.
+- A row is written for every `local` outbound attempt, from the one place every download goes through (`outbound.make_deliver`): done (with dest path and the M9.1 fetch numbers), failed (with the reason), cancelled (only when that file was cancelled by hand, not on a plan stop or restart), skipped_exists. Failing to write a row never fails the download. A re-run over a file already logged as present adds no second row.
+- **Backfill at migration, idempotent.** (1) Every applied `outbound` in `audit` that landed a file (`after.path` set) becomes a `done` row, `source=backfill`; guarded by the `meta` key `downloads:audit_backfilled`, so a second open adds nothing. (2) The library scan (`ops.downloads.scan_library`): walks `LIBRARY_DIR/<fixed prefix of the layout>` (`资源/整理` by default), skips `.part`/`.part.state`, and logs a file as `done`, `source=scan`, only when the index has a file with the same name and size. It runs once at start (`scan_once`, `meta` key `downloads:scanned`), and **not before the index has files** (a fresh deploy retries at the next start). `wms downloads --rescan` runs it again; it never adds a row twice.
+- **CLI** `wms downloads [--today] [--since 2026-10-01|7d] [--name X] [--status a,b] [--limit N] [--rescan] [--json]`.
+- **Bot** `/downloads [name]` (admins, menu `下载记录`): today's rows by default, buttons `今天 / 近7天 / 失败的`, a search by `/downloads abcd00123`. Each row: name, size, status, time, speed, destination. Twelve rows, then `……还有 N 条`.
+
+**B · Skip what is already there** (`ops/outbound.py`)
+
+- Before each file: the destination with the same size → `skipped_exists` (with `OUTBOUND_VERIFY=hash` and a 40-hex `hash`, the gcid is compared too; if it differs, the file goes to `name (2).ext`). The destination existing with another size also goes to `(2)` (the old code replaced it). Nothing is ever overwritten.
+- The same name and size known in `downloads` (`done`, `marked`, `scan` = done) at another path → skipped, `已在 <path>` as the reason. `OUTBOUND_SKIP_KNOWN=false` turns this off. A `marked` row with no path counts; so does a name fragment the owner said was downloaded.
+- **Plans**: `outbound.drop_present` takes those files out of the plan and says `已下载过，将跳过（N 个，X GiB）：a、b、c…` once. A plan where everything is present has no actions, no id and no `确认执行` button, and says `这些文件都已经在 NAS 上了，没有需要下载的。`. A plan made earlier (63–66) is skipped at execution the same way. A skipped file counts as `skipped` in the summary, not as applied.
+
+**C · Natural language** (`nl/remarks.py`, `rules_parser.py`, `query.py`, `compile.py`, `translator.py`, `guard.py`)
+
+- `Filters.not_downloaded` and `Filters.exclude_names` (compiled to `Match.name_not_regex`, case-insensitive substrings); both are in the wire schema and the system prompt, with Saki's sentence as a few-shot example. `not_downloaded` leaves out any file whose id, name+size, or a marked name fragment is in the log; the plan says `只含 NAS 上还没有的文件（对照下载记录）`. The newest-N limit counts among the files that are left. A scheduled rule is not frozen to a list; it relies on the skip at download time.
+- The rules layer reads, before anything else: not-yet phrases (`未下载 / 还没下 / 没下载过 / 还未下载过 / 相对 NAS 新的 / NAS 上没有的`), already-downloaded remarks (`X 下过了 / 已经下了 / 已下载 / 下载过了`), and leave-out remarks (`不要 X / 不要下载 X / 除了 X / 跳过 X / X 不用`). Inside a request the main intent stays; X becomes an exclusion; an "already downloaded" X also gets a `marked` row (written when the plan is made, after the index sync, so it points at the files it names). Words that only point (`那些`) or describe (`示例影像的视频`) are not names.
+- **The guard**: `Chain.translate` first asks `only_remark(text)`. A sentence that is only a remark returns a new `Remark` result and never reaches a model, so it cannot come back as a plan (this is what happened to `nl:3`/`nl:4`). A model's answer to a longer sentence passes through `apply_remarks`: the name is taken out of `name_contains`/`name_regex` and put in `exclude_names`. `ground()` also drops an exclusion the sentence does not contain. `保存` now counts as "arrived in the drive" (not `保存到本地`), and `但` is filler.
+- **Bot** (`WmsInBot._remark`): a `Remark` finds this user's newest NL plan from the last 30 minutes that is still open (the proposal record now carries `at`), removes the matching actions (`plans.remove_matching`, which also corrects the "matched N / examples" notes and keeps `settled` indices right), and shows it again with the same three buttons: `已从计划 N 中去掉 X（M 个文件）`. An emptied plan is discarded. With no such plan, an "already downloaded" remark is recorded: `记下了：X 已下载，之后不会再下`. Nothing here ever creates a plan.
+- Eval: 8 new cases in `tests/nl/cases.yaml` (the three sentences of the evidence plus variants; `remark:` is a new case kind). Rules: 105 cases, coverage 0.905, 0 wrong, 0 dangerous. The model numbers need Cowork's rerun (`--with-rules`, and the model alone).
+
+**D · Parallel files, budget, 503s, cancel** (`ops/control.py`, `plans.py`, `runs.py`, `fetch.py`, `tgmd/wms.py`, `tgmd/handlers.py`)
+
+- **Files in parallel.** An outbound-only plan now runs through `plans._execute_outbound`: one task per due action, a `Gate` lets `OUTBOUND_PARALLEL_FILES` of them fetch at once (default 0 = all; several running plans also overlap, and they never took the scheduler lock). The limit can change while the plan runs. Mixed plans and everything else still run one after another, as before.
+- **Chosen place for the choice**: on a running plan's message (`同时 1 / 2 / 4 / 不限`, the current one has a ✓) and as the default for new runs on **`/downloads`** (same four buttons). I did not use `/settings` (there is none) or `/proxy` (it is about nodes and its snapshot tests would have changed). Order of precedence: this plan's choice → the default chosen in the bot → `OUTBOUND_PARALLEL_FILES` (`meta` keys `parallel:<plan>`, `outbound:parallel`).
+- **Progress and resume.** A plan's `progress` stays "the first action not handled", so stop and restart resume from there. Files that finished ahead of an unfinished one are saved in the plan's `result.settled` (`{index: state}`, no schema change) and are not done again on resume (they would otherwise be seen as `skipped_exists`; a cancelled one would be downloaded again).
+- **Shared connection budget.** `fetch.ConnectionPool` (`OUTBOUND_MAX_TOTAL_CONNECTIONS`, 32) is taken per stream and given back between ranges and while backing off, first come first served: a file beyond the budget waits for connections, not for other files. The M9.1 ramp (per file, up to `OUTBOUND_MAX_CONNECTIONS`) works inside it. `FetchStats.connections` now counts open streams (it counted workers, which can now be waiting). A semaphore keeps at most 4 PikPak link requests in flight.
+- **503 and network trouble are not fatal.** With `retry_seconds` (outbound passes `OUTBOUND_RETRY_MINUTES` × 60, default 30), HTTP 408/425/429/5xx, `ConnectionError`, `TimeoutError` and anything from `aiohttp` (including `ClientConnectorError`) are retried: the pause is 5 s doubling to 120 s per range, fresh links (both) are asked for after every second failed attempt of a range (this does not count against the three expiries), the number of connections drops as in M9.1, and the file fails only when that long has passed **with no byte arriving at all** (any progress resets it). Other errors keep the short retry (3). `fetch.download()` itself defaults to `retry_seconds=0` (the old short retry) so its unit tests and direct callers are unchanged.
+- **Per-file cancel.** `wms:cancel:<plan>:<action index>` cancels that file's task only (queued or running); its `.part` and `.part.state` stay; the row is `cancelled`; the others go on. The plan can still finish: cancelled files count as handled, are listed in `result.cancelled`, and the final message shows `重试失败的` (`wms:retry:<plan>`) which builds a new plan from the failed and cancelled files (a plan finished before M9.2 recorded only the path for failures; that is matched too) and runs it in the same message; it resumes from the `.part.state`.
+- **Message.** One file: unchanged. Several: the usual first line (`已完成 k/N`, k counted from the files, not from the first unfinished), a summary line (`完成 / 失败 / 跳过 / 共 / 合计速度 / 预计剩余 / 同时下载`, plus `已取消` when there is one), a line per queued or running file (`▸ name 45% · rate · 连接 n`, `◦ name 排队中`), six per page with `◀ 上一页 / 下一页 ▶` and `第 1/2 页`. Buttons: `✖ 取消 <name>` for each line shown, the page buttons, the four `同时` buttons (only for plans of more than one action), `停止`. The first edit after pressing `确认执行` still has only `停止`; the watcher edits again as soon as the first files appear.
+- A real defect found on the way: the plan store shares one `sqlite3` connection between worker threads, which was only safe because everything ran one after another. Parallel files made `InterfaceError: bad parameter or other API misuse` appear at random. `Store` now takes a `threading.Lock` around every read and write.
+
+**F · Probe confirm (M9.1b)** (`tgmd/traffic/nodes.py`, `proxy_ui.py`, `store.py`, `__main__.py`)
+
+- `PROXY_PROBE_CONFIRM` (default true). A scheduled probe, and the first after start, sends every admin `要现在给节点测速吗？最多约 150 MB 代理流量（≈¥0.01）` with `立即测速` / `跳过本次` (`proxy:ask:go|skip`) instead of running. The figure is `PROXY_PROBE_MAX_MB` × `TRAFFIC_DEFAULT_PRICE`. With `PROXY_PROBE_CONFIRM=false` the schedule runs the probe by itself as before.
+- Only one ask is open at a time (`ask_pending`, kept in the `traffic:nodes` state, so a restart does not ask again). It expires after one probe interval (nobody answered: ask again). `立即测速` edits the message to the table (node, ms, ↓Mbps, ↑Mbps, 元/G, then the count of untested nodes and the MB used); a probe that cannot run says why in the same message. `跳过本次` waits one interval. A second press, or a press on an old message after the question was answered, is refused with an alert (a probe costs money).
+- `python -m tgmd.traffic ask-probe` writes a row in `probe_ask` (new table in `traffic.sqlite3`); the running bot looks at most every 30 s and sends the same ask (even with `PROXY_PROBE_HOURS=0` or when no probe is due; if one is already open it sends nothing new and marks the request handled).
+
+### Environment variables (all optional; the old compose starts unchanged)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OUTBOUND_PARALLEL_FILES` | `0` | files of a plan fetched at once; 0 = no limit; the bot can override per plan and as the default |
+| `OUTBOUND_MAX_TOTAL_CONNECTIONS` | `32` | connections all files share |
+| `OUTBOUND_RETRY_MINUTES` | `30` | how long a file keeps retrying 503/429/connection errors with no byte arriving |
+| `OUTBOUND_SKIP_KNOWN` | `true` | `false` = do not skip files the download log knows at another path |
+| `PROXY_PROBE_CONFIRM` | `true` | ask before a scheduled speed test |
+
+### Migration notes
+
+- One new table in `wms.sqlite3` (`downloads`), one new table in `traffic.sqlite3` (`probe_ask`); no existing table or column changes. New `meta` keys: `downloads:audit_backfilled`, `downloads:scanned`, `parallel:<plan>`, `outbound:parallel`. New fields inside existing JSON: `plans.result.settled` / `cancelled`, `failed[].file_id`, the proposal record's `at`, `traffic:nodes` state `ask_pending` / `ask_next` / `ask_at`. An older version ignores all of them.
+- The audit backfill runs inside the open of the first M9.2 start. It reads `audit` once; plans 59, 60 and the five applied files of 66 become `done` rows with their audit time and fetch numbers.
+
+### Plan 66's leftovers (ops note, §E)
+
+Plan 66 finished with 5 files applied and 4 failed (one 503, three `Cannot connect to host`); the failed ones left their `.part` and `.part.state`. After deploying:
+
+1. `docker compose exec bot wms downloads --since 2026-10-01` must list plans 59/60 and the five of 66 as `已下载` (backfill). If the library files of 66 are listed with `source=scan` too, that is fine.
+2. In Telegram: `把今天保存但还未下载过的视频下载` (or `/do 下载今天 02:50 之后入库的视频` again). The five finished ones are left out of the plan and listed as `已下载过，将跳过`; the four failed ones are in it. Confirm: each resumes from its `.part.state` (look for `*.part.state` next to the `.part` in `资源/整理/2026/2026.10/2026.10.2/` before, and check that the first request starts after byte 0, or that the progress message does not start at 0%).
+3. `重试失败的` is not available for 66 itself unless its old final message is still on screen and its buttons were never built: 66's failures have no `file_id` but do have the path; the retry matches by path, so if the button exists it works. The sentence above is the dependable way.
+4. If a file cannot be resumed (the CDN refused the old range after a day), delete its `.part` and `.part.state` and run it again; nothing else is touched.
+
+### Deploy steps (Cowork)
+
+1. Pull the image and restart `bot` only. Nothing in compose changes. Optional: `OUTBOUND_PARALLEL_FILES=2` to start cautiously (the default is no limit, as Saki asked; `OUTBOUND_MAX_TOTAL_CONNECTIONS=32` is what keeps that from opening hundreds of connections).
+2. `docker compose exec bot wms downloads --json | head`, then `/downloads` in Telegram.
+3. The acceptance sentences of the spec, in this order: `把今天保存但还未下载过的视频下载，abcd00123 下过了` (a plan without abcd00123 and without what is on the NAS); right after it `abcd00123 下过了` (removed from that plan); with no pending plan `abcd00123 下过了` (recorded, no plan); confirm a plan that contains files already present (skipped); a plan of several files (all progress at once, `取消` on one leaves the others running, `重试失败的`).
+4. `docker compose exec bot python -m tgmd.traffic ask-probe` → one message within about 30 s; nothing is measured until `立即测速`; a second `ask-probe` while it is open sends nothing.
+5. Rollback: previous image (`54e3f70`). The new tables and keys are ignored by the old version. `OUTBOUND_PARALLEL_FILES=1` gives the old one-file-at-a-time behaviour; `OUTBOUND_RETRY_MINUTES=0` the old short retry; `PROXY_PROBE_CONFIRM=false` the old automatic probe.
+
+### Verification evidence
+
+- Tests: 1722 → 1826 (+104), Python 3.12, `ruff check .` clean. (3.11 is not installed here; CI runs it. Nothing newer than 3.11 was used.) New files: `tests/test_wms_m92.py` (backfill from audit and from the library scan, a row for every attempt, listing filters, marking; skipping: same size, gcid mismatch renames, a different size renames, known at another path / gone from disk / switched off / said to be downloaded, the plan that lists them, the plan with everything present; the sentences: the three real ones, the phrase families, remarks on their own, words that are not names, the model never asked about a remark, a model's inverted answer put right, the wire format, `not_downloaded` against the log, a fragment, the newest-N, marked rows, a scheduled rule; removing names from an open plan; files at once by default, the limit and changing it while running, precedence of the settings, the shared connection budget with a cancelled waiter; 503 back-off with relink, the 2-minute cap, connection errors, the window, progress resetting it, a plain error still failing, and through a plan; cancelling one file, a queued one, resuming from the part, stop/resume not repeating what finished ahead, skipped vs applied; the settings; the CLI), `tests/test_wms_m92_bot.py` (`/downloads` rendering, search, buttons, the default, admin only and the menu; the multi-file message, paging, cancel then retry, changing the number on the message, stale buttons; every remark flow in the bot) and `tests/test_traffic_probe_ask.py` (ask, run, skip, a single pending ask, restart, expiry, double press, an old button, a probe that cannot run, no confirmation, no schedule, the CLI flag picked up within 30 s, the command, the store).
+- Mutation checks (each turns a test red, then restored): a `known_elsewhere` that finds nothing; the remark guard off; ignoring `settled` on resume; patient retry off; allowing an overwrite.
+- **Not verified here** (needs the NAS and the real services): real PikPak CDN behaviour under many files and the shared budget; the 503 / `Cannot connect` pattern of plan 66; Telegram's real edit limits with up to ten button rows; the gcid check on a real file; the library scan over the real share (permissions, size, how long); the effect of 500 queued tasks on a real plan; the model backends on the new sentences.
+
+### Existing tests changed (red line 7; none removed)
+
+- `tests/test_wms_m83.py`: three tests assumed one file at a time, which is no longer the default: `test_stop_keeps_what_was_done_and_the_place` and `test_progress_is_saved_as_the_run_goes` now set `OUTBOUND_PARALLEL_FILES=1`; `test_a_network_error_fails_that_file_and_keeps_the_part` sets `OUTBOUND_RETRY_MINUTES=0` (a reset would otherwise be retried for thirty minutes, which is the point of the change).
+- `tests/conftest.py` lists the new variables so they do not leak into tests; `pyproject.toml` allows full-width punctuation in the Chinese-asserting new tests and in `nl/remarks.py` (as for the other NL files).
+
+### My open questions and deviations
+
+1. **No `AGENTS.md` or `CLAUDE.md` exists in the repo** (the task named them); I read `CC_BRIEF.md` for the red lines instead, as M9 did.
+2. **Where the default 同时下载 lives**: `/downloads`, not `/settings` or `/proxy` (see D). Say if you want it on `/proxy` as well.
+3. **"Known at another path" ignores a `done` row whose file is no longer on disk.** The spec skips on a `done|marked|scan` row; a file Saki deleted to fetch again would have said `已在 <path>` for a file that is not there. A `marked` row with no path always counts.
+4. **Marking.** Only "already downloaded" remarks (`下过了 / 已经下了 / 已下载`) write a `marked` row. A pure exclusion (`不要 X`, `除了 X`, `跳过 X`, `X 不用`) only leaves X out: it does not say X is downloaded. So the spec's "no pending plan → record a `marked` row" is done for the first kind; a bare `不要 X` with no pending plan answers `没有可以去掉 X 的待执行计划。` and records nothing. An "already downloaded" remark is also recorded when a pending plan exists (the spec only says to remove it there).
+5. **A standalone remark resolves names against the index as it is.** If the index has not been loaded yet, the row holds the name fragment itself (no file id); it still works (name fragment match). Within a request the rows are written after the sync and point at the files.
+6. **`保存` and `但`** were added to the rules layer so the sentence of `nl:4` is understood by the rules (the model got it wrong). `下载还没下的` alone (nothing else) still asks `nl.ask.download_all`: not-downloaded does not count as a condition.
+7. **`FetchStats.connections`** is now the number of open streams (it was the number of workers); `peak_connections` is unchanged (workers).
+8. **A plan that stops with several files in flight resumes from the first unfinished one;** the others that finished are remembered in `result.settled`. A plan that is `discarded` from `remove_matching` keeps whatever it had. The `settled` map is only written while something is unfinished.
+9. **`OUTBOUND_VERIFY=hash` recomputes the gcid of an existing destination file on every re-run** (needed to decide between skip and `(2)`); on a 10 GB file that is a minute of disk.
+10. **Links waiting for a connection can expire** when many files queue behind the pool; the existing relink (three per file) handles it, and the patient mode's relink does not use that count.
+11. **Ask text price.** `≈¥` is `PROXY_PROBE_MAX_MB × TRAFFIC_DEFAULT_PRICE / 1024`; with the defaults that prints `0.01` as in the spec, but it moves with the price.
+12. **`docs/briefs/2026-10-01-m8.3-dispatch.md`** is still untracked in the working tree (it was before I started); I did not commit it.
+
+---
+
+## Stage 3 · M9.3: per-task start / pause / stop, cleanup pass, public-repo hygiene
+
+Spec: `docs/wms/M9.3-task-controls-cleanup-public-repo-hygiene.md` (baseline `dd947d2`). Dispatch brief: `docs/briefs/2026-10-03-m9.3-dispatch.md`. Sections 0, A, B and C are done; the commits are `docs(brief): the repository is public`, `feat(wms): M9.3 - …` and `chore(security): …`.
+
+### Open questions (read these first)
+
+1. **Decide: rewrite the public history or not.** The plan is `docs/security/history-rewrite-plan.md`; nothing was run. The audit found no token, key or password in history, only addresses, share paths, the NAS's make, the Funnel host and the cache chat id (`docs/security/2026-10-03-public-audit.md`). The old GHCR image versions hold the old code, including the address that used to be a code default; delete them after the new image is out.
+2. **The NAS's `.env` needs `TRAFFIC_MODEL_HOST=<MODEL_HOST>:11434`.** The address was a code default (`tgmd/traffic/classify.py`) and is now empty by default. Without it the "model host went through the proxy" route-leak alert is silent and a connection to the model host counts as `lan`. (Cowork: set it, restart.)
+3. **File names of the downloads in the documents and tests** (catalogue codes and a studio's name, about 85 lines in 14 files). Not in the spec's categories, so left alone and counted in the audit. Say if they should be replaced too.
+4. **`资源库`** is the library's share name and a constant in the code (`LIBRARY_NAME`) that users type as a path prefix; only the volume path around it was scrubbed. Making it a setting would change what the NAS accepts until `.env` says so.
+5. **`proxy_ui._when` prints the machine's local zone** (a container without `TZ` shows UTC). Not WMS and not a leak; a one-line change to use `TRAFFIC_TIMEZONE` if wanted.
+6. **No `AGENTS.md` or `CLAUDE.md` exists in the repo** (the task named them); I read `CC_BRIEF.md` for the red lines again.
+7. **Still open from M9 / M9.1 / M9.2** (nothing here had an obvious answer; numbers are those of each section's own list):
+   - M9, the two decisions for Saki: 1 (prefer `TG-TOKYO`?), 2 (Ollama pulls through the proxy: direct or blocked?);
+   - M9, deviations: #2 (the traffic database is `<DATA_DIR>/traffic.sqlite3`; confirm the location), #3 (mihomo's `chains` order: check one real `/connections` sample), #8 (waiting for the gate inside a transfer, untested live), #10 (a budget pause is not undone by the same budget), #13 (`fetch.throttle` as a module global);
+   - M9.1: #1, #2, #4, #6, #9–#12;
+   - M9.2: #2 (where the default 同时下载 lives), #4–#6, #9 (the gcid is recomputed on every re-run), #10 (links waiting for the pool can expire).
+
+Closed, with the answer: M9.2 #3 (a `done` row whose file is gone does not count: intended), #7 (`connections` counts open streams, `peak_connections` workers; documented in the code), #11 (the ask's price moves with the price: as designed), #12 (`docs/briefs/2026-10-01-m8.3-dispatch.md` is committed now, scrubbed); M9 deviations #5, #7, #9, #14 and M9.1 #3, #5, #8 (documented behaviour, nothing to decide).
+
+### What was done
+
+**A · Per-task controls** (`ops/control.py`, `ops/plans.py`, `ops/taskreq.py`, `ops/runs.py`, `ops/embed.py`, `tgmd/wms.py`, `tgmd/handlers.py`, `cli/main.py`)
+
+- Each file of a multi-file run has a state: `排队中 / 下载中 / 已暂停 / 已完成 / 已跳过 / 失败 / 已终止`, and three controls.
+  - **暂停**: the file's task stops transferring; `.part` and `.part.state` stay; its slot (`OUTBOUND_PARALLEL_FILES`) and its connections (the shared pool) are given back at once, so the others speed up. The plan does not finish while a file is paused. A queued file can be paused too (nothing is written for it).
+  - **开始**: a paused file goes back in the queue **at the front** and resumes from `.part.state` (the fetch is the same code a stop-and-resume uses; the test checks the next requests do not start at byte 0). A queued file jumps the queue (`Gate.promote`). A running file answers "cannot".
+  - **终止**: ends the file for this run (a `cancelled` row in `downloads`, queued and paused files included). `.part` stays and the file is still resumable later (`重试失败的`), **unless** `删除已下载部分` is pressed and confirmed (`确认删除` / `保留`), or `--delete-partial` is given on the CLI. The delete button is on the line of a stopped file and also on the plan's final message, so it is not lost when the last file ends the plan. The old `wms:cancel:<plan>:<n>` buttons already sent still work (same as 终止).
+- **Message.** One line per task, `3. name · 下载中 45% · 3.2 MiB/s`, running first, then paused, queued, failed, stopped, done, skipped; six per page as in M9.2. Buttons on the task's own row: `⏸ 暂停 3 name` or `▶ 开始 3 name`, plus `■ 终止 3`; a stopped file with a partial file gets `🗑 删除 3 name 已下载部分`. Plan row: `全部暂停`, `全部开始`, and `重试失败的` once something failed or was stopped. (Telegram cannot put a button inside the text line, so "on the same line" is: the button row sits under the page's lines in the same order, labelled with the number.) A one-file plan shows the same buttons for its one task.
+- **CLI.** `wms tasks [--plan N] [--json]` lists tasks and states (from what the running process reported in the last 30 s; for a plan nothing runs, as last saved). `wms task pause|start|stop <plan>:<n>` (`<n>` counts from 1, the number in the message; `<plan>:all` for pause and start), `wms task stop <plan>:<n> --delete-partial --yes`. The CLI writes a row in the **one request table** (`pikpak_wms/core/requests.py`, shared with `python -m tgmd.traffic ask-probe`); whichever process runs the plan (the bot, or a `wms apply` in a terminal) looks every 5 s (`taskreq.EVERY`), does it, and writes the answer back; the CLI waits up to 8 s and prints it (`done` / `refused: the task is paused` / "nothing has answered yet"). Requests older than 10 minutes are marked `expired` and never run.
+- **`wms apply` uses the downloader the plan was built with.** `wms outbound … --downloader local` now stores it in each action (`after.via`); `wms apply N` with no flag uses it. `--downloader` at apply time only fills in for plans built without one. The CLI path writes `downloads` rows (it always did through `make_deliver`; a test pins it) and takes controls as above.
+- **No signed URL anywhere** (`core/redact.py`). `https://host/path?query` becomes `https://host/…?<redacted>` in: `WmsError` messages and arguments (so in everything shown), plan results (`_failure`), the download log's `reason`, the `links` mode output (unless `--show-links` on `wms outbound` / `wms apply`), and every log record and traceback (`install_log_redaction`, a log-record factory installed by the bot and the CLI).
+
+**B · Cleanup**
+
+1. **Duplicate rows.** The audit backfill skips a file already logged at that destination (name, size, path), and every open merges existing `done` duplicates (same destination, name and size): the best-sourced row stays (a real attempt over a backfill over a scan) and takes what the others knew. This is the only place rows are deleted; failed, cancelled and skipped rows are never merged.
+2. **Backfill gaps.** Once (`meta` key `downloads:failed_backfilled`) every failed outbound in a plan's result becomes a `failed` row (`source=backfill`, the plan's last-updated time, the reason redacted, name and size from the plan body). Plan 66's four failures appear in `wms downloads --status failed` after the first start.
+3. **Gone files** are named in the summary: `源文件已不在网盘：a、b、c…` (first five, `ApplyReport.gone`, kept in `result.gone`).
+4. **Redundancy sweep.** One request-table module instead of two patterns (`probe_ask` is no longer written; its table stays in old files); one `SpeedMeter` instead of two copies of the speed window (`Run`, `FileTrack`); dead code removed (`freshness_line`, `describe_counts`, `ensure_folder`, `child_path`, three unused catalogue keys and the M9.2 cancel button text). I looked for settings nothing reads and found none among M8.3–M9.2 (the ones that look unread are read through methods or are deployment variables whose names cannot change). The mihomo reads already go through one client; the URL/host helpers had no real duplicate. `vulture` was used as the detector; its remaining findings are framework hooks and the CLI's decorated functions.
+5. **Omissions.** The open questions are triaged above. **`wms do` with the slow model host**: the rules layer now takes `<absolute date> <hh:mm> 之后入库` (and `今天/昨天/前天 hh:mm 之后`), so `下载 2026年10月2日 02:50 之后入库、还未下载过的视频` is a download plan with `created_after=2026-10-02T02:50+08:00` and `not_downloaded`, no model asked (an eval case was added). **The Mac's clock**: every time read in `pikpak_wms` names a zone from the configuration (`ZoneInfo`, `Asia/Shanghai` by default) or UTC; a test walks the source and fails on any bare `datetime.now()`, `date.today()`, `time.localtime` and the like. The NAS clock decides, not the Mac's.
+
+**C · Public repository** (`docs/security/`, `.gitleaks.toml`, `.github/workflows/ci.yml`, `scripts/public_audit.py`)
+
+- **Audit**: `docs/security/2026-10-03-public-audit.md` (values masked to ≤4 characters; per finding: file, first commit, category, in HEAD at the start and now). Headline: 0 tokens (gitleaks' four default findings are false positives, listed with reasons in `.gitleaks.toml`), 41 address findings, 20 device findings, 3 personal findings across history; 96 findings were in HEAD at the start, **0 are now**.
+- **Scrub**: docs, briefs, this file, tests, fixtures, `.env.example` and the compose example use placeholders (table in `docs/security/README.md`) or invented values (`10.0.0.x`, `-1001234567890`, `/volume9/x`). No code default holds a real address or id: `MODEL_HOST` is now `TRAFFIC_MODEL_HOST`.
+- **Prevent**: `.gitleaks.toml` (default rules + the project's address, id, path and device rules; patterns only), a `secrets` job in `ci.yml` (pinned, checksum-verified gitleaks; the image build already needs `checks`, so a finding stops the image), `.pre-commit-config.yaml` (optional), all documented in `docs/security/README.md`. `gitleaks dir .` is clean on this commit; `gitleaks git .` (history) is not, and is not meant to be: that is the audit.
+- **History**: `docs/security/history-rewrite-plan.md` (the replace-text patterns, the steps, what breaks, what to rotate whether or not). Not run.
+- **Image**: the Dockerfile already copied only code, example config and `tests/nl/`; `.dockerignore` now also leaves out docs, briefs, `.env*`, the real WMS config and token, `deploy`, `scripts`, CI files and every `*.md`; `tests/test_image_hygiene.py` pins both.
+- Where the real operational values went: **not into this repository.** They are in the NAS's `.env`, and in Saki's private `Asukamadoka/skill-builder` hub or the vault (the NAS's LAN address, the model host's, the share and volume names, the Funnel host, the cache channel's id, the owner's id).
+
+### Environment variables (all optional; the old compose starts unchanged)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TRAFFIC_MODEL_HOST` | empty | `host` or `host:port` of the LAN model host, for the route-leak alert; **set it on the NAS** (see open question 2) |
+
+### Migration notes
+
+- A `request` table is created in `wms.sqlite3` and in `traffic.sqlite3` (`CREATE TABLE IF NOT EXISTS`; nothing existing changes). `probe_ask` in `traffic.sqlite3` is no longer written; an older version of the bot reading the new file simply never sees the CLI's ask.
+- New `meta` keys: `downloads:failed_backfilled`, `tasks:<plan>` (a running plan's task snapshot, removed when it ends). New fields inside existing JSON: `plans.result.gone`, `after.via` in new outbound plan actions.
+- On the first start the failed attempts of old plans are added to `downloads`, and duplicate `done` rows are merged (the only deletion).
+
+### Deploy steps (Cowork)
+
+1. Set `TRAFFIC_MODEL_HOST=<MODEL_HOST>:11434` in the NAS's `.env` (the real address is in Saki's notes). Pull the image, restart `bot` only.
+2. `docker compose exec bot wms downloads --status failed` lists plan 66's four failures; `wms downloads --since 2026-10-01` has no file twice (abcd00123 part1/part2 in particular).
+3. Start a download plan of three files, then: `wms tasks` (live states), `wms task pause <plan>:2` (answers `done` within ~5 s; the file shows `已暂停`, its `.part` and `.part.state` are on disk, the others speed up), `wms task start <plan>:2` (it resumes, not from byte 0), `wms task stop <plan>:3` (the `.part` stays) and `wms task stop <plan>:3 --delete-partial --yes` on another. In Telegram: the same with the buttons, `全部暂停`, `全部开始`, and `删除已下载部分` with its confirm.
+4. `wms outbound <path> --downloader local` then `wms apply N` with no flag: it downloads, it does not print links. `wms outbound <path> --show-links` is the only way to see a signed link.
+5. `docker compose logs bot | grep -c "sign="` stays 0 after a 503 or a failed download.
+6. `/do 下载 2026年10月2日 02:50 之后入库、还未下载过的视频` answers at once, without the 30 s wait.
+7. Decide about the history rewrite and the old GHCR versions (open question 1).
+8. Rollback: previous image (`dd947d2`). The new table and keys are ignored by the old version; `TRAFFIC_MODEL_HOST` is ignored too.
+
+### Verification evidence
+
+- Tests: 1826 → 1877, Python 3.12, `ruff check .` clean. New files: `tests/test_wms_m93.py` (gate priority; pause frees the slot and the connections; pause then start resumes from the part; start puts a queued file first and a paused one ahead of the queue; a queued file can be paused; pause all / start all; a paused file does not end the plan and stop still works; stop with and without delete-partial; stopping a paused or queued file is logged; the request table picks up pause / stop+delete / pause-all / start-all while the plan runs and expires old requests, bad targets and verbs; a plan keeps its downloader and applies with it, with a `downloads` row; redaction in errors, the links mode, a network failure (result, summary, log table) and log records; duplicate merge, no double backfill, failed backfill once, gone names in the summary; the sentence with a clock time; no local-time reads in `pikpak_wms`), `tests/test_wms_m93_bot.py` (the lines and the buttons for every state, the presses, the delete confirm, the final message's delete button, old `取消`, pause/start all and retry, stale buttons), `tests/test_image_hygiene.py`.
+- Mutation checks (each turned a test red, then restored): a started paused file not going to the front; `--delete-partial` not deleting.
+- **Not verified here** (needs the NAS and the real services): the pause and start buttons on a real Telegram client (edit rate, how it feels with ten rows of buttons), pause under the real CDN (links that expire while paused: the existing relink handles it, not tested live), `wms task` between the bot's process and a second `docker compose exec` one (the table is plain SQLite shared by both; the busy timeout is sqlite's default 5 s), gitleaks on the NAS (it only runs in CI and on the Mac), the effect of `.dockerignore` on a local build (CI builds from a clean checkout).
+
+### Existing tests changed (red line 7; none removed)
+
+- `tests/test_wms_m92_bot.py`: the three tests that asserted the M9.2 layout (`✖ 取消 name` buttons, `▸` lines, the final message's single button) now assert the M9.3 one; the stale-button and 取消 flows are unchanged.
+- `tests/test_traffic.py`: the two model-host tests pass the host explicitly (`classify(..., model_host)`) and one new assertion says that without a configured host the address is a plain LAN one.
+- The test files with real addresses, ids and paths got invented ones (`test_config`, `test_tasks`, `test_traffic_nodes`, `test_wms_m8`, `test_wms_m83`, `test_wms_m83_nl`, `test_channel_*`): same assertions, other values.
+- `pyproject.toml` allows the imported fixtures' redefinition and full-width punctuation in the two new test files.
+
+### Deviations from the spec
+
+1. **"On the same line"**: Telegram cannot put buttons inside message text, so each task's buttons are one row of their own, in the same order and labelled with the task's number.
+2. **Task numbers in the CLI count from 1** (the number shown in the message); the buttons' callback data keeps the plan's own 0-based index, like the old `取消` buttons.
+3. **The audit's custom patterns are generic shapes** (a private address, a chat id, a volume path), not the specific values: writing the values into a pattern would publish them. Real names have no generic shape, so none are scanned for beyond home-directory paths, e-mail addresses and the NAS's make.
+4. **`wms task pause` for a plan that is not running anywhere** is not an error: it waits for 8 s, says nobody answered, and leaves the request to expire in 10 minutes.
+5. **The M9.3 spec file and the dispatch brief are committed with the feature commit; the M8.3 brief too (scrubbed).**
+
+---
+
+## Stage 3 · M9.4: download priority (and the dedupe fix found live after M9.3)
+
+Spec: `docs/wms/M9.4-download-priority.md` (baseline `1594fd5`). Sections A, B and C are done, plus the live finding below.
+
+### Live fix: `wms downloads --name abcd00123` showed part1/part2 twice
+
+The M9.3 merge compared the destination path as an exact string. The same file reached the log from the container (`/library/…`, the audit backfill) and from the host side (a scan, or another spelling), so the rows never matched. Now (`store/db.py`, `same_place`):
+
+- two `done` rows with the same name and size are one file when their paths are the same after normalizing (doubled or trailing slashes, NFC), **or** one path is the end of the other, **or** they share the last four parts (the file and the three day folders, `2026/2026.10/2026.10.2/name`), so `/library/…` and `<host path>/…` match;
+- a row with no path joins the file when it has exactly one place; the best-sourced row stays (plan over backfill over scan) and takes what the others knew;
+- the audit backfill and the library scan use the same test before adding a row (`download_placed`), so the duplicates do not come back;
+- different folders, other sizes and failed rows are never merged.
+
+It runs at every open, so the first start of this image cleans the NAS's database. The test has the exact shape (container path, host path, doubled slashes, same size, same time).
+
+### What was done (M9.4)
+
+**A · Model** (`ops/priority.py`, `ops/control.py`, `ops/fetch.py`, `core/models.py`)
+
+- Levels `0 normal / 1 high / 2 top` (`normal|high|top` on the CLI). A task's own level is kept in its action (`after.priority`), a plan's in the plan body (`Plan.priority`, default for tasks without their own). Both are stored with the plan, so they survive a restart, and a retry plan made from the actions keeps them. `整组优先` sets the plan's level and clears the tasks' own; a task set back to normal beats a high plan.
+- **Start order** `(-priority, plan created_at, item index)` (`FileTrack.key`): a plan's own queue (the `OUTBOUND_PARALLEL_FILES` gate) is served in that order, re-read at every free slot, so a level changed while a file waits counts. Across plans, the plans do not share slots (the limit is per plan), so the order shows in the connection pool and in `/downloads` (`Runs.queue()` sorts every running plan's queued tasks by the same key).
+- **Bandwidth.** The shared connection pool (`OUTBOUND_MAX_TOTAL_CONNECTIONS`) grants a free connection by classes taking turns in proportion to 1 : 2 : 4 (stride scheduling; a class joins at the level of the others, with no credit); inside a class, older plan and earlier item first. **Soft pre-emption**: nothing is taken from an open stream; a normal file hands its connection over when its current range ends, and its next request queues behind the heavier class. `.part` progress is untouched.
+- **Minimum one connection.** A file that holds no connection asks with `first=True` and is served before the weights, so a running file never stays at zero (a paused one holds none, as in M9.3). The pool-level test shows it cuts in front of a top task.
+- Task numbers are now the task's place in the plan (`base + index + 1`), the same in the message and in the CLI. Before, after a resume, the message counted from the first unfinished action while `wms tasks` for a saved plan counted from the start.
+
+**B · Controls**
+
+- Each task's row has `⬆ 优先 n` (normal → high → top → normal); its line shows `⬆` or `⬆⬆` before the name. Plan row: `整组优先` (cycles the same way). Both persist at once.
+- CLI: `wms task priority <plan>:<n> normal|high|top`, `wms plan priority <plan> normal|high|top`, through the request table; with nothing answering (the plan is not running) `task priority` keeps the level in the plan, `plan priority` always does. `wms plan 66` still shows plan 66 (`plan` is now a group; a plain number is routed to `wms plan show`).
+- Sentences: 「先下 X」「先下载 X」「优先下载 X」→ high; 「X 置顶」「置顶 X」「把 X 置顶」→ top (a new result type `Prioritize`, handled before any model, like a remark: the sentence must be only that, so 「优先下载今天的视频」 and 「先下载再整理」 are not caught). It sets the level of every queued, paused or running download of a running **or waiting** plan whose file name contains X. It never creates a plan; with no match: 「没有找到正在排队或下载的 X」. Decision: 先下/优先 = high, 置顶 = top (the spec lists the phrases but not their level).
+- `/downloads` has a section `排队中，按开始顺序（n）` with the queue, `⬆` marks and `计划 N, <task number>`.
+
+### Environment variables
+
+None new.
+
+### Migration notes
+
+No schema change. `Plan.priority` and `after.priority` are new JSON fields (older plans read as normal; an older version ignores them). The duplicate merge runs at open (it deletes duplicate `done` rows, as in M9.3).
+
+### Deploy steps (Cowork)
+
+1. Pull, restart `bot`. `wms downloads --name abcd00123` now lists part1 and part2 once each.
+2. Run a plan of several files with `OUTBOUND_PARALLEL_FILES=1`: press `⬆ 优先` on a queued file (it starts next), `整组优先`, send 「先下 <name>」 and 「<name> 置顶」 (no new plan appears), look at `/downloads`.
+3. `wms task priority <plan>:<n> top` and `wms plan priority <plan> high` against a running plan (answer within ~5 s) and against a waiting one (saved).
+4. With two plans running and `OUTBOUND_MAX_TOTAL_CONNECTIONS` small (say 4), set one file to top and watch `wms tasks`: its speed rises as the others finish their ranges; nobody drops to zero.
+5. Rollback: previous image (`1594fd5`); the new fields are ignored.
+
+### Verification evidence
+
+- Tests: 1877 → 1922, ruff clean, gitleaks clean. New: `tests/test_wms_m94.py` (pool order, weights 1:2:4, no starvation, soft pre-emption, the one-connection rule, a cancelled waiter, the download's own request; start order, a level set while waiting, order across plans; persistence in the plan, a new run reading it, the retry plan, whole-plan; request table; the phrases and what is not a phrase; a model is never asked; the command line; the dedupe fix in its live shape), `tests/test_wms_m94_bot.py` (the cycle, the arrow, the group button, stale buttons, the sentences make no plan, the no-match answer, a waiting plan, `/downloads` order). Existing tests changed: two assertions of button labels (the new `⬆ 优先` and `整组优先` buttons).
+- **Not verified here**: real throughput under contention (the weights are proven at the pool, not against the real CDN), and how Telegram shows three buttons per task row (width).
+
+### Deviations and open questions
+
+1. Level of the phrases (above). 2. `整组优先` clears tasks' own priorities (so it means the whole group). 3. A request for a task the plan does not have is not taken by anyone and expires after 10 minutes. 4. The fourth-part suffix rule in the dedupe could merge two different copies of one file in two day folders that happen to end in the same three folders under different roots; it needs the same name, size and ending, which is the same file by any reading of the log.
+
+
+## Stage 3 · M9.5: captcha scoping and event-sync fallback
+
+Brief: `docs/briefs/2026-10-04-wms-m9-5-captcha-events.md`, Part A (baseline `6b77466`). Live report: `/do` answered `events: Verification code is invalid`. Cause from code reading (not confirmed against NAS logs): pikpakapi 0.1.11 parks the captcha of `get_download_url` on the shared api object (`api.captcha_token`) and clears it with no `try/finally`; every request sent meanwhile, or after a failed fetch, carries it.
+
+### What was done
+
+- **`download_links` owns its captcha** (`core/client.py`). It no longer calls the SDK's `get_download_url`. It mints a captcha for `GET:/drive/v1/files/<id>` and sends the GET through the SDK's `_make_request` with explicit headers (`api.get_headers()` plus `X-Captcha-Token` and `api.build_custom_user_agent()`). Nothing is ever assigned to `api.captcha_token`. Return contract unchanged.
+- **Captcha refusals** (`WmsClient._run`, behind `_call`). `verification code` / `captcha` / `4002` is matched loosely, before the auth hints (a captcha message contains "token"). First refusal: clear a leaked `api.captcha_token` (one WARNING, the token is never logged), mint a captcha for the call's own `action`, retry once with it as an explicit header. Second refusal: new `CaptchaError(WmsError)`. `events` passes `action="GET:/drive/v1/events"`; other calls are unchanged (no `action`, so a refusal is a `CaptchaError` at once).
+- **Events failure never fails `/do`** (`ops/eventsync.py`). A first-page error (anything but `AuthError`) is now a failed feed: `fallback="incremental"`, reason `the event feed failed: <short error>`, cursor **not** rebased, also for `allow_full` callers. The admin alert goes through `_alert_once`. The last sync's state (`last_sync` meta) carries `failed`; `note_freshness` and the NL freshness note add `sync.failed` ("Event sync failed (<reason>); used an incremental stocktake instead" / zh). A later good sync clears it. Later-page errors still mean a lost cursor, as before.
+- `wms events` goes through `client.events`, so it gets the retry; `--raw` output is unchanged.
+
+### Environment variables / migration
+
+None. No schema change (`last_sync` meta gains an optional `failed` field).
+
+### Deploy steps (Cowork)
+
+1. Pull the image, restart `bot` only (never `proxy`).
+2. `docker compose exec -T bot wms events --raw --limit 5` succeeds.
+3. `docker compose logs bot | grep -E "captcha|event sync"`: a line "cleared a captcha token left on the PikPak client" means the old leak was seen and healed; "event sync fell back" means the feed failed and an incremental stocktake ran.
+4. Saki tests `/do`: it answers, with or without the "Event sync failed" plan note.
+5. Rollback: image `6b77466`.
+
+### Verification evidence
+
+- Tests: 1922 → 1932, ruff clean. New: `tests/test_wms_m95.py` (`download_links` never sets the shared token, and leaves nothing after a failed fetch; an events call during a slow fetch carries no foreign captcha; a leaked token is cleared and the call retried with exactly one extra `captcha_init`; second refusal raises `CaptchaError`; first-page error gives an incremental refresh, same cursor, one alert, plan note in en and zh, failure cleared by a good sync; `AuthError` still propagates).
+- Existing tests changed: none of their assertions. The fake drive (`tests/wms_fakes.py`) lost `get_download_url` for `captcha_init` / `get_headers` / `build_custom_user_agent` / `_make_request` (`download_info()` is the new hook), and its `events` refuses while a token is parked, like the real service. `tests/test_fetch_links.py::TestLinksFromPikPak.make` overrides `download_info` instead of `get_download_url`.
+- **Not verified here**: that the live failure is this leak (no NAS logs), and the real captcha error text/code (`4002` is from the brief).
+
+### Deviations and open questions
+
+1. `_make_request` retries (token refresh, network) reuse the headers built once, so a refresh of the access token inside one scoped GET is retried with the old bearer and then fails as an auth error; the next call is fine. Rare, and the SDK's own path has no better answer.
+2. The captcha retry applies only to `events` and `download_links`; other calls raise `CaptchaError` on a refusal (a leaked token is not cleared for them). Widen `action=` per call if the NAS logs show other refusals.
+
+
+## Security · private values vault (option A)
+
+Brief: `docs/briefs/2026-10-04-wms-private-values-vault.md` (baseline `1b20121`). Repository stays public; this closes what a non-destructive change can. No history rewrite, force-push, visibility change, GHCR deletion, GitHub secret or NAS edit was done.
+
+### What changed
+
+- **Private store contract** (`docs/security/README.md`, "The private store" and "Private value rules"): the NAS's `.env` is the runtime source of truth, plus a private Saki-owned copy; both options (private GitHub repository, sops/age-encrypted file in it) are written, the choice is `PENDING (Saki)`.
+- **`deploy/private.env.example`**: every deployment-identifying variable with placeholders and where the real value lives (`ADMIN_USER_IDS`, `ALLOWED_USER_IDS`, `WMS_ACCOUNT`, `PIKPAK_USERNAME`, `CACHE_CHAT_ID`, `TRAFFIC_MODEL_HOST`, `NL_OPENAI_BASE_URL`, `NL_OPENAI_NAMES`, `OLLAMA_URL`, `PUBLIC_BASE_URL`, `MIHOMO_API`, `DIRECT_TEST_URLS`, `LOCAL_URL_PREFIX`, `LIBRARY_DIR`, and the compose-only `LIBRARY_HOST_DIR`, `MEDIA_HOST_DIR`). Found by reading `tgmd/config.py`, `pikpak_wms/nl/*` and the compose files.
+- **Code defaults**: every one of those is already read from the environment with an empty or neutral default, so no code change was needed (`TRAFFIC_MODEL_HOST` was the last, fixed in M9.3). `TRAFFIC_TIMEZONE` keeps `Asia/Shanghai` and `LIBRARY_NAME` stays `资源库`: behaviour, not an address.
+- **Compose**: `deploy/restricted-network/docker-compose.yml` now shows the library and media mounts as `${LIBRARY_HOST_DIR}` / `${MEDIA_HOST_DIR}` (still commented out, so the file starts exactly as before). `docker-compose.yml` and `docker-compose.ghcr.yml` had no literal path.
+- **Remaining personal data in HEAD**: the studio name, the catalogue codes and the site prefix quoted in docs, tests, the NL examples and two code comments or docstrings were replaced by invented ones (`abcd00123`, `wxyz04567`, `example.com@`, a studio `示例影像`, `08号模特`); the old test constant is now `SAMPLE`. Behaviour and assertions are unchanged. "Saki" and the GitHub handle stay.
+- **Rules**: `.gitleaks.toml` gains `catalogue-code` (3-5 letters, a zero-padded number; allowlist: the two invented codes). Optional second config: the `secrets` job runs `gitleaks dir . --config <temp file>` only when the secret `GITLEAKS_PRIVATE_RULES` (base64 of `.gitleaks.private.toml`) is set, and skips silently otherwise; pre-commit has a `gitleaks-private` hook (`scripts/gitleaks_private_hook.sh`) that reads `~/.config/tg_media_down_bot/gitleaks.private.toml` when it exists. `.gitleaks.private.toml` and `deploy/private.env*` (except the example) are in `.gitignore` and `.dockerignore`.
+- **NL eval**: the NL translator's few-shot examples changed (names only), so re-run the NL eval on the NAS, model-only and `--with-rules`, before the next model decision.
+- **Tests**: `tests/test_image_hygiene.py` +3 (build context and git ignore the private files, the example holds placeholders only).
+- **History and images: plan only**: `docs/security/history-rewrite-plan.md`, "Option A completion" (counts, steps, all marked not executed).
+
+### Environment variables / NAS
+
+None new for the bot. `LIBRARY_HOST_DIR` and `MEDIA_HOST_DIR` are read by compose only, and only if the commented mounts are switched on. Nothing for the NAS to do.
+
+### Saki-only actions
+
+1. Choose the private copy: private GitHub repository or sops/age (`PENDING`), and put `deploy/private.env` there.
+2. Create `.gitleaks.private.toml` with the real values (recipe in `docs/security/README.md`), put it at `~/.config/tg_media_down_bot/gitleaks.private.toml`, and set the secret: `base64 < .gitleaks.private.toml | gh secret set GITLEAKS_PRIVATE_RULES`. Without them the private checks are simply off.
+3. Decide on the history rewrite, pull request 1 and the old GHCR versions (plan only; see the plan).
+
+### Verification evidence
+
+- `python scripts/public_audit.py --fail-on-head`: 0 in HEAD (64 in history, unchanged). `gitleaks dir` on the tracked and new files: 0 findings (the local `.venv` is not part of the repository; it holds this Mac's paths and is ignored). The new rule was checked to flag an invented-looking code and to pass the two allowed ones.
+- `ruff check .` clean; `pytest -q`: 1932 → 1935 passed, Python 3.12 (3.11 not run here).
+- Not verified: the CI step itself (needs a push and the secret), and the pre-commit hook inside `pre-commit` (the script was run on its own: no config, exit 0).
+
+### Deviations and open questions
+
+1. No `AGENTS.md` or `CLAUDE.md` exists in this repository; `CC_BRIEF.md` §1 (red lines) was read instead.
+2. The brief says "about 85 lines in 14 files"; the names were in 18 files (docs, tests, NL examples, comments). All were replaced.
+3. The studio-name stand-in is also a literal in `docs/security/README.md`; value rules for the real studio and codes are Saki's private file's job (no public pattern can name them).
+4. The local `.venv` has no pip or packages; checks ran in a throwaway venv outside the repository.

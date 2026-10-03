@@ -4,20 +4,58 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from pikpak_wms.ops.library import expand_layout
+
+from . import i18n
 from .utils import ALLOWED_TEMPLATE_FIELDS, parse_bool, parse_id_list, template_fields
 
-MODES = ("telegram", "local", "pikpak")
+MODES = ("telegram", "local", "pikpak", "auto")
+"""Stored values: never translated (see tgmd.i18n). ``auto`` sends what can be
+forwarded back through Telegram and keeps what cannot on the NAS."""
+
+DIRECT_MEDIA_CHOICES = ("off", "v2", "auto")
+"""``auto`` (v1) is accepted here but refused at startup (docs/wms/M7 §7.1).
+``v2`` downloads from media-only endpoints on keys of its own (M7.1 §B)."""
+
+# Mirrors tgmd.parallel.MAX_CONNECTIONS, which imports Telethon; config does not.
+MAX_DOWNLOAD_CONNECTIONS = 8
 
 DEFAULT_CONFIG_PATHS = ("config.yaml", "config.yml")
 
 
 class ConfigError(RuntimeError):
     """Configuration is missing or inconsistent."""
+
+
+def parse_direct_endpoints(raw: str) -> tuple[dict[int, list[tuple[str, int]]], list[str]]:
+    """``TG_DIRECT_ENDPOINTS``: ``4=149.154.166.111:443,2=[2001:db8::1]:443``.
+
+    Returns the endpoints by DC, in the order given, and the entries that
+    could not be read (reported as startup warnings and left out).
+    """
+    found: dict[int, list[tuple[str, int]]] = {}
+    bad: list[str] = []
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        dc, _, address = item.partition("=")
+        host, _, port = address.strip().rpartition(":")
+        host = host.strip()
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+        if not (dc.strip().isdigit() and port.isdigit() and host
+                and 0 < int(port) < 65536 and 0 < int(dc) < 100):
+            bad.append(item)
+            continue
+        found.setdefault(int(dc), []).append((host, int(port)))
+    return found, bad
 
 
 @dataclass
@@ -27,6 +65,11 @@ class TelegramConfig:
     bot_token: str = ""
     user_session: str = ""
     session_dir: Path = Path("sessions")
+    direct_media: str = "off"
+    direct_endpoints: str = ""
+    """``TG_DIRECT_ENDPOINTS``: media endpoints v2 tries first, by DC (M7.2 C)."""
+    """``v2`` downloads from Telegram's media-only endpoints of other DCs,
+    on keys only those direct connections use (tgmd.direct). ``off`` never."""
 
     @property
     def user_session_file(self) -> Path:
@@ -58,7 +101,26 @@ class DownloadConfig:
     dir: Path = Path("downloads")
     data_dir: Path = Path("data")
     filename_template: str = "{chat}/{message_id}_{name}"
+    media_dir: Path | None = None
+    """Where files kept on the NAS go (local mode, auto's restricted files,
+    the too-large fallback). None means the download directory, as before."""
+    media_template: str = "{chat}/{name}"
+    """Layout under the media directory: the original file name, by chat."""
+    local_url_prefix: str = ""
+    """Prepended to a kept file's path in replies, e.g. smb://nas/share/."""
+    library_dir: Path | None = None
+    """The NAS share ``资源库`` as mounted in the container (``LIBRARY_DIR``)."""
+    layout: str = "dated"
+    """``DOWNLOAD_LAYOUT``: ``dated`` files kept on the NAS under
+    ``LIBRARY_DIR/整理/年/年.月/年.月.日`` (docs/wms/M8.3 §H); ``flat`` is the older
+    ``MEDIA_DIR`` + ``MEDIA_TEMPLATE``. Without a ``LIBRARY_DIR`` it is always flat."""
+    default_layout: str = "资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}"
+    timezone: str = "Asia/Shanghai"
+    """The zone whose calendar day names the dated folder."""
     concurrent: int = 2
+    connections: int = 4
+    """Connections per large file. Parallel parts over separate connections is
+    the only way to speed up content that cannot be forwarded."""
     max_queue_per_user: int = 20
     max_batch: int = 50
     progress_interval: float = 5.0
@@ -69,12 +131,39 @@ class DownloadConfig:
     def db_path(self) -> Path:
         return self.data_dir / "tgmd.sqlite3"
 
+    @property
+    def traffic_db_path(self) -> Path:
+        """The traffic meter's own database, next to the main one."""
+        return self.data_dir / "traffic.sqlite3"
+
+    @property
+    def media_root(self) -> Path:
+        return self.media_dir if self.media_dir is not None else self.dir
+
+    @property
+    def dated(self) -> bool:
+        return self.layout == "dated" and self.library_dir is not None
+
+    def dated_dir(self, when: datetime | None = None) -> Path:
+        """The folder for files kept today (the day the download runs)."""
+        from zoneinfo import ZoneInfo
+
+        assert self.library_dir is not None
+        moment = (when or datetime.now(UTC)).astimezone(ZoneInfo(self.timezone))
+        return self.library_dir / expand_layout(self.default_layout, moment)
+
 
 @dataclass
 class DeliveryConfig:
     default_mode: str = "telegram"
     max_upload_size_mb: int = 2000
     cache_chat_id: int | None = None
+    channel_requests: bool = True
+    """Links and videos posted in the cache channel are requests (M7.2 B;
+    ``CHANNEL_REQUESTS``). False: the channel is only a cache again."""
+    channel_reply_dm: bool = True
+    """A request posted in the cache channel also gets a short note in the
+    first admin's private chat (M7.2 B; ``CHANNEL_REPLY_DM``)."""
 
     @property
     def max_upload_bytes(self) -> int:
@@ -88,9 +177,18 @@ class PikPakConfig:
     password: str = ""
     folder: str = "/TelegramMedia"
     task_timeout: int = 600
+    stream: bool = False
+    """Serve Telegram media to PikPak straight from Telegram, never from disk."""
+    allow_user_login: bool = True
+    """Whether users may connect their own account with /pikpak login."""
+
+    login_link_ttl: int = 900
+    """No longer used: the one-time login link it timed was removed. Still
+    parsed, so a deployment that sets PIKPAK_LOGIN_LINK_TTL keeps starting."""
 
     @property
     def configured(self) -> bool:
+        """True when a shared account is available to every user."""
         return self.enabled and bool(self.username and self.password)
 
 
@@ -112,6 +210,82 @@ class HttpConfig:
         return self.public_base_url.rstrip("/")
 
 
+AUTO_SHELVE_CHOICES = ("plan", "apply", "off")
+
+
+@dataclass
+class WmsSettings:
+    """The PikPak warehouse (pikpak_wms) inside the bot. Off unless asked for."""
+
+    enabled: bool = False
+    """Run WMS's scheduled jobs in the bot process (WMS_ENABLED)."""
+
+    account: int | None = None
+    """Whose PikPak drive WMS manages (WMS_ACCOUNT, a Telegram user id). Unset:
+    the first admin who connected an account, else the shared account."""
+
+    shared_account: bool = False
+    """WMS_ACCOUNT=shared: always the shared account from the environment."""
+
+    auto_shelve: str = "plan"
+    """After files land in PikPak (WMS_AUTO_SHELVE): ``plan`` sends the plan
+    with a confirm button, ``apply`` shelves them at once, ``off`` does nothing."""
+
+
+TRAFFIC_ON_BUDGET_CHOICES = ("pause", "warn")
+
+
+@dataclass
+class TrafficConfig:
+    """Proxy traffic metering, budgets and the download gate (docs/wms/M9)."""
+
+    enabled: bool = True
+    """TRAFFIC_ENABLED: poll mihomo. Unreachable mihomo is a warning, never an error."""
+    mihomo_api: str = "http://127.0.0.1:9090"
+    """MIHOMO_API: the controller, which the bot only reads."""
+    poll_seconds: float = 5.0
+    bytes_per_gb: int = 1073741824
+    default_price: float = 0.10
+    """CNY per GB for a node whose name carries no price."""
+    daily_report_at: str = "09:00"
+    """Local time of the summary of yesterday; empty is off."""
+    budget_daily_cny: float = 0.0
+    budget_monthly_cny: float = 0.0
+    budget_daily_proxy_gb: float = 0.0
+    """0 is off, for each of the three budgets."""
+    spike_mbps: float = 0.0
+    conn_alert_mb: float = 500.0
+    on_budget: str = "pause"
+    direct_daily_gb: float = 0.0
+    media_rate_mbps: float = 0.0
+    upload_rate_mbps: float = 0.0
+    """TG_MEDIA_RATE_LIMIT_MBPS / TG_UPLOAD_RATE_LIMIT_MBPS, megabytes per second."""
+    timezone: str = "Asia/Shanghai"
+    model_host: str = ""
+    """TRAFFIC_MODEL_HOST (``host`` or ``host:port``): the LAN machine that serves the models.
+    Empty: none; a connection to it is then not classed as a model connection."""
+    # --- M9.1: node selection and direct-first routing (docs/wms/M9.1)
+    probe_hours: float = 6.0
+    """PROXY_PROBE_HOURS: how often every node's speed is measured; 0 is off."""
+    probe_confirm: bool = True
+    """PROXY_PROBE_CONFIRM: ask the admins before a scheduled probe spends proxy traffic."""
+    probe_url: str = "https://speed.cloudflare.com/__down?bytes=8000000"
+    probe_up_url: str = "https://speed.cloudflare.com/__up"
+    probe_listener: str = "http://127.0.0.1:7899"
+    """The mixed listener ``probe``, whose rule sends it to the ``PROBE`` group."""
+    probe_max_price: float = 0.09
+    probe_max_mb: float = 150.0
+    switch_min_minutes: float = 30.0
+    direct_candidate_mb: float = 50.0
+    direct_probe_hosts: tuple[str, ...] = (
+        "registry.ollama.ai", "ollama.com", "r2.cloudflarestorage.com", "github.com",
+        "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org",
+    )
+    direct_test_urls: dict[str, str] = field(default_factory=dict)
+    direct_auto_apply: bool = False
+    direct_rules_file: str = "/mihomo-rules/direct-auto.txt"
+
+
 @dataclass
 class Config:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
@@ -120,13 +294,18 @@ class Config:
     delivery: DeliveryConfig = field(default_factory=DeliveryConfig)
     pikpak: PikPakConfig = field(default_factory=PikPakConfig)
     http: HttpConfig = field(default_factory=HttpConfig)
+    wms: WmsSettings = field(default_factory=WmsSettings)
+    traffic: TrafficConfig = field(default_factory=TrafficConfig)
     log_level: str = "INFO"
+    language: str = i18n.DEFAULT_LANGUAGE
+    """Which catalogue :func:`tgmd.i18n.t` reads. Never affects stored values."""
 
     def ensure_directories(self) -> None:
         """Create every directory the bot writes to."""
         for directory in (
             self.telegram.session_dir,
             self.download.dir,
+            self.download.media_root,
             self.download.data_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
@@ -147,59 +326,131 @@ class Config:
                 "missing required settings: " + ", ".join(missing)
             )
 
+        if self.download.layout not in ("dated", "flat"):
+            raise ConfigError(
+                f"DOWNLOAD_LAYOUT must be dated or flat, got {self.download.layout!r}")
+
+        if self.wms.auto_shelve not in AUTO_SHELVE_CHOICES:
+            raise ConfigError(
+                "WMS_AUTO_SHELVE must be one of "
+                f"{', '.join(AUTO_SHELVE_CHOICES)}, got {self.wms.auto_shelve!r}"
+            )
+
+        if self.telegram.direct_media not in DIRECT_MEDIA_CHOICES:
+            raise ConfigError(
+                "TG_DIRECT_MEDIA must be one of "
+                f"{', '.join(DIRECT_MEDIA_CHOICES)}, got {self.telegram.direct_media!r}"
+            )
+
         if self.delivery.default_mode not in MODES:
             raise ConfigError(
                 f"delivery.default_mode must be one of {', '.join(MODES)}, "
                 f"got {self.delivery.default_mode!r}"
             )
 
+        if self.traffic.on_budget not in TRAFFIC_ON_BUDGET_CHOICES:
+            raise ConfigError(
+                "TRAFFIC_ON_BUDGET must be one of "
+                f"{', '.join(TRAFFIC_ON_BUDGET_CHOICES)}, got {self.traffic.on_budget!r}"
+            )
+
         if self.download.concurrent < 1:
             raise ConfigError("download.concurrent must be at least 1")
+        if self.download.connections < 1:
+            raise ConfigError("download.connections must be at least 1")
         if self.download.max_batch < 1:
             raise ConfigError("download.max_batch must be at least 1")
         if self.download.progress_interval < 1:
             raise ConfigError("download.progress_interval must be at least 1 second")
 
-        unknown = template_fields(self.download.filename_template) - ALLOWED_TEMPLATE_FIELDS
-        if unknown:
-            raise ConfigError(
-                "download.filename_template uses unknown fields: "
-                + ", ".join(sorted(unknown))
-                + f" (allowed: {', '.join(sorted(ALLOWED_TEMPLATE_FIELDS))})"
-            )
+        for name, template in (
+            ("download.filename_template", self.download.filename_template),
+            ("download.media_template", self.download.media_template),
+        ):
+            unknown = template_fields(template) - ALLOWED_TEMPLATE_FIELDS
+            if unknown:
+                raise ConfigError(
+                    f"{name} uses unknown fields: "
+                    + ", ".join(sorted(unknown))
+                    + f" (allowed: {', '.join(sorted(ALLOWED_TEMPLATE_FIELDS))})"
+                )
 
-        if self.http.enabled and not self.http.public_base_url:
-            raise ConfigError(
-                "http.enabled is set but http.public_base_url is empty; PikPak "
-                "needs a publicly reachable URL to fetch files from"
-            )
-
+        # Only facts about the configuration itself belong here. Whether there
+        # is an admin or a reading account is runtime state: /claim and
+        # /setup telegram store both in the database, which is not open yet,
+        # so the app reports them after reading it instead.
         warnings: list[str] = []
-        if not self.telegram.user_session and not self.telegram.user_session_file.exists():
+        _endpoints, bad = parse_direct_endpoints(self.telegram.direct_endpoints)
+        for item in bad:
             warnings.append(
-                "no user session configured: only chats the bot itself is in can "
-                "be read. Run `python -m tgmd.login` to add a user session."
+                f"TG_DIRECT_ENDPOINTS: {item!r} is not <dc>=<ip>:<port>; left out."
+            )
+        if self.download.connections > MAX_DOWNLOAD_CONNECTIONS:
+            # Capped rather than refused: more connections from the user's own
+            # account buy little speed and invite rate limits.
+            warnings.append(
+                f"download.connections is {self.download.connections}; using "
+                f"{MAX_DOWNLOAD_CONNECTIONS}, the most this bot opens per file."
+            )
+        if self.http.enabled and not self.http.public_base_url:
+            # Not fatal: a NAS with no public address yet is a normal state,
+            # and exiting here put the container in a restart loop. The server
+            # still binds, so /healthz keeps answering.
+            warnings.append(
+                "http.enabled is set but http.public_base_url is empty, so "
+                "Telegram-to-PikPak transfers are off: PikPak needs a public URL "
+                "to fetch files from. Magnet, URL and share transfers still work."
+            )
+        elif self.pikpak.configured and not self.http.usable:
+            warnings.append(
+                "PikPak is configured but the HTTP file server is not; magnet and "
+                "URL transfers will work, Telegram-to-PikPak transfers will not."
             )
         if self.access.allow_all_users:
             warnings.append(
                 "access.allow_all_users is true: anyone can pull media from every "
                 "chat your user account can see."
             )
-        elif not self.access.admin_user_ids and not self.access.allowed_user_ids:
-            warnings.append(
-                "no admin or allowed user ids configured, so the bot will refuse "
-                "every request. Set ADMIN_USER_IDS."
-            )
         if self.delivery.default_mode == "pikpak" and not self.pikpak.configured:
-            warnings.append(
-                "default mode is pikpak but PikPak credentials are missing."
-            )
-        if self.pikpak.configured and not self.http.usable:
-            warnings.append(
-                "PikPak is configured but the HTTP file server is not; magnet and "
-                "URL transfers will work, Telegram-to-PikPak transfers will not."
-            )
+            # /setup pikpak needs no web server, so allowing logins is enough.
+            if self.pikpak.allow_user_login:
+                warnings.append(
+                    "default mode is pikpak with no shared account, so each user "
+                    "must run /pikpak login before their first transfer."
+                )
+            else:
+                warnings.append(
+                    "default mode is pikpak but there is no shared account and "
+                    "no way for users to connect their own."
+                )
         return warnings
+
+
+def detect_platform_base_url(environment: dict[str, str] | None = None) -> str | None:
+    """Work out the public HTTPS address a hosting platform gave this service.
+
+    One-click deploys are the main reason this exists: PikPak transfers and the
+    Mini App both need a public HTTPS address, and asking someone to paste
+    their own deployment URL back into their own deployment is friction that
+    every platform already solved by exporting it.
+    """
+    env = os.environ if environment is None else environment
+
+    direct = (env.get("RENDER_EXTERNAL_URL") or "").strip()
+    if direct:
+        return direct.rstrip("/")
+
+    for name in ("KOYEB_PUBLIC_DOMAIN", "RAILWAY_PUBLIC_DOMAIN", "SPACE_HOST"):
+        domain = (env.get(name) or "").strip()
+        if domain:
+            domain = domain.removeprefix("https://").removeprefix("http://")
+            return f"https://{domain.rstrip('/')}"
+
+    fly_app = (env.get("FLY_APP_NAME") or "").strip()
+    if fly_app:
+        return f"https://{fly_app}.fly.dev"
+
+    return None
 
 
 def _get(source: dict[str, Any], *path: str, default: Any = None) -> Any:
@@ -230,6 +481,10 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError as exc:
         raise ConfigError(f"{name} must be a number, got {raw!r}") from exc
+
+
+def _optional_path(value: str) -> Path | None:
+    return Path(value) if value.strip() else None
 
 
 def _env_str(name: str, default: str) -> str:
@@ -277,6 +532,12 @@ def load_config(path: Path | None = None) -> Config:
         session_dir=Path(
             _env_str("SESSION_DIR", str(_get(data, "telegram", "session_dir", default="sessions")))
         ),
+        direct_media=_env_str(
+            "TG_DIRECT_MEDIA", str(_get(data, "telegram", "direct_media", default="off"))
+        ).lower(),
+        direct_endpoints=_env_str(
+            "TG_DIRECT_ENDPOINTS", str(_get(data, "telegram", "direct_endpoints", default=""))
+        ),
     )
 
     access = AccessConfig(
@@ -302,8 +563,34 @@ def load_config(path: Path | None = None) -> Config:
             "FILENAME_TEMPLATE",
             str(_get(data, "download", "filename_template", default="{chat}/{message_id}_{name}")),
         ),
+        media_dir=_optional_path(
+            _env_str("MEDIA_DIR", str(_get(data, "download", "media_dir", default="")))
+        ),
+        media_template=_env_str(
+            "MEDIA_TEMPLATE",
+            str(_get(data, "download", "media_template", default="{chat}/{name}")),
+        ),
+        local_url_prefix=_env_str(
+            "LOCAL_URL_PREFIX", str(_get(data, "download", "local_url_prefix", default=""))
+        ),
+        library_dir=_optional_path(
+            _env_str("LIBRARY_DIR", str(_get(data, "download", "library_dir", default="")))
+        ),
+        layout=_env_str(
+            "DOWNLOAD_LAYOUT", str(_get(data, "download", "layout", default="dated"))
+        ).lower(),
+        default_layout=_env_str(
+            "DOWNLOAD_DEFAULT_LAYOUT",
+            str(_get(data, "download", "default_layout",
+                     default="资源/整理/{Y}/{Y}.{M}/{Y}.{M}.{D}")),
+        ),
+        timezone=_env_str("TIMEZONE", str(_get(data, "download", "timezone",
+                                               default="Asia/Shanghai"))),
         concurrent=_env_int(
             "CONCURRENT_DOWNLOADS", int(_get(data, "download", "concurrent", default=2))
+        ),
+        connections=_env_int(
+            "DOWNLOAD_CONNECTIONS", int(_get(data, "download", "connections", default=4))
         ),
         max_queue_per_user=_env_int(
             "MAX_QUEUE_PER_USER", int(_get(data, "download", "max_queue_per_user", default=20))
@@ -335,13 +622,36 @@ def load_config(path: Path | None = None) -> Config:
             "MAX_UPLOAD_SIZE_MB", int(_get(data, "delivery", "max_upload_size_mb", default=2000))
         ),
         cache_chat_id=cache_chat_ids[0] if cache_chat_ids else None,
+        channel_requests=parse_bool(
+            os.environ.get("CHANNEL_REQUESTS"),
+            parse_bool(_get(data, "delivery", "channel_requests", default=True), True),
+        ),
+        channel_reply_dm=parse_bool(
+            os.environ.get("CHANNEL_REPLY_DM"),
+            parse_bool(_get(data, "delivery", "channel_reply_dm", default=True), True),
+        ),
     )
 
     pikpak = PikPakConfig(
         username=_env_str("PIKPAK_USERNAME", str(_get(data, "pikpak", "username", default=""))),
         password=_env_str("PIKPAK_PASSWORD", str(_get(data, "pikpak", "password", default=""))),
-        folder=_env_str("PIKPAK_FOLDER", str(_get(data, "pikpak", "folder", default="/TelegramMedia"))),
-        task_timeout=_env_int("PIKPAK_TASK_TIMEOUT", int(_get(data, "pikpak", "task_timeout", default=600))),
+        folder=_env_str(
+            "PIKPAK_FOLDER", str(_get(data, "pikpak", "folder", default="/TelegramMedia"))
+        ),
+        task_timeout=_env_int(
+            "PIKPAK_TASK_TIMEOUT", int(_get(data, "pikpak", "task_timeout", default=600))
+        ),
+        stream=parse_bool(
+            os.environ.get("PIKPAK_STREAM"),
+            parse_bool(_get(data, "pikpak", "stream", default=False)),
+        ),
+        allow_user_login=parse_bool(
+            os.environ.get("PIKPAK_ALLOW_USER_LOGIN"),
+            parse_bool(_get(data, "pikpak", "allow_user_login", default=True), True),
+        ),
+        login_link_ttl=_env_int(
+            "PIKPAK_LOGIN_LINK_TTL", int(_get(data, "pikpak", "login_link_ttl", default=900))
+        ),
     )
     # PikPak turns itself on as soon as credentials exist, so a user who only
     # fills in .env does not also have to remember the enabled flag.
@@ -350,17 +660,118 @@ def load_config(path: Path | None = None) -> Config:
         parse_bool(_get(data, "pikpak", "enabled", default=False)),
     ) or bool(pikpak.username and pikpak.password)
 
+    # A hosting platform tells us both of these, so a one-click deploy needs
+    # no HTTP settings at all: PORT is the port it routes to, and its external
+    # URL is what PikPak and the Mini App must be able to reach.
+    platform_url = detect_platform_base_url()
+    public_base_url = _env_str(
+        "PUBLIC_BASE_URL", str(_get(data, "http", "public_base_url", default=""))
+    ) or (platform_url or "")
+
     http = HttpConfig(
         enabled=parse_bool(
             os.environ.get("HTTP_ENABLED"),
-            parse_bool(_get(data, "http", "enabled", default=False)),
+            # Platforms route traffic to the port they assign, so a service
+            # deployed on one should serve it unless told otherwise. The
+            # default here must be None, not False, or an absent key would
+            # look like a deliberate "off" and shadow the platform default.
+            parse_bool(
+                _get(data, "http", "enabled", default=None), bool(platform_url)
+            ),
         ),
         host=_env_str("HTTP_HOST", str(_get(data, "http", "host", default="0.0.0.0"))),
-        port=_env_int("HTTP_PORT", int(_get(data, "http", "port", default=8080))),
-        public_base_url=_env_str(
-            "PUBLIC_BASE_URL", str(_get(data, "http", "public_base_url", default=""))
+        port=_env_int(
+            "HTTP_PORT",
+            _env_int("PORT", int(_get(data, "http", "port", default=8080))),
         ),
+        public_base_url=public_base_url,
         url_ttl=_env_int("HTTP_URL_TTL", int(_get(data, "http", "url_ttl", default=3600))),
+    )
+
+    account_raw = os.environ.get("WMS_ACCOUNT") or _get(data, "wms", "account", default="")
+    account_ids = parse_id_list(account_raw)
+    wms = WmsSettings(
+        enabled=parse_bool(
+            os.environ.get("WMS_ENABLED"), parse_bool(_get(data, "wms", "enabled", default=False))
+        ),
+        account=account_ids[0] if account_ids else None,
+        shared_account=str(account_raw).strip().lower() == "shared",
+        auto_shelve=_env_str(
+            "WMS_AUTO_SHELVE", str(_get(data, "wms", "auto_shelve", default="plan"))
+        ).strip().lower(),
+    )
+
+    traffic = TrafficConfig(
+        enabled=parse_bool(
+            os.environ.get("TRAFFIC_ENABLED"),
+            parse_bool(_get(data, "traffic", "enabled", default=True), True),
+        ),
+        mihomo_api=_env_str(
+            "MIHOMO_API", str(_get(data, "traffic", "mihomo_api", default="http://127.0.0.1:9090"))
+        ).rstrip("/"),
+        poll_seconds=max(1.0, _env_float(
+            "TRAFFIC_POLL_SECONDS", float(_get(data, "traffic", "poll_seconds", default=5.0)))),
+        bytes_per_gb=_env_int(
+            "TRAFFIC_BYTES_PER_GB",
+            int(_get(data, "traffic", "bytes_per_gb", default=1073741824))),
+        default_price=_env_float(
+            "TRAFFIC_DEFAULT_PRICE", float(_get(data, "traffic", "default_price", default=0.10))),
+        # Set but empty means "off", which _env_str would read as "unset".
+        daily_report_at=(
+            os.environ["TRAFFIC_DAILY_REPORT_AT"].strip()
+            if "TRAFFIC_DAILY_REPORT_AT" in os.environ
+            else str(_get(data, "traffic", "daily_report_at", default="09:00"))
+        ),
+        budget_daily_cny=_env_float(
+            "TRAFFIC_BUDGET_DAILY_CNY",
+            float(_get(data, "traffic", "budget_daily_cny", default=0.0) or 0.0)),
+        budget_monthly_cny=_env_float(
+            "TRAFFIC_BUDGET_MONTHLY_CNY",
+            float(_get(data, "traffic", "budget_monthly_cny", default=0.0) or 0.0)),
+        budget_daily_proxy_gb=_env_float(
+            "TRAFFIC_BUDGET_DAILY_PROXY_GB",
+            float(_get(data, "traffic", "budget_daily_proxy_gb", default=0.0) or 0.0)),
+        spike_mbps=_env_float(
+            "TRAFFIC_SPIKE_MBPS", float(_get(data, "traffic", "spike_mbps", default=0.0))),
+        conn_alert_mb=_env_float(
+            "TRAFFIC_CONN_ALERT_MB",
+            float(_get(data, "traffic", "conn_alert_mb", default=500.0))),
+        on_budget=_env_str(
+            "TRAFFIC_ON_BUDGET", str(_get(data, "traffic", "on_budget", default="pause"))
+        ).strip().lower(),
+        direct_daily_gb=_env_float(
+            "TRAFFIC_DIRECT_DAILY_GB",
+            float(_get(data, "traffic", "direct_daily_gb", default=0.0) or 0.0)),
+        media_rate_mbps=_env_float(
+            "TG_MEDIA_RATE_LIMIT_MBPS",
+            float(_get(data, "traffic", "media_rate_mbps", default=0.0) or 0.0)),
+        upload_rate_mbps=_env_float(
+            "TG_UPLOAD_RATE_LIMIT_MBPS",
+            float(_get(data, "traffic", "upload_rate_mbps", default=0.0) or 0.0)),
+        timezone=_env_str(
+            "TRAFFIC_TIMEZONE", str(_get(data, "traffic", "timezone", default="Asia/Shanghai"))),
+        model_host=_env_str("TRAFFIC_MODEL_HOST", str(_get(
+            data, "traffic", "model_host", default="") or "")),
+        probe_hours=_env_float("PROXY_PROBE_HOURS", 6.0),
+        probe_confirm=parse_bool(os.environ.get("PROXY_PROBE_CONFIRM"), True),
+        probe_url=_env_str("PROXY_PROBE_URL", TrafficConfig.probe_url),
+        probe_up_url=_env_str("PROXY_PROBE_UP_URL", TrafficConfig.probe_up_url),
+        probe_listener=_env_str("PROXY_PROBE_LISTENER", TrafficConfig.probe_listener),
+        probe_max_price=_env_float("PROXY_PROBE_MAX_PRICE", 0.09),
+        probe_max_mb=_env_float("PROXY_PROBE_MAX_MB", 150.0),
+        switch_min_minutes=_env_float("PROXY_SWITCH_MIN_MINUTES", 30.0),
+        direct_candidate_mb=_env_float("DIRECT_CANDIDATE_MB", 50.0),
+        direct_probe_hosts=tuple(
+            host.strip().lower() for host in _env_str(
+                "DIRECT_PROBE_HOSTS", ",".join(TrafficConfig.direct_probe_hosts)).split(",")
+            if host.strip()),
+        direct_test_urls={
+            host.strip().lower(): url.strip()
+            for host, _, url in (
+                pair.partition("=") for pair in _env_str("DIRECT_TEST_URLS", "").split(","))
+            if host.strip() and url.strip()},
+        direct_auto_apply=parse_bool(os.environ.get("DIRECT_AUTO_APPLY"), False),
+        direct_rules_file=_env_str("DIRECT_RULES_FILE", TrafficConfig.direct_rules_file),
     )
 
     return Config(
@@ -370,5 +781,13 @@ def load_config(path: Path | None = None) -> Config:
         delivery=delivery,
         pikpak=pikpak,
         http=http,
+        wms=wms,
+        traffic=traffic,
         log_level=_env_str("LOG_LEVEL", str(_get(data, "log_level", default="INFO"))).upper(),
+        # POSIX LANG is deliberately not consulted: images set it to C.UTF-8
+        # for unrelated reasons, and that is not a UI decision.
+        language=i18n.normalize(
+            i18n.language_from_environment()
+            or str(_get(data, "language", default=i18n.DEFAULT_LANGUAGE))
+        ),
     )
