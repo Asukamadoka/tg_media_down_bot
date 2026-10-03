@@ -346,10 +346,7 @@ class TestLinksFromPikPak:
     async def make(self, response):
         drive = FakeDrive()
 
-        async def get_download_url(file_id):
-            return response
-
-        drive.get_download_url = get_download_url
+        drive.download_info = lambda file_id: response
         return WmsClient(provider_for(drive), limiter=TokenBucket(1e9, 1_000_000), sleep=no_sleep)
 
     async def test_web_and_origin_come_from_one_call(self):

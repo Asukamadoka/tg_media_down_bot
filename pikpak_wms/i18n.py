@@ -158,6 +158,7 @@ CATALOG: dict[str, dict[str, str]] = {
             " stocktake was run instead. If this keeps happening, look at `wms events --raw`."
         ),
         "sync.updated": "Index updated at {time} ({kind})",
+        "sync.failed": "Event sync failed ({reason}); used an incremental stocktake instead",
         "sync.kind.events": "event sync",
         "sync.kind.incremental": "incremental stocktake",
         "sync.kind.full": "full stocktake",
@@ -590,6 +591,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "如果反复出现，请看 `wms events --raw`。"
         ),
         "sync.updated": "索引更新于 {time}（{kind}）",
+        "sync.failed": "事件同步失败（{reason}），改用增量盘点",
         "sync.kind.events": "事件同步",
         "sync.kind.incremental": "增量盘点",
         "sync.kind.full": "全量盘点",

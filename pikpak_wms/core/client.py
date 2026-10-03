@@ -21,17 +21,19 @@ from typing import Any
 
 from pikpakapi.PikpakException import PikpakException
 
-from .errors import AuthError, NotFoundError, RateLimitedError, WmsError
+from .errors import AuthError, CaptchaError, NotFoundError, RateLimitedError, WmsError
 from .models import ROOT_ID, FileNode, Quota, normalize_path
 from .ratelimit import TokenBucket
 
 log = logging.getLogger(__name__)
 
 Provider = Callable[[], Awaitable[Any]]
+Scoped = Callable[[Any, str | None], Awaitable[Any]]
 
 # Phrases PikPak uses when refusing for going too fast. Matched loosely: the
 # SDK passes on the server's error_description, which is not a stable code.
 _RATE_LIMIT_HINTS = ("too frequent", "too many", "rate limit", "frequency", "429")
+_CAPTCHA_HINTS = ("verification code", "captcha", "4002")
 _AUTH_HINTS = ("invalid username or password", "unauthenticated", "invalid_grant", "token")
 _NOT_FOUND_HINTS = ("not found", "404", "does not exist", "file_not_found", "no such file")
 
@@ -59,26 +61,84 @@ class WmsClient:
         self.calls = 0
         """Requests actually sent, for reports such as stocktake's."""
 
-    async def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
+    async def _call(
+        self, method: str, *args: Any, action: str | None = None,
+        scoped: Scoped | None = None, **kwargs: Any,
+    ) -> Any:
+        """Call one SDK method; see :meth:`_run` for ``action`` and ``scoped``."""
+        async def plain(api: Any) -> Any:
+            return await getattr(api, method)(*args, **kwargs)
+
+        return await self._run(method, plain, action=action, scoped=scoped)
+
+    async def _run(
+        self, label: str, invoke: Callable[[Any], Awaitable[Any]] | None, *,
+        action: str | None = None, scoped: Scoped | None = None, eager: bool = False,
+    ) -> Any:
+        """Run ``invoke(api)`` with the rate-limit, auth and captcha handling.
+
+        PikPak sometimes answers "Verification code is invalid": a captcha is
+        needed for this one action. The first time, mint one for ``action`` and
+        run ``scoped(api, token)`` with it as an explicit header; never through
+        ``api.captcha_token``, which every concurrent request would carry. With
+        ``eager`` the first try already is ``scoped(api, None)`` (it mints its
+        own). A second refusal is a :class:`CaptchaError`.
+        """
         api = await self._provider()
+        token: str | None = None
+        retried = False
         for attempt in range(self._max_retries + 1):
             await self._limiter.acquire()
             self.calls += 1
             try:
-                return await getattr(api, method)(*args, **kwargs)
+                if scoped is not None and (eager or retried):
+                    return await scoped(api, token)
+                assert invoke is not None
+                return await invoke(api)
             except PikpakException as exc:
                 message = str(exc)
+                if _looks_like(message, _CAPTCHA_HINTS):
+                    if retried or scoped is None or action is None:
+                        raise CaptchaError(f"{label}: {message}") from exc
+                    retried = True
+                    if getattr(api, "captcha_token", None):
+                        log.warning("cleared a captcha token left on the PikPak client")
+                        api.captcha_token = None
+                    if not eager:
+                        try:
+                            token = await self._mint_captcha(api, action)
+                        except PikpakException as again:
+                            raise CaptchaError(f"{label}: {again}") from again
+                    continue
                 if _looks_like(message, _RATE_LIMIT_HINTS):
                     if attempt < self._max_retries:
                         delay = self._backoff * 2**attempt
-                        log.info("PikPak rate-limited %s; waiting %.0fs", method, delay)
+                        log.info("PikPak rate-limited %s; waiting %.0fs", label, delay)
                         await self._sleep(delay)
                         continue
-                    raise RateLimitedError(f"{method}: {message}") from exc
+                    raise RateLimitedError(f"{label}: {message}") from exc
                 if _looks_like(message, _AUTH_HINTS):
-                    raise AuthError(f"{method}: {message}") from exc
-                raise WmsError(f"{method}: {message}") from exc
-        raise RateLimitedError(method)  # pragma: no cover - loop always returns or raises
+                    raise AuthError(f"{label}: {message}") from exc
+                raise WmsError(f"{label}: {message}") from exc
+        raise RateLimitedError(label)  # pragma: no cover - loop always returns or raises
+
+    async def _mint_captcha(self, api: Any, action: str) -> str:
+        await self._limiter.acquire()
+        self.calls += 1
+        result = await api.captcha_init(action=action)
+        token = (result or {}).get("captcha_token")
+        if not token:
+            raise CaptchaError("PikPak gave no captcha token")
+        return str(token)
+
+    @staticmethod
+    async def _scoped_get(api: Any, url: str, token: str, params: dict | None = None) -> Any:
+        """GET with ``token`` in this request's own headers, nothing on ``api``."""
+        headers = dict(api.get_headers())
+        headers["X-Captcha-Token"] = token
+        headers["User-Agent"] = api.build_custom_user_agent()
+        return await api._make_request(  # noqa: SLF001 - the SDK has no public scoped GET
+            "get", url, params=params, headers=headers)
 
     # -------------------------------------------------------------- reading
 
@@ -149,7 +209,16 @@ class WmsClient:
         return found
 
     async def events(self, *, page_size: int = 100, token: str | None = None) -> dict:
-        return await self._call("events", size=page_size, next_page_token=token)
+        action = "GET:/drive/v1/events"
+
+        async def scoped(api: Any, captcha: str | None) -> Any:
+            url = f"https://{getattr(api, 'PIKPAK_API_HOST', 'api-drive.mypikpak.com')}{action[4:]}"
+            params = {"thumbnail_size": "SIZE_MEDIUM", "limit": page_size,
+                      "next_page_token": token}
+            return await self._scoped_get(api, url, str(captcha), params)
+
+        return await self._call("events", size=page_size, next_page_token=token,
+                                action=action, scoped=scoped)
 
     async def file_info(self, file_id: str) -> dict | None:
         """One file or folder as PikPak has it now, or None when it is gone.
@@ -172,13 +241,25 @@ class WmsClient:
         return (await self.download_links(file_id))[0]
 
     async def download_links(self, file_id: str) -> tuple[str, str | None]:
-        """``(web link, origin media link)`` from one ``get_download_url`` call.
+        """``(web link, origin media link)`` from one file-details request.
+
+        The request is the SDK's ``get_download_url`` done here: a captcha for
+        this file's action, sent in this request's headers only. The SDK parks
+        it on the shared api object, where concurrent calls pick it up.
 
         The web link is ``web_content_link`` (the first media link when there is
         none); the origin link is the ``medias`` entry with ``is_origin`` set, or
         None. Only links the API returned are ever used (docs/wms/M9.1 §C.1).
         """
-        info = await self._call("get_download_url", file_id)
+        action = f"GET:/drive/v1/files/{file_id}"
+
+        async def scoped(api: Any, _token: str | None) -> Any:
+            token = await self._mint_captcha(api, action)
+            host = getattr(api, "PIKPAK_API_HOST", "api-drive.mypikpak.com")
+            return await self._scoped_get(api, f"https://{host}/drive/v1/files/{file_id}?", token)
+
+        info = await self._run("get_download_url", None, action=action, scoped=scoped,
+                               eager=True)
         origin = None
         first = None
         for media in info.get("medias") or []:

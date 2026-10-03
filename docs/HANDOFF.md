@@ -2380,3 +2380,37 @@ No schema change. `Plan.priority` and `after.priority` are new JSON fields (olde
 
 1. Level of the phrases (above). 2. `整组优先` clears tasks' own priorities (so it means the whole group). 3. A request for a task the plan does not have is not taken by anyone and expires after 10 minutes. 4. The fourth-part suffix rule in the dedupe could merge two different copies of one file in two day folders that happen to end in the same three folders under different roots; it needs the same name, size and ending, which is the same file by any reading of the log.
 
+
+## Stage 3 · M9.5: captcha scoping and event-sync fallback
+
+Brief: `docs/briefs/2026-10-04-wms-m9-5-captcha-events.md`, Part A (baseline `6b77466`). Live report: `/do` answered `events: Verification code is invalid`. Cause from code reading (not confirmed against NAS logs): pikpakapi 0.1.11 parks the captcha of `get_download_url` on the shared api object (`api.captcha_token`) and clears it with no `try/finally`; every request sent meanwhile, or after a failed fetch, carries it.
+
+### What was done
+
+- **`download_links` owns its captcha** (`core/client.py`). It no longer calls the SDK's `get_download_url`. It mints a captcha for `GET:/drive/v1/files/<id>` and sends the GET through the SDK's `_make_request` with explicit headers (`api.get_headers()` plus `X-Captcha-Token` and `api.build_custom_user_agent()`). Nothing is ever assigned to `api.captcha_token`. Return contract unchanged.
+- **Captcha refusals** (`WmsClient._run`, behind `_call`). `verification code` / `captcha` / `4002` is matched loosely, before the auth hints (a captcha message contains "token"). First refusal: clear a leaked `api.captcha_token` (one WARNING, the token is never logged), mint a captcha for the call's own `action`, retry once with it as an explicit header. Second refusal: new `CaptchaError(WmsError)`. `events` passes `action="GET:/drive/v1/events"`; other calls are unchanged (no `action`, so a refusal is a `CaptchaError` at once).
+- **Events failure never fails `/do`** (`ops/eventsync.py`). A first-page error (anything but `AuthError`) is now a failed feed: `fallback="incremental"`, reason `the event feed failed: <short error>`, cursor **not** rebased, also for `allow_full` callers. The admin alert goes through `_alert_once`. The last sync's state (`last_sync` meta) carries `failed`; `note_freshness` and the NL freshness note add `sync.failed` ("Event sync failed (<reason>); used an incremental stocktake instead" / zh). A later good sync clears it. Later-page errors still mean a lost cursor, as before.
+- `wms events` goes through `client.events`, so it gets the retry; `--raw` output is unchanged.
+
+### Environment variables / migration
+
+None. No schema change (`last_sync` meta gains an optional `failed` field).
+
+### Deploy steps (Cowork)
+
+1. Pull the image, restart `bot` only (never `proxy`).
+2. `docker compose exec -T bot wms events --raw --limit 5` succeeds.
+3. `docker compose logs bot | grep -E "captcha|event sync"`: a line "cleared a captcha token left on the PikPak client" means the old leak was seen and healed; "event sync fell back" means the feed failed and an incremental stocktake ran.
+4. Saki tests `/do`: it answers, with or without the "Event sync failed" plan note.
+5. Rollback: image `6b77466`.
+
+### Verification evidence
+
+- Tests: 1922 → 1932, ruff clean. New: `tests/test_wms_m95.py` (`download_links` never sets the shared token, and leaves nothing after a failed fetch; an events call during a slow fetch carries no foreign captcha; a leaked token is cleared and the call retried with exactly one extra `captcha_init`; second refusal raises `CaptchaError`; first-page error gives an incremental refresh, same cursor, one alert, plan note in en and zh, failure cleared by a good sync; `AuthError` still propagates).
+- Existing tests changed: none of their assertions. The fake drive (`tests/wms_fakes.py`) lost `get_download_url` for `captcha_init` / `get_headers` / `build_custom_user_agent` / `_make_request` (`download_info()` is the new hook), and its `events` refuses while a token is parked, like the real service. `tests/test_fetch_links.py::TestLinksFromPikPak.make` overrides `download_info` instead of `get_download_url`.
+- **Not verified here**: that the live failure is this leak (no NAS logs), and the real captcha error text/code (`4002` is from the brief).
+
+### Deviations and open questions
+
+1. `_make_request` retries (token refresh, network) reuse the headers built once, so a refresh of the access token inside one scoped GET is retried with the old bearer and then fails as an auth error; the next call is fine. Rare, and the SDK's own path has no better answer.
+2. The captcha retry applies only to `events` and `download_links`; other calls raise `CaptchaError` on a refusal (a leaked token is not cleared for them). Widen `action=` per call if the NAS logs show other refusals.
