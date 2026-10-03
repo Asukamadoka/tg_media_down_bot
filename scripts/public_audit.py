@@ -59,7 +59,7 @@ PATTERNS: dict[str, list[tuple[str, str]]] = {
         ("nas-volume-path", r"/(?:volume\d+|Volume\d+|mnt/(?!c/)[A-Za-z0-9_-]+)/[^\s\"'<>]+"),
         ("mac-home-path", r"/Users/[A-Za-z0-9._-]+"),
         ("linux-home-path", r"/home/(?!tgmd\b)[A-Za-z0-9._-]+"),
-        ("nas-model", r"(?i)\b(?:UGREEN|UGOS|DXP\d{3,4}\w*|Synology|DS\d{3}\+?|QNAP)\b"),
+        ("nas-model", r"(?i)\b(?:Synology|QNAP|Asustor|TerraMaster|Buffalo|UGREEN|WD My Cloud)\b"),
         ("puid-pgid", r"\b(?:PUID|PGID)\s*[=:]\s*\d+|user:\s*[\"']?\d{3,5}:\d{2,5}"),
     ],
 }

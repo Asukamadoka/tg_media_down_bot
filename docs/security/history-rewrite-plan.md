@@ -31,10 +31,10 @@ regex:\b[a-z0-9-]+\.tail[0-9a-f]+\.ts\.net\b==><FUNNEL_HOST>
 regex:smb://(?!<)[^\s"'<>`/]+/==>smb://<NAS_IP>/
 regex:/[Vv]olume[0-9]+/[^\s"'<>`]*==><NAS_VOLUME>
 regex:(?<!\d)-100(?!1234567890|9876543210|9999999999)\d{9,}(?!\d)==><CACHE_CHAT_ID>
-regex:\bUGREEN(?: DXP[0-9A-Za-z]+)?\b==><NAS_MODEL>
-regex:\bDXP[0-9]{3,4}[0-9A-Za-z]*\b==><NAS_MODEL>
-regex:\bugreen-nas\b==><NAS_HOSTNAME>
 ```
+
+The replacements for the NAS's make, model and host name are not listed here: they live only in the
+private store's copy of `expressions.txt`.
 
 It leaves the invented test values (`10.0.0.x`, `192.168.0.x`, `-1001234567890`) alone. Commit
 messages are separate: `--replace-message` takes the same file (the audit does not read them; run
