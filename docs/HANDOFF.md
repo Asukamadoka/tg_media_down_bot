@@ -1768,7 +1768,7 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
 
 **K · 补充说明后合并出来的条件**
 
-- 规则层认「完整文件名」：一串没有空格、以视频/图片/压缩包扩展名结尾的字（含 `【】`），**从原文里原样取出**（不经过 NFKC 归一化，否则全角括号会变）。有它时直接生成 `name_equals`（Filters 和 Match 里新增，文件名完全相等），描述它的词（「印象足拍的视频」）不再要求规则层读懂，只要有一个动作词；但出现「以外、除了、不是」等转折词就不接，交给模型。带 `/` 的是路径，不是文件名。
+- 规则层认「完整文件名」：一串没有空格、以视频/图片/压缩包扩展名结尾的字（含 `【】`），**从原文里原样取出**（不经过 NFKC 归一化，否则全角括号会变）。有它时直接生成 `name_equals`（Filters 和 Match 里新增，文件名完全相等），描述它的词（「示例影像的视频」）不再要求规则层读懂，只要有一个动作词；但出现「以外、除了、不是」等转折词就不接，交给模型。带 `/` 的是路径，不是文件名。
 - 「只要一个 / 只下载两个 / 前 N 个 / 最新的 N 个 / 最新的」→ `filters.limit`（按进网盘时间从新到旧取前 N 个；schema 的 wire 格式也加了 `limit`，`name_equals` 没有加进给模型填的格式）。计划里用 `Match.file_ids` 把规则限定在这 N 个文件上；定时任务带数量会被反问（一个数量对明天没有意义）。
 - 规则「依据检查」（C）用的是「原句 + 补充」合起来的文字（`Chain.translate` 拿到的就是合并后的句子）。
 
@@ -1831,7 +1831,7 @@ docker compose run --rm bot python -m pikpak_wms.nl.eval --backend openai \
 
 ### 用户需要在 Telegram 里做什么（对应简报的 NAS 验收）
 
-1. `/do 只下载一个印象足拍的视频`，在被反问后回复完整文件名：计划里应当有「文件名完全等于…」和「只取最新的 1 个」，**没有**多出来的时间和大小；点【确认执行】：1 秒内消息变成「执行中」，大约每 10 秒更新一次；再点一次，提示「正在执行」；点【停止】能停；点【继续】从 `.part` 接着下。
+1. `/do 只下载一个示例影像的视频`，在被反问后回复完整文件名：计划里应当有「文件名完全等于…」和「只取最新的 1 个」，**没有**多出来的时间和大小；点【确认执行】：1 秒内消息变成「执行中」，大约每 10 秒更新一次；再点一次，提示「正在执行」；点【停止】能停；点【继续】从 `.part` 接着下。
 2. 不指定位置的下载：落在 `资源库/资源/整理/2026/2026.10/2026.10.2/`（执行当天）；`/do 把…下载到 资源库/电影/日剧`：落到对应目录，计划里有「将新建目录」。
 3. 计划第一行：「由本地模型 qwen3.6-35b-a3b（Mac）理解」。
 4. 下载速度明显高于单线程的 0.2～1.1 MiB/s。
@@ -1861,7 +1861,7 @@ docker compose exec bot ls -la /library/资源/整理                 # 容器�
 ### 待决问题
 
 1. **「库外绝对路径」靠一份系统目录名单识别**（`etc usr var tmp root home proc sys dev bin sbin opt mnt media boot lib srv run`、`volume*`、盘符、`~`）。`/电影/日剧` 要算库内，所以别的 `/xxx` 都被当成库内目录。如果想更严：只认 `资源库/…`、`/library/…` 和不带前导 `/` 的相对写法，告诉我。
-2. **C 的名字条件比简报保守**：简报是「没有『名字/名为/叫/包含/开头/结尾/带』、没有引号或文件名，就去掉 `name_contains`/`name_regex`」。我改成「条件里的文字**在原句里原样出现**就保留」（`下载印象足拍的视频` 里的「印象足拍」本来就是在说名字）；只去掉原句里根本没有的。理由：直接按简报去掉会让一个删除计划**匹配更多文件**，这个方向是不安全的。
+2. **C 的名字条件比简报保守**：简报是「没有『名字/名为/叫/包含/开头/结尾/带』、没有引号或文件名，就去掉 `name_contains`/`name_regex`」。我改成「条件里的文字**在原句里原样出现**就保留」（`下载示例影像的视频` 里的「示例影像」本来就是在说名字）；只去掉原句里根本没有的。理由：直接按简报去掉会让一个删除计划**匹配更多文件**，这个方向是不安全的。
 3. **下载失败的动作算「失败」**（和之前一样，计划状态是已执行、失败 1 个），不是「保持待执行」：简报说「出错…计划保持可以重试」，我只对**整个任务**出错（比如数据库、鉴权）保持可继续；单个文件的下载失败仍然列在结果里。想重试：重新发一次 `/do`，`.part` 和它的 state 还在，会接着下。
 4. **评测输出里的 backend 名称**没有改成「本地模型…（Mac）」，因为评测的 `backend` 字段是后端名（`rules`、`openai`），脚本和报告都在读它。计划、`/verify`、`wms doctor` 都改了。
 5. **gcid 校验没有在真实账号上验证过**（`OUTBOUND_VERIFY=hash` 是可选的，默认 `size`）：算法是按我对 PikPak 内容 id 的理解写的，`hash` 字段不是 40 位十六进制时直接跳过。请 Cowork 用一个已知文件试一次，对不上就把 `hash` 的样子贴回来。
@@ -2134,7 +2134,7 @@ Spec: `docs/wms/M9.2-download-log-parallel-nl-exclusions.md` (baseline `54e3f70`
 - A row is written for every `local` outbound attempt, from the one place every download goes through (`outbound.make_deliver`): done (with dest path and the M9.1 fetch numbers), failed (with the reason), cancelled (only when that file was cancelled by hand, not on a plan stop or restart), skipped_exists. Failing to write a row never fails the download. A re-run over a file already logged as present adds no second row.
 - **Backfill at migration, idempotent.** (1) Every applied `outbound` in `audit` that landed a file (`after.path` set) becomes a `done` row, `source=backfill`; guarded by the `meta` key `downloads:audit_backfilled`, so a second open adds nothing. (2) The library scan (`ops.downloads.scan_library`): walks `LIBRARY_DIR/<fixed prefix of the layout>` (`资源/整理` by default), skips `.part`/`.part.state`, and logs a file as `done`, `source=scan`, only when the index has a file with the same name and size. It runs once at start (`scan_once`, `meta` key `downloads:scanned`), and **not before the index has files** (a fresh deploy retries at the next start). `wms downloads --rescan` runs it again; it never adds a row twice.
 - **CLI** `wms downloads [--today] [--since 2026-10-01|7d] [--name X] [--status a,b] [--limit N] [--rescan] [--json]`.
-- **Bot** `/downloads [name]` (admins, menu `下载记录`): today's rows by default, buttons `今天 / 近7天 / 失败的`, a search by `/downloads juvr00309`. Each row: name, size, status, time, speed, destination. Twelve rows, then `……还有 N 条`.
+- **Bot** `/downloads [name]` (admins, menu `下载记录`): today's rows by default, buttons `今天 / 近7天 / 失败的`, a search by `/downloads abcd00123`. Each row: name, size, status, time, speed, destination. Twelve rows, then `……还有 N 条`.
 
 **B · Skip what is already there** (`ops/outbound.py`)
 
@@ -2145,7 +2145,7 @@ Spec: `docs/wms/M9.2-download-log-parallel-nl-exclusions.md` (baseline `54e3f70`
 **C · Natural language** (`nl/remarks.py`, `rules_parser.py`, `query.py`, `compile.py`, `translator.py`, `guard.py`)
 
 - `Filters.not_downloaded` and `Filters.exclude_names` (compiled to `Match.name_not_regex`, case-insensitive substrings); both are in the wire schema and the system prompt, with Saki's sentence as a few-shot example. `not_downloaded` leaves out any file whose id, name+size, or a marked name fragment is in the log; the plan says `只含 NAS 上还没有的文件（对照下载记录）`. The newest-N limit counts among the files that are left. A scheduled rule is not frozen to a list; it relies on the skip at download time.
-- The rules layer reads, before anything else: not-yet phrases (`未下载 / 还没下 / 没下载过 / 还未下载过 / 相对 NAS 新的 / NAS 上没有的`), already-downloaded remarks (`X 下过了 / 已经下了 / 已下载 / 下载过了`), and leave-out remarks (`不要 X / 不要下载 X / 除了 X / 跳过 X / X 不用`). Inside a request the main intent stays; X becomes an exclusion; an "already downloaded" X also gets a `marked` row (written when the plan is made, after the index sync, so it points at the files it names). Words that only point (`那些`) or describe (`印象足拍的视频`) are not names.
+- The rules layer reads, before anything else: not-yet phrases (`未下载 / 还没下 / 没下载过 / 还未下载过 / 相对 NAS 新的 / NAS 上没有的`), already-downloaded remarks (`X 下过了 / 已经下了 / 已下载 / 下载过了`), and leave-out remarks (`不要 X / 不要下载 X / 除了 X / 跳过 X / X 不用`). Inside a request the main intent stays; X becomes an exclusion; an "already downloaded" X also gets a `marked` row (written when the plan is made, after the index sync, so it points at the files it names). Words that only point (`那些`) or describe (`示例影像的视频`) are not names.
 - **The guard**: `Chain.translate` first asks `only_remark(text)`. A sentence that is only a remark returns a new `Remark` result and never reaches a model, so it cannot come back as a plan (this is what happened to `nl:3`/`nl:4`). A model's answer to a longer sentence passes through `apply_remarks`: the name is taken out of `name_contains`/`name_regex` and put in `exclude_names`. `ground()` also drops an exclusion the sentence does not contain. `保存` now counts as "arrived in the drive" (not `保存到本地`), and `但` is filler.
 - **Bot** (`WmsInBot._remark`): a `Remark` finds this user's newest NL plan from the last 30 minutes that is still open (the proposal record now carries `at`), removes the matching actions (`plans.remove_matching`, which also corrects the "matched N / examples" notes and keeps `settled` indices right), and shows it again with the same three buttons: `已从计划 N 中去掉 X（M 个文件）`. An emptied plan is discarded. With no such plan, an "already downloaded" remark is recorded: `记下了：X 已下载，之后不会再下`. Nothing here ever creates a plan.
 - Eval: 8 new cases in `tests/nl/cases.yaml` (the three sentences of the evidence plus variants; `remark:` is a new case kind). Rules: 105 cases, coverage 0.905, 0 wrong, 0 dangerous. The model numbers need Cowork's rerun (`--with-rules`, and the model alone).
@@ -2195,7 +2195,7 @@ Plan 66 finished with 5 files applied and 4 failed (one 503, three `Cannot conne
 
 1. Pull the image and restart `bot` only. Nothing in compose changes. Optional: `OUTBOUND_PARALLEL_FILES=2` to start cautiously (the default is no limit, as Saki asked; `OUTBOUND_MAX_TOTAL_CONNECTIONS=32` is what keeps that from opening hundreds of connections).
 2. `docker compose exec bot wms downloads --json | head`, then `/downloads` in Telegram.
-3. The acceptance sentences of the spec, in this order: `把今天保存但还未下载过的视频下载，juvr00309 下过了` (a plan without juvr00309 and without what is on the NAS); right after it `juvr00309 下过了` (removed from that plan); with no pending plan `juvr00309 下过了` (recorded, no plan); confirm a plan that contains files already present (skipped); a plan of several files (all progress at once, `取消` on one leaves the others running, `重试失败的`).
+3. The acceptance sentences of the spec, in this order: `把今天保存但还未下载过的视频下载，abcd00123 下过了` (a plan without abcd00123 and without what is on the NAS); right after it `abcd00123 下过了` (removed from that plan); with no pending plan `abcd00123 下过了` (recorded, no plan); confirm a plan that contains files already present (skipped); a plan of several files (all progress at once, `取消` on one leaves the others running, `重试失败的`).
 4. `docker compose exec bot python -m tgmd.traffic ask-probe` → one message within about 30 s; nothing is measured until `立即测速`; a second `ask-probe` while it is open sends nothing.
 5. Rollback: previous image (`54e3f70`). The new tables and keys are ignored by the old version. `OUTBOUND_PARALLEL_FILES=1` gives the old one-file-at-a-time behaviour; `OUTBOUND_RETRY_MINUTES=0` the old short retry; `PROXY_PROBE_CONFIRM=false` the old automatic probe.
 
@@ -2292,7 +2292,7 @@ Closed, with the answer: M9.2 #3 (a `done` row whose file is gone does not count
 ### Deploy steps (Cowork)
 
 1. Set `TRAFFIC_MODEL_HOST=<MODEL_HOST>:11434` in the NAS's `.env` (the real address is in Saki's notes). Pull the image, restart `bot` only.
-2. `docker compose exec bot wms downloads --status failed` lists plan 66's four failures; `wms downloads --since 2026-10-01` has no file twice (juvr00309 part1/part2 in particular).
+2. `docker compose exec bot wms downloads --status failed` lists plan 66's four failures; `wms downloads --since 2026-10-01` has no file twice (abcd00123 part1/part2 in particular).
 3. Start a download plan of three files, then: `wms tasks` (live states), `wms task pause <plan>:2` (answers `done` within ~5 s; the file shows `已暂停`, its `.part` and `.part.state` are on disk, the others speed up), `wms task start <plan>:2` (it resumes, not from byte 0), `wms task stop <plan>:3` (the `.part` stays) and `wms task stop <plan>:3 --delete-partial --yes` on another. In Telegram: the same with the buttons, `全部暂停`, `全部开始`, and `删除已下载部分` with its confirm.
 4. `wms outbound <path> --downloader local` then `wms apply N` with no flag: it downloads, it does not print links. `wms outbound <path> --show-links` is the only way to see a signed link.
 5. `docker compose logs bot | grep -c "sign="` stays 0 after a 503 or a failed download.
@@ -2327,7 +2327,7 @@ Closed, with the answer: M9.2 #3 (a `done` row whose file is gone does not count
 
 Spec: `docs/wms/M9.4-download-priority.md` (baseline `1594fd5`). Sections A, B and C are done, plus the live finding below.
 
-### Live fix: `wms downloads --name juvr00309` showed part1/part2 twice
+### Live fix: `wms downloads --name abcd00123` showed part1/part2 twice
 
 The M9.3 merge compared the destination path as an exact string. The same file reached the log from the container (`/library/…`, the audit backfill) and from the host side (a scan, or another spelling), so the rows never matched. Now (`store/db.py`, `same_place`):
 
@@ -2365,7 +2365,7 @@ No schema change. `Plan.priority` and `after.priority` are new JSON fields (olde
 
 ### Deploy steps (Cowork)
 
-1. Pull, restart `bot`. `wms downloads --name juvr00309` now lists part1 and part2 once each.
+1. Pull, restart `bot`. `wms downloads --name abcd00123` now lists part1 and part2 once each.
 2. Run a plan of several files with `OUTBOUND_PARALLEL_FILES=1`: press `⬆ 优先` on a queued file (it starts next), `整组优先`, send 「先下 <name>」 and 「<name> 置顶」 (no new plan appears), look at `/downloads`.
 3. `wms task priority <plan>:<n> top` and `wms plan priority <plan> high` against a running plan (answer within ~5 s) and against a waiting one (saved).
 4. With two plans running and `OUTBOUND_MAX_TOTAL_CONNECTIONS` small (say 4), set one file to top and watch `wms tasks`: its speed rises as the others finish their ranges; nobody drops to zero.
@@ -2414,3 +2414,42 @@ None. No schema change (`last_sync` meta gains an optional `failed` field).
 
 1. `_make_request` retries (token refresh, network) reuse the headers built once, so a refresh of the access token inside one scoped GET is retried with the old bearer and then fails as an auth error; the next call is fine. Rare, and the SDK's own path has no better answer.
 2. The captcha retry applies only to `events` and `download_links`; other calls raise `CaptchaError` on a refusal (a leaked token is not cleared for them). Widen `action=` per call if the NAS logs show other refusals.
+
+
+## Security · private values vault (option A)
+
+Brief: `docs/briefs/2026-10-04-wms-private-values-vault.md` (baseline `1b20121`). Repository stays public; this closes what a non-destructive change can. No history rewrite, force-push, visibility change, GHCR deletion, GitHub secret or NAS edit was done.
+
+### What changed
+
+- **Private store contract** (`docs/security/README.md`, "The private store" and "Private value rules"): the NAS's `.env` is the runtime source of truth, plus a private Saki-owned copy; both options (private GitHub repository, sops/age-encrypted file in it) are written, the choice is `PENDING (Saki)`.
+- **`deploy/private.env.example`**: every deployment-identifying variable with placeholders and where the real value lives (`ADMIN_USER_IDS`, `ALLOWED_USER_IDS`, `WMS_ACCOUNT`, `PIKPAK_USERNAME`, `CACHE_CHAT_ID`, `TRAFFIC_MODEL_HOST`, `NL_OPENAI_BASE_URL`, `NL_OPENAI_NAMES`, `OLLAMA_URL`, `PUBLIC_BASE_URL`, `MIHOMO_API`, `DIRECT_TEST_URLS`, `LOCAL_URL_PREFIX`, `LIBRARY_DIR`, and the compose-only `LIBRARY_HOST_DIR`, `MEDIA_HOST_DIR`). Found by reading `tgmd/config.py`, `pikpak_wms/nl/*` and the compose files.
+- **Code defaults**: every one of those is already read from the environment with an empty or neutral default, so no code change was needed (`TRAFFIC_MODEL_HOST` was the last, fixed in M9.3). `TRAFFIC_TIMEZONE` keeps `Asia/Shanghai` and `LIBRARY_NAME` stays `资源库`: behaviour, not an address.
+- **Compose**: `deploy/restricted-network/docker-compose.yml` now shows the library and media mounts as `${LIBRARY_HOST_DIR}` / `${MEDIA_HOST_DIR}` (still commented out, so the file starts exactly as before). `docker-compose.yml` and `docker-compose.ghcr.yml` had no literal path.
+- **Remaining personal data in HEAD**: the studio name, the catalogue codes and the site prefix quoted in docs, tests, the NL examples and two code comments or docstrings were replaced by invented ones (`abcd00123`, `wxyz04567`, `example.com@`, a studio `示例影像`, `08号模特`); `JUVR` the test constant is now `SAMPLE`. Behaviour and assertions are unchanged. "Saki" and the GitHub handle stay.
+- **Rules**: `.gitleaks.toml` gains `catalogue-code` (3-5 letters, a zero-padded number; allowlist: the two invented codes). Optional second config: the `secrets` job runs `gitleaks dir . --config <temp file>` only when the secret `GITLEAKS_PRIVATE_RULES` (base64 of `.gitleaks.private.toml`) is set, and skips silently otherwise; pre-commit has a `gitleaks-private` hook (`scripts/gitleaks_private_hook.sh`) that reads `~/.config/tg_media_down_bot/gitleaks.private.toml` when it exists. `.gitleaks.private.toml` and `deploy/private.env*` (except the example) are in `.gitignore` and `.dockerignore`.
+- **Tests**: `tests/test_image_hygiene.py` +3 (build context and git ignore the private files, the example holds placeholders only).
+- **History and images: plan only**: `docs/security/history-rewrite-plan.md`, "Option A completion" (counts, steps, all marked not executed).
+
+### Environment variables / NAS
+
+None new for the bot. `LIBRARY_HOST_DIR` and `MEDIA_HOST_DIR` are read by compose only, and only if the commented mounts are switched on. Nothing for the NAS to do.
+
+### Saki-only actions
+
+1. Choose the private copy: private GitHub repository or sops/age (`PENDING`), and put `deploy/private.env` there.
+2. Create `.gitleaks.private.toml` with the real values (recipe in `docs/security/README.md`), put it at `~/.config/tg_media_down_bot/gitleaks.private.toml`, and set the secret: `base64 < .gitleaks.private.toml | gh secret set GITLEAKS_PRIVATE_RULES`. Without them the private checks are simply off.
+3. Decide on the history rewrite, pull request 1 and the old GHCR versions (plan only; see the plan).
+
+### Verification evidence
+
+- `python scripts/public_audit.py --fail-on-head`: 0 in HEAD (64 in history, unchanged). `gitleaks dir` on the tracked and new files: 0 findings (the local `.venv` is not part of the repository; it holds this Mac's paths and is ignored). The new rule was checked to flag an invented-looking code and to pass the two allowed ones.
+- `ruff check .` clean; `pytest -q`: 1932 → 1935 passed, Python 3.12 (3.11 not run here).
+- Not verified: the CI step itself (needs a push and the secret), and the pre-commit hook inside `pre-commit` (the script was run on its own: no config, exit 0).
+
+### Deviations and open questions
+
+1. No `AGENTS.md` or `CLAUDE.md` exists in this repository; `CC_BRIEF.md` §1 (red lines) was read instead.
+2. The brief says "about 85 lines in 14 files"; the names were in 18 files (docs, tests, NL examples, comments). All were replaced.
+3. The studio-name stand-in is also a literal in `docs/security/README.md`; value rules for the real studio and codes are Saki's private file's job (no public pattern can name them).
+4. The local `.venv` has no pip or packages; checks ran in a throwaway venv outside the repository.

@@ -12,10 +12,10 @@ Three things are read here, by words, before anything else looks at the sentence
 Inside a request they are lifted out of the sentence and the main intent stays. On their
 own, with nothing else to do, they are a :class:`~pikpak_wms.nl.query.Remark`, which can
 never become a download plan (the safety guard of docs/wms/M9.2 §C.2): the plan the bot
-once made from 「juvr00309 下过了」 was a download of exactly juvr00309.
+once made from 「abcd00123 下过了」 was a download of exactly abcd00123.
 
 A model's answer goes through :func:`apply_remarks` as well, because a small model reads
-「juvr00309 下过了」 as a request to fetch juvr00309.
+「abcd00123 下过了」 as a request to fetch abcd00123.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ _GENERIC = re.compile(
 
 def _clean(name: str) -> str | None:
     """One name as it was written (without quotes), or None for a word that only points
-    at something (「那些」) or describes it (「印象足拍的视频」): those are not names."""
+    at something (「那些」) or describes it (「示例影像的视频」): those are not names."""
     quoted = re.fullmatch(rf"{_QUOTED}", name)
     text = name[1:-1].strip() if quoted else name.strip()
     if not text:
@@ -180,7 +180,7 @@ def only_priority(text: str) -> Prioritize | None:
 
 
 def _literal(pattern: str) -> str:
-    """A name regex a model wrote for a plain name (``(?i)juvr00309``) as the text."""
+    """A name regex a model wrote for a plain name (``(?i)abcd00123``) as the text."""
     text = re.sub(r"^\(\?i\)", "", pattern.strip())
     return re.sub(r"\\(.)", r"\1", text)
 

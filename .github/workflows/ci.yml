@@ -64,6 +64,23 @@ jobs:
       - name: gitleaks (this commit's files)
         run: ./gitleaks dir . --config .gitleaks.toml --redact --no-banner --exit-code 1
 
+      # Value-based rules (the exact real host, chat id, model) cannot live in a public repository.
+      # Saki keeps them in a private config and stores its base64 as the secret
+      # GITLEAKS_PRIVATE_RULES (docs/security/README.md). Without the secret (forks, other
+      # contributors) this step is skipped; the file is written to a temp path and never echoed.
+      - name: gitleaks (private value rules, if configured)
+        env:
+          GITLEAKS_PRIVATE_RULES: ${{ secrets.GITLEAKS_PRIVATE_RULES }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GITLEAKS_PRIVATE_RULES:-}" ]; then
+            exit 0
+          fi
+          private="$(mktemp)"
+          trap 'rm -f "$private"' EXIT
+          printf '%s' "$GITLEAKS_PRIVATE_RULES" | base64 -d > "$private"
+          ./gitleaks dir . --config "$private" --redact --no-banner --exit-code 1
+
   test:
     runs-on: ubuntu-latest
     strategy:

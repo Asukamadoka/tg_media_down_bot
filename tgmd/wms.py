@@ -399,7 +399,7 @@ class WmsInBot:
         return proposal.translator
 
     async def _remark(self, user_id: int, remark: Remark) -> tuple[str, Any]:
-        """「juvr00309 下过了」 / 「不要 X」 on its own (docs/wms/M9.2 §C.2): never a plan.
+        """「abcd00123 下过了」 / 「不要 X」 on its own (docs/wms/M9.2 §C.2): never a plan.
 
         With a plan of this user's from the last 30 minutes waiting, the files are taken
         out of it and it is shown again; otherwise a 「X 下过了」 is remembered in the

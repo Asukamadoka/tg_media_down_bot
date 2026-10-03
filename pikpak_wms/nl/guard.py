@@ -30,7 +30,7 @@ words that could be the source of each condition, and drops the ones with none:
 * no time word (天, 周, 月, 年, 今天, 之前, 以来, 最近, a date …) → ``created_after``
   and ``created_before`` go;
 * a name condition whose text is nowhere in the sentence → it goes. (A name that
-  *is* in the sentence stays even without 「名为」「包含」: 「下载印象足拍的视频」
+  *is* in the sentence stays even without 「名为」「包含」: 「下载示例影像的视频」
   names the files by saying what they are called. Dropping it would widen what
   a delete matches.)
 * ``min_size == max_size`` and no 「等于」 → both go.

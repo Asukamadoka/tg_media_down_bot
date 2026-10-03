@@ -28,7 +28,7 @@ from pikpak_wms.store.db import AUDIT_BACKFILLED, Store
 
 SH = ZoneInfo("Asia/Shanghai")
 NOW = datetime(2026, 9, 24, 12, 0, tzinfo=SH)
-JUVR = "4K688.com@juvr00309.part1.mp4"
+SAMPLE = "example.com@abcd00123.part1.mp4"
 
 
 @pytest.fixture(autouse=True)
@@ -205,15 +205,15 @@ class TestRows:
             "y.mkv"]
 
     async def test_marking_remembers_files_and_unknown_names(self, world):
-        world.drive.add(f"/Media/{JUVR}", size=500)
+        world.drive.add(f"/Media/{SAMPLE}", size=500)
         world.drive.add("/Media/other.mp4", size=500)
         await world.sync()
-        marked = await downloads.mark(world.ctx, ["juvr00309", "gone-name"], user_id=7)
-        assert [n.name for n in marked] == [JUVR]
+        marked = await downloads.mark(world.ctx, ["abcd00123", "gone-name"], user_id=7)
+        assert [n.name for n in marked] == [SAMPLE]
         rows = {r["name"]: r for r in await world.ctx.store.downloads()}
-        assert rows[JUVR]["status"] == "marked" and rows[JUVR]["file_id"]
-        assert rows[JUVR]["user_id"] == 7 and rows["gone-name"]["file_id"] == ""
-        await downloads.mark(world.ctx, ["JUVR00309", "gone-name"])       # again: no new rows
+        assert rows[SAMPLE]["status"] == "marked" and rows[SAMPLE]["file_id"]
+        assert rows[SAMPLE]["user_id"] == 7 and rows["gone-name"]["file_id"] == ""
+        await downloads.mark(world.ctx, ["ABCD00123", "gone-name"])       # again: no new rows
         assert len(await world.ctx.store.downloads()) == 2
         node = await world.ctx.store.node_at("/Media/other.mp4")
         assert not await downloads.is_known(world.ctx, node)
@@ -301,10 +301,10 @@ class TestSkipping:
         assert not (await node_again(node, "", "local")).get("skipped")
 
     async def test_a_name_said_to_be_downloaded_is_skipped(self, lib, tmp_path):
-        lib.drive.add(f"/Media/{JUVR}", size=2000)
+        lib.drive.add(f"/Media/{SAMPLE}", size=2000)
         await lib.sync()
-        await downloads.mark(lib.ctx, ["juvr00309"])
-        node = await lib.ctx.store.node_at(f"/Media/{JUVR}")
+        await downloads.mark(lib.ctx, ["abcd00123"])
+        node = await lib.ctx.store.node_at(f"/Media/{SAMPLE}")
         io = CdnIO(payload(2000))
         result = await outbound.make_deliver(lib.ctx, io=io, clock=on(2026, 10, 2))(
             node, "", "local")
@@ -355,17 +355,17 @@ class TestSentences:
         return RulesTranslator().parse(text, NOW, SH)
 
     def test_the_sentence_of_nl_4_keeps_its_intent_and_leaves_the_name_out(self):
-        query = self.parse("把今天保存但还未下载过的视频下载，juvr00309 下过了")
+        query = self.parse("把今天保存但还未下载过的视频下载，abcd00123 下过了")
         assert isinstance(query, Query) and query.intent == "download"
         assert query.filters.kinds == ["video"] and query.filters.not_downloaded
-        assert query.filters.exclude_names == ["juvr00309"]
+        assert query.filters.exclude_names == ["abcd00123"]
         assert query.filters.name_contains == [] and query.filters.name_regex is None
         assert query.filters.created_after == "2026-09-24T00:00:00+08:00"
-        assert query.marked == ["juvr00309"]
+        assert query.marked == ["abcd00123"]
 
     def test_the_sentence_of_nl_3_is_a_remark_never_a_plan(self):
-        remark = self.parse("juvr00309 下过了")
-        assert remark == Remark(names=["juvr00309"], downloaded=True)
+        remark = self.parse("abcd00123 下过了")
+        assert remark == Remark(names=["abcd00123"], downloaded=True)
 
     def test_the_sentence_of_plan_60(self):
         query = self.parse("下载今天保存的两个视频")
@@ -382,15 +382,15 @@ class TestSentences:
         assert query.filters.kinds == ["video"] and query.intent == "download"
 
     @pytest.mark.parametrize(("text", "names", "downloaded"), [
-        ("juvr00309 已经下了", ["juvr00309"], True),
-        ("juvr00309已下载", ["juvr00309"], True),
-        ("「4K688 juvr」下载过了", ["4K688 juvr"], True),
+        ("abcd00123 已经下了", ["abcd00123"], True),
+        ("abcd00123已下载", ["abcd00123"], True),
+        ("「4K000 abcd」下载过了", ["4K000 abcd"], True),
         ("a1b2c3 和 x9y8z7 下过了", ["a1b2c3", "x9y8z7"], True),
-        ("不要 juvr00309", ["juvr00309"], False),
-        ("不要下载 juvr00309", ["juvr00309"], False),
-        ("跳过 juvr00309", ["juvr00309"], False),
-        ("juvr00309 不用", ["juvr00309"], False),
-        ("印象足拍 不用下载了", ["印象足拍"], False),
+        ("不要 abcd00123", ["abcd00123"], False),
+        ("不要下载 abcd00123", ["abcd00123"], False),
+        ("跳过 abcd00123", ["abcd00123"], False),
+        ("abcd00123 不用", ["abcd00123"], False),
+        ("示例影像 不用下载了", ["示例影像"], False),
     ])
     def test_remarks_on_their_own(self, text, names, downloaded):
         assert self.parse(text) == Remark(names=names, downloaded=downloaded)
@@ -400,14 +400,14 @@ class TestSentences:
         assert not isinstance(self.parse(text), Remark)
 
     def test_an_exclusion_inside_a_request(self):
-        query = self.parse("下载今天的视频，除了 juvr00309")
-        assert query.intent == "download" and query.filters.exclude_names == ["juvr00309"]
+        query = self.parse("下载今天的视频，除了 abcd00123")
+        assert query.intent == "download" and query.filters.exclude_names == ["abcd00123"]
         assert query.marked == []                            # not said to be downloaded
 
     def test_a_name_that_is_a_whole_file_is_not_the_file_to_fetch(self):
-        query = self.parse("下载今天的视频，4K688.com@juvr00309.part1.mp4 下过了")
+        query = self.parse("下载今天的视频，example.com@abcd00123.part1.mp4 下过了")
         assert query.filters.name_equals is None
-        assert query.filters.exclude_names == [JUVR]
+        assert query.filters.exclude_names == [SAMPLE]
 
     def test_not_downloaded_alone_still_asks_how_much(self):
         # No time, size, kind or place: the whole drive minus what is there is still too much.
@@ -424,10 +424,10 @@ class TestSentences:
 
             async def translate(self, text, now, tz):
                 Model.calls += 1
-                return Query(intent="download", filters=Filters(name_contains=["juvr00309"]))
+                return Query(intent="download", filters=Filters(name_contains=["abcd00123"]))
 
         chain = Chain([Model()])
-        result = await chain.translate("juvr00309 下过了", NOW, SH)
+        result = await chain.translate("abcd00123 下过了", NOW, SH)
         assert isinstance(result, Remark) and Model.calls == 0
 
     async def test_a_models_inverted_answer_is_put_right(self):
@@ -437,15 +437,15 @@ class TestSentences:
             async def translate(self, text, now, tz):
                 # What nl:4 got: the name the sentence says to leave out, selected.
                 return Query(intent="download", filters=Filters(
-                    name_regex="(?i)juvr00309", created_after="2026-09-24T00:00:00+08:00",
+                    name_regex="(?i)abcd00123", created_after="2026-09-24T00:00:00+08:00",
                     kinds=["video"]))
 
         chain = Chain([Model()])
-        sentence = "帮忙把今天新存的那几部视频下一下，juvr00309 下过了"
+        sentence = "帮忙把今天新存的那几部视频下一下，abcd00123 下过了"
         result = await chain.translate(sentence, NOW, SH)
         assert isinstance(result, Query)
         assert result.filters.name_regex is None and result.filters.name_contains == []
-        assert result.filters.exclude_names == ["juvr00309"] and result.marked == ["juvr00309"]
+        assert result.filters.exclude_names == ["abcd00123"] and result.marked == ["abcd00123"]
 
     def test_the_wire_format_carries_the_new_fields(self):
         filters = wire_schema()["properties"]["filters"]
@@ -509,18 +509,18 @@ class TestNotDownloaded:
         w = world
         w.ctx.config.outbound.local_dir = tmp_path / "media"
         w.ctx.config.outbound.downloader = "local"
-        w.drive.add(f"/Media/{JUVR}", size=900)
+        w.drive.add(f"/Media/{SAMPLE}", size=900)
         w.drive.add("/Media/other.mp4", size=100)
         await w.sync()
         query = RulesTranslator().parse(
-            "把保存的视频下载，juvr00309 下过了", NOW, SH)
+            "把保存的视频下载，abcd00123 下过了", NOW, SH)
         assert isinstance(query, Query)
         proposal = await nl.make_proposal(w.ctx, query, now=NOW, user_id=42)
         assert [n.name for n in proposal.matches] == ["other.mp4"]
         rows = await w.ctx.store.downloads(status=["marked"])
-        assert [(r["name"], r["user_id"]) for r in rows] == [(JUVR, 42)]
-        assert "记下了：juvr00309 已下载" in "\n".join(nl.proposal_lines(proposal))
-        assert "排除名字含「juvr00309」的文件" in "\n".join(nl.proposal_lines(proposal))
+        assert [(r["name"], r["user_id"]) for r in rows] == [(SAMPLE, 42)]
+        assert "记下了：abcd00123 已下载" in "\n".join(nl.proposal_lines(proposal))
+        assert "排除名字含「abcd00123」的文件" in "\n".join(nl.proposal_lines(proposal))
 
     async def test_a_scheduled_rule_is_not_fixed_to_a_list(self, world, tmp_path):
         w = world
@@ -535,21 +535,21 @@ class TestNotDownloaded:
 
 class TestPendingPlans:
     async def test_names_are_taken_out_of_an_open_plan(self, world, tmp_path):
-        plan_id = await _outbound_plan(world, tmp_path, names=("a.mkv", JUVR, "c.mkv"))
-        gone = await plans.remove_matching(world.ctx, plan_id, ["juvr00309"])
-        assert gone == [JUVR]
+        plan_id = await _outbound_plan(world, tmp_path, names=("a.mkv", SAMPLE, "c.mkv"))
+        gone = await plans.remove_matching(world.ctx, plan_id, ["abcd00123"])
+        assert gone == [SAMPLE]
         row = await plans.get(world.ctx, plan_id)
         assert [a.before["name"] for a in row["plan"].actions] == ["a.mkv", "c.mkv"]
         assert row["status"] == "pending" and row["fingerprint"] == plans.fingerprint(row["plan"])
         assert await plans.remove_matching(world.ctx, plan_id, ["nothing"]) == []
 
     async def test_a_plan_left_empty_is_discarded(self, world, tmp_path):
-        plan_id = await _outbound_plan(world, tmp_path, names=(JUVR,))
-        assert await plans.remove_matching(world.ctx, plan_id, ["JUVR"]) == [JUVR]
+        plan_id = await _outbound_plan(world, tmp_path, names=(SAMPLE,))
+        assert await plans.remove_matching(world.ctx, plan_id, ["ABCD"]) == [SAMPLE]
         assert (await plans.get(world.ctx, plan_id))["status"] == "discarded"
 
     async def test_what_is_already_done_is_not_touched(self, world, tmp_path):
-        plan_id = await _outbound_plan(world, tmp_path, names=("a.mkv", JUVR))
+        plan_id = await _outbound_plan(world, tmp_path, names=("a.mkv", SAMPLE))
         await world.ctx.store.update_plan(plan_id, status="partial", progress=1,
                                           result={"settled": {"1": "done"}})
         assert await plans.remove_matching(world.ctx, plan_id, ["a.mkv"]) == []
@@ -892,7 +892,7 @@ class TestDownloadsCommand:
                 await store.add_download(name="a.mkv", size=2048, status="done",
                                          dest_path="/library/a.mkv", avg_mib_s=2.5,
                                          finished_at="2026-10-01T10:00:00+00:00")
-                await store.add_download(name=JUVR, size=10, status="failed", reason="503",
+                await store.add_download(name=SAMPLE, size=10, status="failed", reason="503",
                                          finished_at="2026-10-02T10:00:00+00:00")
                 await store.add_download(name="old.mkv", size=1, status="done",
                                          finished_at="2025-01-01T00:00:00+00:00")
@@ -919,12 +919,12 @@ class TestDownloadsCommand:
         assert "old.mkv" not in shown.output
         assert "2.5 MiB/s" in shown.output and "/library/a.mkv" in shown.output
         data = json.loads(runner.invoke(cli.app, ["downloads", "--json"]).output)
-        assert [r["name"] for r in data["downloads"]] == [JUVR, "a.mkv", "old.mkv"]
+        assert [r["name"] for r in data["downloads"]] == [SAMPLE, "a.mkv", "old.mkv"]
         failed = json.loads(runner.invoke(
             cli.app, ["downloads", "--status", "failed", "--json"]).output)
         assert [r["status"] for r in failed["downloads"]] == ["failed"]
-        named = runner.invoke(cli.app, ["downloads", "--name", "JUVR00309"])
-        assert JUVR in named.output and "a.mkv" not in named.output
+        named = runner.invoke(cli.app, ["downloads", "--name", "ABCD00123"])
+        assert SAMPLE in named.output and "a.mkv" not in named.output
         assert "下载记录是空的" in runner.invoke(
             cli.app, ["downloads", "--name", "nope"]).output
         assert "old.mkv" not in runner.invoke(cli.app, ["downloads", "--today"]).output

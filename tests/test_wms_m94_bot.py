@@ -63,14 +63,14 @@ class TestButtons:
 class TestSentencesInTheBot:
     async def test_a_phrase_sets_the_priority_and_makes_no_plan(self, rig, monkeypatch):
         inbot, _handlers, io, plan_id, _ = await running(
-            rig, monkeypatch, ("juvr00309.mkv", "other.mkv"))
+            rig, monkeypatch, ("abcd00123.mkv", "other.mkv"))
         try:
             before = len(await plans.listing(inbot.embedded.ctx, open_only=False, limit=100))
             run = inbot.embedded.run_of(plan_id)
-            text, buttons = await inbot.nl_message(4242, "先下 juvr00309")
-            assert "高" in text and "juvr00309.mkv" in text and buttons is None
+            text, buttons = await inbot.nl_message(4242, "先下 abcd00123")
+            assert "高" in text and "abcd00123.mkv" in text and buttons is None
             assert run.control.tracks[0].priority == 1
-            text, _ = await inbot.nl_message(4242, "juvr00309 置顶")
+            text, _ = await inbot.nl_message(4242, "abcd00123 置顶")
             assert run.control.tracks[0].priority == 2
             await inbot.nl_message(4242, "优先下载 other")
             assert run.control.tracks[1].priority == 1
@@ -93,11 +93,11 @@ class TestSentencesInTheBot:
     async def test_a_waiting_plan_is_found_too(self, rig, monkeypatch):
         from test_wms_m92_bot import media_files, plan_of
 
-        media_files(rig.drive, ("juvr00309.mkv",))
+        media_files(rig.drive, ("abcd00123.mkv",))
         inbot, _handlers = await rig.boot()
         try:
-            plan_id = await plan_of(inbot, ("juvr00309.mkv",))
-            text, _ = await inbot.nl_message(4242, "juvr00309 置顶")
+            plan_id = await plan_of(inbot, ("abcd00123.mkv",))
+            text, _ = await inbot.nl_message(4242, "abcd00123 置顶")
             assert "置顶" in text
             assert (await levels(inbot, plan_id))[0] == [2]
         finally:

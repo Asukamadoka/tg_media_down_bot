@@ -29,6 +29,30 @@ In **tests** and examples use values that are plainly invented, so the code can 
 **Code defaults never contain a real address or id.** A setting that needs one is empty by default
 and read from the environment (`TRAFFIC_MODEL_HOST` is the example: empty means "no model host").
 
+## The private store
+
+Real deployment values (LAN and model-host addresses, the Funnel host, the cache channel id, owner
+ids, the library's volume path, the share URL prefix) live **outside this repository**, in two places:
+
+1. **The NAS's `.env`** next to its compose file: the runtime source of truth. The bot reads every
+   one of these from the environment, with an empty or neutral default in code; compose files refer
+   to host paths as `${VAR}` and never hold a literal.
+2. **A private, Saki-owned copy** of that file, so a lost NAS or a rebuilt one does not lose them.
+   Two ways to keep it; **the choice is `PENDING (Saki)`**:
+   * **A private GitHub repository** (for example a `private-values` repo) holding `private.env`
+     as is. Simple; protected by GitHub's access control only.
+   * **A sops/age-encrypted file** (`private.env.sops`) kept in that private repository. The age key
+     stays in the macOS Keychain or on the Mac only; the encrypted file is safe to sync and diff.
+
+`deploy/private.env.example` lists every deployment-identifying variable with placeholders and says
+where the real value lives. Copy it to `deploy/private.env` (gitignored, and excluded from the
+Docker build context by `.gitignore` and `.dockerignore`; `tests/test_image_hygiene.py` fails if
+either stops doing so) and fill it in. Credentials are not in that list: they stay in the NAS's
+`.env` or the macOS Keychain only.
+
+If you add a setting that identifies the deployment: read it from the environment with an empty
+default, add it to `deploy/private.env.example`, and use `${VAR}` in compose files.
+
 ## What stops a leak
 
 1. **CI** (`secrets` job in `.github/workflows/ci.yml`). It runs `gitleaks dir .` over the files of
@@ -39,12 +63,48 @@ and read from the environment (`TRAFFIC_MODEL_HOST` is the example: empty means 
    addresses, `.local` and Tailscale host names, `smb://` URLs, chat and user ids, volume paths,
    home directories, the NAS's make, e-mail addresses. The rules hold patterns, never values. An
    allowlist entry must say why it is not a leak.
+   The **value-based** rules (the exact real host, chat id, model name) cannot be in a public file.
+   They live in a private config that CI and the pre-commit hook read when it is there; see
+   "Private value rules" below.
 3. **A pre-commit hook** (optional): `pip install pre-commit && pre-commit install` runs the same
    rules before a commit is made (`.pre-commit-config.yaml`).
 4. **The image.** The `Dockerfile` copies only `tgmd/`, `pikpak_wms/`, `config/` (example files
    only) and `tests/nl/`; `.dockerignore` keeps documents, briefs, tests, `.env*`, the real WMS
    config and token out of the build context as well. `tests/test_image_hygiene.py` fails if either
    changes.
+
+## Private value rules
+
+`.gitleaks.toml` can only hold patterns. To catch the *exact* real values, Saki keeps a second
+config, `.gitleaks.private.toml`, which is never committed (`.gitignore`, `.dockerignore`). Saki
+creates it; nothing here creates it or any secret.
+
+1. **Write the file**, one rule per value, with the real text only in the file:
+   ```toml
+   title = "tg_media_down_bot private values"
+
+   [[rules]]
+   id = "private-value-1"
+   description = "a real deployment value (the file is private, say which one here)"
+   regex = '''<the exact value, regex-escaped>'''
+   keywords = ["<a lowercase fragment of it>"]
+   ```
+   Keep it in the private store (above). Check it on this repository's files:
+   `gitleaks dir . --config /path/to/gitleaks.private.toml --redact`.
+2. **Pre-commit**: copy it to `~/.config/tg_media_down_bot/gitleaks.private.toml` (or point
+   `GITLEAKS_PRIVATE_CONFIG` at it). The `gitleaks-private` hook of `.pre-commit-config.yaml`
+   (`scripts/gitleaks_private_hook.sh`) then scans the staged changes with it. Without the file the
+   hook does nothing.
+3. **CI**: store the file's base64 as the repository secret `GITLEAKS_PRIVATE_RULES`
+   (GitHub, repository, Settings, Secrets and variables, Actions; or
+   `base64 < gitleaks.private.toml | gh secret set GITLEAKS_PRIVATE_RULES`). The `secrets` job then
+   runs `gitleaks dir . --config <that file>` after the public scan. The file is written to a temp
+   path and never echoed; where the secret is not set (forks, other contributors) the step is
+   skipped silently. Update the secret when the file changes.
+
+Pattern rules for categories (catalogue-code-shaped file names, addresses, ids) stay in the public
+`.gitleaks.toml`. The invented stand-ins it allows in tests and examples are `abcd00123`,
+`wxyz04567`, `example.com@`, a studio called `示例影像` and `08号模特`.
 
 Run it yourself:
 

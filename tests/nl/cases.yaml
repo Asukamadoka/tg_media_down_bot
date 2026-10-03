@@ -400,24 +400,24 @@ cases:
     expect:
       intent: download
       filters: {created_after: "{today}", kinds: [video], limit: 2}
-  - text: juvr00309 下过了
-    remark: {names: [juvr00309], downloaded: true}     # 只记下，不做计划
-  - text: 把今天保存但还未下载过的视频下载，juvr00309 下过了
+  - text: abcd00123 下过了
+    remark: {names: [abcd00123], downloaded: true}     # 只记下，不做计划
+  - text: 把今天保存但还未下载过的视频下载，abcd00123 下过了
     expect:
       intent: download
-      filters: {created_after: "{today}", kinds: [video], not_downloaded: true, exclude_names: [juvr00309]}
+      filters: {created_after: "{today}", kinds: [video], not_downloaded: true, exclude_names: [abcd00123]}
   - text: 把今天保存但还未下载过的视频下载
     expect:
       intent: download
       filters: {created_after: "{today}", kinds: [video], not_downloaded: true}
-  - text: 不要 juvr00309
-    remark: {names: [juvr00309], downloaded: false}
-  - text: juvr00309 已经下载了
-    remark: {names: [juvr00309], downloaded: true}
-  - text: 下载今天的视频，除了 juvr00309
+  - text: 不要 abcd00123
+    remark: {names: [abcd00123], downloaded: false}
+  - text: abcd00123 已经下载了
+    remark: {names: [abcd00123], downloaded: true}
+  - text: 下载今天的视频，除了 abcd00123
     expect:
       intent: download
-      filters: {created_after: "{today}", kinds: [video], exclude_names: [juvr00309]}
+      filters: {created_after: "{today}", kinds: [video], exclude_names: [abcd00123]}
   - text: 下载还没下载过的视频，abc123 不用
     expect:
       intent: download
@@ -428,9 +428,9 @@ cases:
       intent: download
       filters: {created_after: "2026-10-02T02:50:00+08:00", kinds: [video], not_downloaded: true}
   # ---------------- M9.4：优先，只改排队，不做计划 ----------------
-  - text: 先下 juvr00309
-    priority: {names: [juvr00309], level: high}
-  - text: 优先下载 juvr00309
-    priority: {names: [juvr00309], level: high}
-  - text: juvr00309 置顶
-    priority: {names: [juvr00309], level: top}
+  - text: 先下 abcd00123
+    priority: {names: [abcd00123], level: high}
+  - text: 优先下载 abcd00123
+    priority: {names: [abcd00123], level: high}
+  - text: abcd00123 置顶
+    priority: {names: [abcd00123], level: top}

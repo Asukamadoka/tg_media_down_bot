@@ -125,3 +125,34 @@ What the audit did find, and what to do about it regardless of a rewrite:
   Nothing to rotate; they make a targeted attack a little easier, which is the reason to scrub HEAD.
 * **The cache channel's chat id** is not a credential. If its invite link was ever shared publicly,
   revoke the link in Telegram.
+
+
+## Option A completion: what still holds old values (2026-10-04)
+
+Option A keeps the repository public on the condition that personal values live only in the private
+store (`README.md`, "The private store"). HEAD and every file CI scans are clean. What is left is
+history and images, and **nothing below has been executed; every step needs Saki's explicit yes.**
+
+| Where | What is still there | Count |
+|---|---|---|
+| Commits on the production branch (61 before the vault commit) | addresses, share URLs, volume paths, the NAS make, the Funnel host, the cache chat id | introduced by 16 commits; in the tree of 49 (the 10th, `b40b5e2`, to the 58th); the scrub commit `1594fd5` is the 59th |
+| Same | names of downloaded files (a studio name, catalogue codes, a site prefix) | in the tree of the 12 commits from the 50th (`f951cb8`) to the 61st; the vault commit removes them |
+| Branch `base` | the oldest history, as far as it reaches | UNVERIFIED (run `gitleaks git` on it) |
+| Pull request refs | `refs/pull/1/*` keep their own commits and text | 1 pull request |
+| GHCR `tg_media_down_bot` versions | the code of each build, including the traffic classifier's old address default (until M9.3) | UNVERIFIED (count: `gh api /user/packages/container/tg_media_down_bot/versions --jq length`) |
+| Forks, clones, caches | anything fetched before | cannot be removed |
+
+Steps that would remove them, in this order (the full procedure is above):
+
+1. Add the **name replacements** to `expressions.txt`. They are values, so those lines go only in the
+   private store's copy of the file, never here: one `literal:<old>==><new>` line for each catalogue
+   code, the site prefix and the studio name, with the stand-ins from `README.md`.
+2. Freeze, back up, `git filter-repo --replace-text` on a fresh clone, verify with
+   `gitleaks git . --config .gitleaks.toml` **and** `--config .gitleaks.private.toml`, then force-push
+   all branches (`base` included). **Not executed, needs Saki's explicit yes.**
+3. Close or delete pull request 1 if it carries old text; ask GitHub support to drop cached views and
+   unreachable commits. **Not executed, needs Saki's explicit yes.**
+4. Delete the old GHCR versions, keeping the one the NAS runs until it has pulled a new build.
+   **Not executed, needs Saki's explicit yes.**
+5. Re-clone or reset every machine that has a checkout; re-run `scripts/public_audit.py` and replace
+   the audit file.

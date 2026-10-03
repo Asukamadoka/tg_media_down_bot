@@ -101,7 +101,7 @@ def _refresh_notes(plan: Plan) -> None:
 
 async def remove_matching(ctx: Context, plan_id: int, fragments: list[str]) -> list[str]:
     """Take the actions whose file name contains any of ``fragments`` out of an open
-    plan (「juvr00309 下过了」, docs/wms/M9.2 §C.2). Only actions not yet carried out are
+    plan (「abcd00123 下过了」, docs/wms/M9.2 §C.2). Only actions not yet carried out are
     touched. Returns the names removed; an emptied plan is discarded."""
     row = await get(ctx, plan_id)
     if row["status"] not in OPEN:

@@ -325,21 +325,21 @@ TZ = ZoneInfo("Asia/Shanghai")
 
 class TestSentences:
     @pytest.mark.parametrize(("text", "names", "level"), [
-        ("先下 juvr00309", ["juvr00309"], "high"),
-        ("先下载juvr00309", ["juvr00309"], "high"),
-        ("优先下载 juvr00309", ["juvr00309"], "high"),
-        ("请优先下载 juvr00309 和 savr01205", ["juvr00309", "savr01205"], "high"),
-        ("juvr00309 置顶", ["juvr00309"], "top"),
-        ("把 juvr00309 置顶", ["juvr00309"], "top"),
-        ("置顶 juvr00309", ["juvr00309"], "top"),
-        ("「4K688 juvr」置顶", ["4K688 juvr"], "top"),
+        ("先下 abcd00123", ["abcd00123"], "high"),
+        ("先下载abcd00123", ["abcd00123"], "high"),
+        ("优先下载 abcd00123", ["abcd00123"], "high"),
+        ("请优先下载 abcd00123 和 wxyz04567", ["abcd00123", "wxyz04567"], "high"),
+        ("abcd00123 置顶", ["abcd00123"], "top"),
+        ("把 abcd00123 置顶", ["abcd00123"], "top"),
+        ("置顶 abcd00123", ["abcd00123"], "top"),
+        ("「4K000 abcd」置顶", ["4K000 abcd"], "top"),
     ])
     def test_the_phrases(self, text, names, level):
         assert RulesTranslator().parse(text, NOW, TZ) == Prioritize(names=names, level=level)
 
     @pytest.mark.parametrize("text", [
-        "优先下载今天的视频", "先下载再整理", "下载 juvr00309", "视频置顶",
-        "juvr00309 下过了 先下 x",
+        "优先下载今天的视频", "先下载再整理", "下载 abcd00123", "视频置顶",
+        "abcd00123 下过了 先下 x",
     ])
     def test_other_sentences_are_not_priorities(self, text):
         assert not isinstance(RulesTranslator().parse(text, NOW, TZ), Prioritize)
@@ -352,10 +352,10 @@ class TestSentences:
                 raise AssertionError("a priority must not reach a model")
 
         chain = Chain([Boom()])
-        got = await chain.translate("先下 juvr00309", NOW, TZ)
-        assert got == Prioritize(names=["juvr00309"], level="high")
-        assert await chain.translate("juvr00309 下过了", NOW, TZ) == Remark(
-            names=["juvr00309"], downloaded=True)
+        got = await chain.translate("先下 abcd00123", NOW, TZ)
+        assert got == Prioritize(names=["abcd00123"], level="high")
+        assert await chain.translate("abcd00123 下过了", NOW, TZ) == Remark(
+            names=["abcd00123"], downloaded=True)
 
 
 # ------------------------------------------------------------ command line

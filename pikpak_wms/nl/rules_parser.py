@@ -185,7 +185,7 @@ class RulesTranslator:
 
     def parse(self, text: str, now: datetime, tz: tzinfo
               ) -> Query | Clarification | Remark | Prioritize | None:
-        # 「juvr00309 下过了」, on its own, is a remark about files: never a plan (M9.2 §C.2).
+        # 「abcd00123 下过了」, on its own, is a remark about files: never a plan (M9.2 §C.2).
         remark = only_remark(text) or only_priority(text)
         if remark is not None:
             return remark
@@ -223,7 +223,7 @@ class RulesTranslator:
 
         leftover = _PUNCT.sub("", _FILLER.sub("", s.text))
         if filename is not None:
-            # The name says exactly which file; words describing it (「印象足拍的视频」) add
+            # The name says exactly which file; words describing it (「示例影像的视频」) add
             # nothing, unless they turn it around (「……以外的」).
             if _EXCEPT.search(s.text):
                 return None

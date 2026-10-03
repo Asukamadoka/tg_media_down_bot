@@ -95,6 +95,15 @@ description = "The NAS's make or model (use <NAS_MODEL>)"
 regex = '''(?i)\b(?:UGREEN|UGOS|DXP\d{3,4}\w*|Synology|DS\d{3}\+?|QNAP)\b'''
 keywords = ["ugreen", "ugos", "dxp", "synology", "ds", "qnap"]
 
+[[rules]]
+id = "catalogue-code"
+description = "A catalogue-code-shaped file name or id: 3-5 letters then a zero-padded number (use abcd00123)"
+regex = '''(?i)(?:^|[^A-Za-z0-9])([a-z]{3,5}-?0\d{4})(?:$|[^A-Za-z0-9])'''
+secretGroup = 1
+keywords = ["0"]
+[rules.allowlist]
+regexes = ['''(?i)^(?:abcd-?00123|wxyz-?04567)$''']
+
 # ---- known false positives of the default rules -------------------------------------------
 # Each is a variable name or an invented value; none is a credential.
 

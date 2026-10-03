@@ -505,7 +505,7 @@ class TestLogCleanup:
         async with Store(path):
             pass
         action = {"type": "outbound", "file_id": "", "before": {
-            "name": "savr01205.part2.mp4", "path": "/R/savr01205.part2.mp4", "size": 77},
+            "name": "wxyz04567.part2.mp4", "path": "/R/wxyz04567.part2.mp4", "size": 77},
             "after": {}, "rule_name": "outbound"}
         conn = sqlite3.connect(path)
         conn.execute("DELETE FROM meta WHERE key = ?", (FAILED_BACKFILLED,))
@@ -514,7 +514,7 @@ class TestLogCleanup:
             "created_at, updated_at) VALUES (66, 'outbound', 'applied', 'x', ?, 1, ?, "
             "'2026-10-02T01:00:00+00:00', '2026-10-02T02:00:00+00:00')",
             (json.dumps({"actions": [action]}), json.dumps({"failed": [
-                {"path": "/R/savr01205.part2.mp4", "action": "outbound",
+                {"path": "/R/wxyz04567.part2.mp4", "action": "outbound",
                  "error": f"Cannot connect to host {SIGNED}"},
                 {"path": "/R/x", "action": "rename", "error": "not a download"}]})))
         conn.commit()
@@ -524,7 +524,7 @@ class TestLogCleanup:
                 rows = await store.downloads(status=["failed"])
         (row,) = rows
         assert (row["name"], row["size"], row["plan_id"], row["source"]) == (
-            "savr01205.part2.mp4", 77, 66, "backfill")
+            "wxyz04567.part2.mp4", 77, 66, "backfill")
         assert row["finished_at"].startswith("2026-10-02T02") and "SECRETSIGN" not in row["reason"]
 
     async def test_a_vanished_source_is_named_in_the_summary(self, world, tmp_path):
@@ -606,7 +606,7 @@ def test_nothing_in_the_warehouse_reads_the_machines_local_time():
 
 
 class TestDedupeSpellings:
-    """Live: `wms downloads --name juvr00309` showed part1 and part2 twice after M9.3."""
+    """Live: `wms downloads --name abcd00123` showed part1 and part2 twice after M9.3."""
 
     async def test_the_same_file_from_the_container_and_from_the_host_is_merged(self, tmp_path):
         from pikpak_wms.store.db import Store

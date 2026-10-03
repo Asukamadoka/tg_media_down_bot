@@ -72,7 +72,7 @@ class Filters(_Strict):
     not_downloaded: bool = False
     """Leave out what the download log says is already on the NAS (docs/wms/M9.2 §C.1)."""
     exclude_names: list[str] = Field(default_factory=list)
-    """Leave out files whose name contains any of these (「juvr00309 下过了」「除了 X」)."""
+    """Leave out files whose name contains any of these (「abcd00123 下过了」「除了 X」)."""
 
     @field_validator("limit")
     @classmethod
@@ -183,7 +183,7 @@ class Clarification(_Strict):
 
 
 class Remark(_Strict):
-    """A sentence that only says which files are done with: 「juvr00309 下过了」,
+    """A sentence that only says which files are done with: 「abcd00123 下过了」,
     「不要 X」. It never makes a plan (docs/wms/M9.2 §C.2): it takes the files out of
     a pending plan, or is remembered in the download log."""
 

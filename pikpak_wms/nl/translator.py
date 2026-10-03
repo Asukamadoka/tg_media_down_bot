@@ -163,9 +163,9 @@ value):
 month is two dates, not a duration like "1m".
 7. "以 sample 开头的文件" -> {"intent": "list", "filters": {"name_regex": "^sample"}}: starts \
 with is a regular expression anchored with ^, not name_contains.
-8. "把今天保存但还未下载过的视频下载，juvr00309 下过了" on 2026-10-02 -> {"intent": "download", \
+8. "把今天保存但还未下载过的视频下载，abcd00123 下过了" on 2026-10-02 -> {"intent": "download", \
 "filters": {"created_after": "2026-10-02T00:00:00+08:00", "kinds": ["video"], \
-"not_downloaded": true, "exclude_names": ["juvr00309"]}}: 下过了 after a name leaves that \
+"not_downloaded": true, "exclude_names": ["abcd00123"]}}: 下过了 after a name leaves that \
 name out; it never selects it.
 9. "下载今天的视频，除了 abc" -> {"intent": "download", "filters": {"created_after": \
 "2026-10-02T00:00:00+08:00", "kinds": ["video"], "exclude_names": ["abc"]}}
@@ -175,7 +175,7 @@ Wrong answers, never write these:
 "0 3 * * *".
 2. {"schedule": "null", "needs_clarification": "null"}: the string "null" is not null. Write \
 JSON null.
-3. "juvr00309 下过了" -> {"intent": "download", "filters": {"name_contains": ["juvr00309"]}}: \
+3. "abcd00123 下过了" -> {"intent": "download", "filters": {"name_contains": ["abcd00123"]}}: \
 a sentence that only says some files are already downloaded is not a request to download \
 them; write needs_clarification instead."""
 

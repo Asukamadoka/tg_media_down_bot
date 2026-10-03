@@ -9,7 +9,7 @@ import time
 import pytest
 from test_wms_m83 import payload
 from test_wms_m83_bot import ADMIN, Event, Rig, buttons_of, press, until
-from test_wms_m92 import JUVR, CdnIO
+from test_wms_m92 import SAMPLE, CdnIO
 from wms_fakes import FakeDrive
 
 from pikpak_wms.ops import embed, outbound
@@ -87,18 +87,18 @@ class TestDownloadsCommand:
         inbot, handlers = await rig.boot()
         try:
             store = inbot.embedded.ctx.store
-            await store.add_download(name=JUVR, size=9, status="done")
+            await store.add_download(name=SAMPLE, size=9, status="done")
             await store.add_download(name="x.mkv", size=9, status="failed", reason="503")
             await store.add_download(name="y.mkv", size=9, status="done",
                                      finished_at="2026-01-01T00:00:00+00:00")
-            search = Event("/downloads juvr00309")
+            search = Event("/downloads abcd00123")
             await handlers.on_downloads(search)
-            assert "包含「juvr00309」（1 条）" in search.replies[0][0]
+            assert "包含「abcd00123」（1 条）" in search.replies[0][0]
             failed = await press(handlers, "wms:dl:failed")
             assert "失败的（1 条）" in failed.edits[0][0] and "x.mkv" in failed.edits[0][0]
-            assert "503" in failed.edits[0][0] and JUVR not in failed.edits[0][0]
+            assert "503" in failed.edits[0][0] and SAMPLE not in failed.edits[0][0]
             week = await press(handlers, "wms:dl:week")
-            assert "y.mkv" not in week.edits[0][0] and JUVR in week.edits[0][0]
+            assert "y.mkv" not in week.edits[0][0] and SAMPLE in week.edits[0][0]
             empty = Event("/downloads nothing-like-this")
             await handlers.on_downloads(empty)
             assert "没有下载记录" in empty.replies[0][0]
@@ -273,20 +273,20 @@ class TestRemarks:
         return await inbot.nl_message(user, text)
 
     def _drive(self, rig):
-        media_files(rig.drive, ("a.mkv", JUVR, "c.mkv"))
+        media_files(rig.drive, ("a.mkv", SAMPLE, "c.mkv"))
 
     async def test_the_sentence_of_nl_4_makes_a_plan_without_the_name(self, rig):
         self._drive(rig)
         inbot, _handlers = await rig.boot()
         try:
             text, buttons = await self._sentence(
-                inbot, "把保存的视频下载，juvr00309 下过了")
-            assert "juvr00309" in text and JUVR not in text         # only as the exclusion
+                inbot, "把保存的视频下载，abcd00123 下过了")
+            assert "abcd00123" in text and SAMPLE not in text         # only as the exclusion
             assert "a.mkv" in text and "c.mkv" in text
             assert [b[0] for b in buttons_of({"buttons": buttons})] == [
                 "确认执行", "修改", "取消"]
             marked = await inbot.embedded.downloads(status=["marked"])
-            assert [r["name"] for r in marked] == [JUVR]
+            assert [r["name"] for r in marked] == [SAMPLE]
             (plan,) = await inbot.embedded.open_plans()
             assert plan["actions"] == 2
         finally:
@@ -297,14 +297,15 @@ class TestRemarks:
         inbot, _handlers = await rig.boot()
         try:
             text, _ = await self._sentence(inbot, "下载 /Media 里的视频")
-            assert JUVR in text
-            reply, buttons = await self._sentence(inbot, "juvr00309 下过了")
-            assert reply.startswith("已从计划 1 中去掉 juvr00309（1 个文件）")
-            assert JUVR not in reply.split("\n", 1)[1] and "a.mkv" in reply
+            assert SAMPLE in text
+            reply, buttons = await self._sentence(inbot, "abcd00123 下过了")
+            assert reply.startswith("已从计划 1 中去掉 abcd00123（1 个文件）")
+            assert SAMPLE not in reply.split("\n", 1)[1] and "a.mkv" in reply
             assert [b[0] for b in buttons_of({"buttons": buttons})] == ["确认执行", "修改", "取消"]
             (plan,) = await inbot.embedded.open_plans()
             assert plan["actions"] == 2                              # no new plan, same one
-            assert [r["name"] for r in await inbot.embedded.downloads(status=["marked"])] == [JUVR]
+            marked = await inbot.embedded.downloads(status=["marked"])
+            assert [r["name"] for r in marked] == [SAMPLE]
             # The buttons still belong to that plan.
             confirm = buttons_of({"buttons": buttons})[0][1].decode()
             assert confirm == "wms:nl:apply:1"
@@ -328,12 +329,12 @@ class TestRemarks:
         self._drive(rig)
         inbot, _handlers = await rig.boot()
         try:
-            reply, buttons = await self._sentence(inbot, "juvr00309 下过了")
-            assert reply == "记下了：juvr00309 已下载，之后不会再下" and buttons is None
+            reply, buttons = await self._sentence(inbot, "abcd00123 下过了")
+            assert reply == "记下了：abcd00123 已下载，之后不会再下" and buttons is None
             assert await inbot.embedded.open_plans() == []
             # The index is not loaded yet: the name itself is remembered, and works as a fragment.
             assert [r["name"] for r in await inbot.embedded.downloads(status=["marked"])] == [
-                "juvr00309"]
+                "abcd00123"]
             # A bare 「不要 X」 has nothing to act on, and says so.
             none, _ = await self._sentence(inbot, "不要 c.mkv")
             assert none == "没有可以去掉 c.mkv 的待执行计划。"
@@ -348,23 +349,23 @@ class TestRemarks:
             await self._sentence(inbot, "下载 /Media 里的视频")
             record = await inbot.embedded.load_proposal(1)
             await inbot.embedded.save_proposal({**record, "at": time.time() - 31 * 60}, 1)
-            reply, _ = await self._sentence(inbot, "juvr00309 下过了")
+            reply, _ = await self._sentence(inbot, "abcd00123 下过了")
             assert reply.startswith("记下了")
             (plan,) = await inbot.embedded.open_plans()
             assert plan["actions"] == 3                              # untouched
             await inbot.embedded.save_proposal({**record, "at": time.time()}, 1)
-            reply, _ = await self._sentence(inbot, "juvr00309 下过了", user=ADMIN + 1)
+            reply, _ = await self._sentence(inbot, "abcd00123 下过了", user=ADMIN + 1)
             assert reply.startswith("记下了")
             assert (await inbot.embedded.open_plans())[0]["actions"] == 3
         finally:
             await inbot.stop()
 
     async def test_the_last_file_out_of_a_plan_discards_it(self, rig):
-        media_files(rig.drive, (JUVR,))
+        media_files(rig.drive, (SAMPLE,))
         inbot, _handlers = await rig.boot()
         try:
             await self._sentence(inbot, "下载 /Media 里的视频")
-            reply, buttons = await self._sentence(inbot, "juvr00309 下过了")
+            reply, buttons = await self._sentence(inbot, "abcd00123 下过了")
             assert "已从计划 1 中去掉" in reply and "计划 1 里没有别的了，已丢弃。" in reply
             assert buttons is None and await inbot.embedded.open_plans() == []
         finally:

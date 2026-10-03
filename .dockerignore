@@ -29,6 +29,8 @@ requirements-dev.txt
 # documents and briefs, tests, deployment notes, CI, every env file, the real WMS config and token.
 .env*
 .cloudflared.env
+deploy/private.env*
+.gitleaks.private.toml
 config/wms.yaml
 config/rules.yaml
 wms-token.json
