@@ -27,10 +27,17 @@ from .errors import AuthError
 log = logging.getLogger(__name__)
 
 _SECRET_FIELDS = ("username", "password")
+# A captcha is minted for one action and stale for every other; the user agent
+# is derived. Neither belongs in a stored session.
+_TRANSIENT_FIELDS = ("captcha_token", "user_agent")
 
 
 def strip_credentials(data: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in data.items() if key not in _SECRET_FIELDS}
+    return {
+        key: value
+        for key, value in data.items()
+        if key not in _SECRET_FIELDS and key not in _TRANSIENT_FIELDS
+    }
 
 
 def write_token(path: Path, client: Any) -> None:
@@ -78,7 +85,7 @@ class StandaloneAuth:
         saved = read_token(self._token_path)
         if saved is None:
             return None
-        client = PikPakApi.from_dict(saved)
+        client = PikPakApi.from_dict(strip_credentials(saved))
         client.token_refresh_callback = self._persist
         return client
 

@@ -2416,6 +2416,34 @@ None. No schema change (`last_sync` meta gains an optional `failed` field).
 2. The captcha retry applies only to `events` and `download_links`; other calls raise `CaptchaError` on a refusal (a leaked token is not cleared for them). Widen `action=` per call if the NAS logs show other refusals.
 
 
+## Stage 3 · M9.5.1: no captcha in a stored PikPak session
+
+Brief: `docs/briefs/2026-10-04-wms-m9-5-1-persisted-captcha.md` (baseline `cbbc6b8`). Live evidence after deploying M9.5: the stored PikPak session in the bot database carried a non-empty `captcha_token`. `PikPakApi.to_dict()` copies the whole `__dict__` (including `captcha_token` and `user_agent`), `_persist` stored it (only username and password were stripped) and `_restore` → `from_dict` wrote it back. A captcha minted for one action (`GET:/drive/v1/files/<id>`, parked by the SDK's `get_download_url`) was persisted during a token refresh, so every restored client sent a stale `X-Captcha-Token`: events answered "Verification code is invalid", and after a restart the `_restore` probe (`get_quota_info`) failed the same way, so the user saw "your PikPak session has expired".
+
+### What was done
+
+- `tgmd/pikpak.py`: new `strip_transient` (drops `captcha_token` and `user_agent`) and `stored_session` (credentials and transient state out); `_persist` writes `stored_session(...)`.
+- `_restore` drops those keys from the saved dict **before** `from_dict`, so old records heal. After a successful probe, a record that held them is re-persisted clean once (a clean record is not rewritten). A probe failing with a captcha-type error (`verification code`, `captcha`) is retried once with `client.captcha_token = None`; both cases are logged at INFO, never the token.
+- `pikpak_wms/core/auth.py` (standalone token file): `strip_credentials` also drops the transient fields on write, and `_restore` strips them from an old file before `from_dict`.
+- Audited every other `to_dict` / `from_dict` / `kv_set_json` use for PikPak clients: `login_with_password` and the shared login go through `_persist`; the WMS provider inside the bot reuses the service's client and stores nothing itself.
+
+### Environment variables / migration
+
+None. Existing stored sessions are healed on the next restore.
+
+### Deploy steps (Cowork)
+
+1. Pull the image, restart `bot` only (never `proxy`).
+2. `docker compose exec -T bot wms events --raw --limit 5` must work without a new `/pikpak login`.
+3. `docker compose logs bot | grep "removed a captcha token"` shows the stored session was healed once.
+4. Rollback: image `cbbc6b8`.
+
+### Verification evidence
+
+- Tests: 1935 → 1944, ruff clean, gitleaks clean on the tracked tree. New `tests/test_pikpak_captcha_persist.py`: a captcha is persisted without; a record with one restores to `captcha_token is None` with a passing probe; the cleaned record is written back (a clean one is not); a captcha probe error is retried once (a second one, or any other error, is not retried further); unrelated fields untouched; the standalone token file in both directions; the real SDK still serialises the two field names.
+- **Not verified here**: the live NAS state (no NAS access); the real error text of a captcha refusal on the probe.
+
+
 ## Security · private values vault (option A)
 
 Brief: `docs/briefs/2026-10-04-wms-private-values-vault.md` (baseline `1b20121`). Repository stays public; this closes what a non-destructive change can. No history rewrite, force-push, visibility change, GHCR deletion, GitHub secret or NAS edit was done.

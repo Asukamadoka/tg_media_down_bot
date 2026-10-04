@@ -43,6 +43,11 @@ _POLL_INTERVAL = 5.0
 
 # Fields that must never reach the database.
 _SECRET_FIELDS = ("username", "password")
+# Per-request state the SDK parks on the client. A captcha is minted for one
+# action and is stale for every other, so a stored copy poisons each restored
+# client; ``user_agent`` is derived and rebuilt by the SDK.
+_TRANSIENT_FIELDS = ("captcha_token", "user_agent")
+_CAPTCHA_HINTS = ("verification code", "captcha")
 
 
 def user_token_key(user_id: int) -> str:
@@ -115,6 +120,21 @@ def strip_credentials(data: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in data.items() if key not in _SECRET_FIELDS}
 
 
+def strip_transient(data: dict[str, Any]) -> dict[str, Any]:
+    """Remove the captcha token and the derived user agent from a client dict."""
+    return {key: value for key, value in data.items() if key not in _TRANSIENT_FIELDS}
+
+
+def stored_session(data: dict[str, Any]) -> dict[str, Any]:
+    """What may be written to the database: no credentials, no captcha."""
+    return strip_transient(strip_credentials(data))
+
+
+def _is_captcha_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(hint in text for hint in _CAPTCHA_HINTS)
+
+
 class PikPakService:
     """Per-user PikPak clients, with the configured account as a fallback."""
 
@@ -150,7 +170,7 @@ class PikPakService:
         """Token refresh callback: keep refreshed tokens across restarts."""
         try:
             client.encode_token()
-            await self._db.kv_set_json(key, strip_credentials(client.to_dict()))
+            await self._db.kv_set_json(key, stored_session(client.to_dict()))
         except Exception:  # pragma: no cover - persistence is best effort
             log.exception("could not persist the PikPak session at %s", key)
 
@@ -161,11 +181,24 @@ class PikPakService:
             return None
         if not (saved.get("encoded_token") or saved.get("access_token")):
             return None
+        dirty = any(field in saved for field in _TRANSIENT_FIELDS)
+        # Records stored before M9.5.1 may carry a stale captcha: heal them.
         try:
-            client = PikPakApi.from_dict(saved)
+            client = PikPakApi.from_dict(strip_transient(saved))
             client.token_refresh_callback = self._persist
             client.token_refresh_callback_kwargs = {"key": key}
-            await client.get_quota_info()  # cheap probe, also refreshes if stale
+            try:
+                await client.get_quota_info()  # cheap probe, also refreshes if stale
+            except PikpakException as exc:
+                if not _is_captcha_error(exc):
+                    raise
+                log.info("probe of the stored PikPak session at %s hit a captcha error; "
+                         "retrying once without a captcha token", key)
+                client.captcha_token = None
+                await client.get_quota_info()
+            if dirty:
+                log.info("removed a captcha token from the stored PikPak session at %s", key)
+                await self._persist(client, key=key)
             return client
         except (PikpakException, ValueError, KeyError) as exc:
             log.info("stored PikPak session at %s is unusable: %s", key, exc)
