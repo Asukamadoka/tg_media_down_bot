@@ -112,10 +112,13 @@ async def receive_url(event, service: SubscriptionService, url: str) -> None:
     await event.reply(t("sub.validating"))
     outcome = await service.accept_url(url)
     log.info("subscription link from chat: %s -> %s", redact_url(url), outcome.kind)
-    await _report(event.reply, outcome)
+    await _report(event.reply, outcome,
+                  url=url if getattr(event, "is_private", False) else None)
 
 
-async def _report(reply, outcome: Outcome) -> None:
+async def _report(reply, outcome: Outcome, *, url: str | None = None) -> None:
+    """``url`` is echoed only after a successful switch, and only when the caller passes it
+    (the admin's private chat): the one place the URL may leave memory."""
     if outcome.kind == "nothing":
         await reply(t("sub.nothing"), parse_mode="html")
     elif outcome.kind == "rejected":
@@ -126,7 +129,10 @@ async def _report(reply, outcome: Outcome) -> None:
     elif outcome.kind == "failed":
         await reply(failure_text(outcome.code, outcome.result))
     else:
-        await reply(counts_text(outcome, "sub.switched"), parse_mode="html")
+        text = counts_text(outcome, "sub.switched")
+        if url and outcome.kind == "switched":
+            text += t("sub.switched.link", url=html.escape(url))
+        await reply(text, parse_mode="html")
 
 
 async def _rollback(reply, service: SubscriptionService) -> None:

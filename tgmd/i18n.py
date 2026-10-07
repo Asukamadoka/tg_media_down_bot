@@ -1288,6 +1288,7 @@ CATALOG: dict[str, dict[str, str]] = {
         "sub.staged.nofile": "\nThe bot cannot switch yet: SUB_PROVIDER_FILE is not set.",
         "sub.nothing": "Nothing is staged. Send /sub &lt;link&gt; first.",
         "sub.switched": "<b>Switched.</b> Nodes: {old} before, {new} now. Mix: {mix}.\n{names}",
+        "sub.switched.link": "\nNew link: <code>{url}</code>",
         "sub.switch_failed": "The switch failed ({reason}) and the old list was put back.",
         "sub.switch_failed.bad_restore": (
             "The switch failed ({reason}) and the old list did not verify "
@@ -2423,6 +2424,7 @@ CATALOG: dict[str, dict[str, str]] = {
         "sub.staged.nofile": "\n机器人暂时无法切换：未设置 SUB_PROVIDER_FILE。",
         "sub.nothing": "没有待切换的订阅，请先发送 /sub &lt;链接&gt;。",
         "sub.switched": "<b>已切换。</b>节点：原 {old} 个，现 {new} 个。协议：{mix}。\n{names}",
+        "sub.switched.link": "\n新链接：<code>{url}</code>",
         "sub.switch_failed": "切换失败（{reason}），已恢复原节点列表。",
         "sub.switch_failed.bad_restore": (
             "切换失败（{reason}），恢复后的旧列表也未通过验证，请手动检查 "

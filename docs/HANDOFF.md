@@ -2514,6 +2514,11 @@ Spec: `docs/wms/M9.6-subscription-revival.md` (baseline `395e806`, updated by `0
 - **Add the removed provider domain to the private gitleaks rules** (`~/.config/tg_media_down_bot/gitleaks.private.toml`, and the sops copy). It is gone from HEAD and from this note; git history still holds it.
 - Put the real `SUB_SENTINEL_REGEX`, `SUB_LOGIN_HINT`, `SUB_HOSTS` and the file path in the NAS's `.env` and the private values repo.
 
+### M9.6.1 · echo the new link
+
+- After a successful switch from `/sub <url>` or the armed message, the final report carries the new URL in a code span, only when the event is the admin's private chat; in a group the counts are sent without it. The URL comes from the in-memory call, never from a log or audit row. `/sub switch` (staged URL) does not echo it.
+- `pytest -q`: 2075 → 2076 passed (leak test now allows the URL in exactly that one reply; new private/group test). `ruff check .`, gitleaks (0 outside `.venv`) and `public_audit.py --fail-on-head` clean.
+
 ### Verification evidence
 
 - `pytest -q`: 1944 → 2075 passed (131 new in `tests/test_subscription.py`; `tests/test_traffic_nodes.py` and `tests/test_traffic.py` edited, see below). `ruff check .` clean. `gitleaks dir . --config .gitleaks.toml --redact`: 0 findings outside the local `.venv` (which holds this Mac's paths and is not part of the repository). `python scripts/public_audit.py --fail-on-head`: 0 findings in HEAD. `grep -rn` for the old provider literal: 0 hits in the working tree.

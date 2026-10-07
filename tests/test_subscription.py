@@ -902,7 +902,26 @@ class TestFlow:
         assert event.client.deleted == [(ADMIN, [event.id])]
         text = event.replies[-1][0]
         assert "已切换" in text and "原 4 个" in text and "现 5 个" in text
-        assert all(s not in str(event.replies) for s in SECRETS)
+        assert text.count(SECRETS[0]) == 1  # the private report is the one place it appears
+        assert all(SECRETS[0] not in r for r, _ in event.replies[:-1])
+        assert SECRETS[1] not in str(event.replies)
+
+    async def test_the_private_report_echoes_the_new_url_and_a_group_does_not(self, rig, caplog):
+        handlers = make_handlers(rig.service)
+        rig.pages[URL] = good_page()
+        with caplog.at_level(logging.DEBUG):
+            private = Event(f"/sub {URL}")
+            await handlers.handle_sub_command(private)
+        text, kwargs = private.replies[-1]
+        assert f"<code>{URL}</code>" in text and kwargs.get("parse_mode") == "html"
+        assert SECRETS[0] not in caplog.text
+        rig.pages[URL2] = good_page(6, "b")
+        group = Event(f"/sub {URL2}")
+        group.is_private = False
+        await handlers.handle_sub_command(group)
+        assert "已切换" in group.replies[-1][0] and "现 6 个" in group.replies[-1][0]
+        assert all(SECRETS[1] not in r for r, _ in group.replies)
+        assert SECRETS[1] not in caplog.text
 
     async def test_a_failed_delete_does_not_stop_the_flow(self, rig, caplog):
         handlers = make_handlers(rig.service)
@@ -996,6 +1015,7 @@ class TestRedaction:
     async def test_the_url_never_appears_anywhere_over_the_whole_flow(self, rig, caplog):
         handlers = make_handlers(rig.service)
         seen: list[str] = []
+        echoed = 0
         with caplog.at_level(logging.DEBUG):
             await rig.service.on_health(sick=True, alive=0, total=4)
             # a rejection, an unreachable host, a bad body, a good one, a failed verify
@@ -1004,7 +1024,12 @@ class TestRedaction:
                 rig.pages[URL] = page
                 event = Event(f"/sub {URL}")
                 await handlers.handle_sub_command(event)
-                seen += [t for t, _ in event.replies]
+                for text, _ in event.replies:
+                    if text.startswith("<b>已切换"):  # the one reply that may carry the URL
+                        assert f"<code>{URL}</code>" in text
+                        echoed += 1
+                    else:
+                        seen.append(text)
             rig.mihomo.reload_works = False
             rig.pages[URL2] = good_page(6, "b")
             event = Event(f"/sub {URL2}")
@@ -1032,6 +1057,7 @@ class TestRedaction:
         for secret in SECRETS:
             assert secret not in every
         assert "sub.example.invalid/…" in "\n".join(audit)  # the redacted form is what is kept
+        assert echoed == 1  # exactly one private reply carried the URL
 
     def test_a_staged_repr_hides_the_url(self):
         from tgmd.subscription.service import _Staged
