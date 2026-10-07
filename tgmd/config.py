@@ -284,6 +284,31 @@ class TrafficConfig:
     direct_test_urls: dict[str, str] = field(default_factory=dict)
     direct_auto_apply: bool = False
     direct_rules_file: str = "/mihomo-rules/direct-auto.txt"
+    sub_hosts: tuple[str, ...] = ()
+    """SUB_HOSTS: the proxy subscription's domains. Private, so empty by default; they are
+    classed ``proxy-sub`` and can never be put in the direct list."""
+
+
+@dataclass
+class SubscriptionConfig:
+    """Subscription revival (docs/wms/M9.6). Off unless ``SUB_REVIVAL_ENABLED=1``."""
+
+    enabled: bool = False
+    provider_file: str = ""
+    """SUB_PROVIDER_FILE: the file mihomo's ``main`` provider reads. Empty: the bot validates
+    a new subscription but cannot switch to it."""
+    check_hours: float = 6.0
+    refresh_hours: float = 12.0
+    sentinel_regex: str = ""
+    """SUB_SENTINEL_REGEX: names of the provider's "top up" pseudo-nodes. Empty: signal off."""
+    warn_days: float = 3.0
+    min_nodes: int = 3
+    fetch_ua: str = "clash.meta/1.19 mihomo"
+    allow_private: bool = False
+    verify_seconds: float = 120.0
+    verify_alive: int = 1
+    login_hint: str = ""
+    """SUB_LOGIN_HINT: shown verbatim in the checklist, never logged."""
 
 
 @dataclass
@@ -296,6 +321,7 @@ class Config:
     http: HttpConfig = field(default_factory=HttpConfig)
     wms: WmsSettings = field(default_factory=WmsSettings)
     traffic: TrafficConfig = field(default_factory=TrafficConfig)
+    subscription: SubscriptionConfig = field(default_factory=SubscriptionConfig)
     log_level: str = "INFO"
     language: str = i18n.DEFAULT_LANGUAGE
     """Which catalogue :func:`tgmd.i18n.t` reads. Never affects stored values."""
@@ -772,6 +798,24 @@ def load_config(path: Path | None = None) -> Config:
             if host.strip() and url.strip()},
         direct_auto_apply=parse_bool(os.environ.get("DIRECT_AUTO_APPLY"), False),
         direct_rules_file=_env_str("DIRECT_RULES_FILE", TrafficConfig.direct_rules_file),
+        sub_hosts=tuple(
+            host.strip().lower().lstrip(".") for host in _env_str("SUB_HOSTS", "").split(",")
+            if host.strip()),
+    )
+
+    subscription = SubscriptionConfig(
+        enabled=parse_bool(os.environ.get("SUB_REVIVAL_ENABLED"), False),
+        provider_file=_env_str("SUB_PROVIDER_FILE", ""),
+        check_hours=max(0.0, _env_float("SUB_CHECK_HOURS", 6.0)),
+        refresh_hours=max(0.0, _env_float("SUB_REFRESH_HOURS", 12.0)),
+        sentinel_regex=_env_str("SUB_SENTINEL_REGEX", ""),
+        warn_days=_env_float("SUB_WARN_DAYS", 3.0),
+        min_nodes=max(1, _env_int("SUB_MIN_NODES", 3)),
+        fetch_ua=_env_str("SUB_FETCH_UA", SubscriptionConfig.fetch_ua),
+        allow_private=parse_bool(os.environ.get("SUB_ALLOW_PRIVATE"), False),
+        verify_seconds=max(1.0, _env_float("SUB_VERIFY_SECONDS", 120.0)),
+        verify_alive=max(0, _env_int("SUB_VERIFY_ALIVE", 1)),
+        login_hint=_env_str("SUB_LOGIN_HINT", ""),
     )
 
     return Config(
@@ -783,6 +827,7 @@ def load_config(path: Path | None = None) -> Config:
         http=http,
         wms=wms,
         traffic=traffic,
+        subscription=subscription,
         log_level=_env_str("LOG_LEVEL", str(_get(data, "log_level", default="INFO"))).upper(),
         # POSIX LANG is deliberately not consulted: images set it to C.UTF-8
         # for unrelated reasons, and that is not a UI decision.

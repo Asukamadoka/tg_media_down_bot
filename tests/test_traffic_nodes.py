@@ -406,7 +406,8 @@ class TestWriteWhitelist:
         ("PUT", "/configs"), ("PUT", "/configs?force=true"), ("PATCH", "/configs"),
         ("POST", "/restart"), ("POST", "/upgrade"), ("DELETE", "/connections"),
         ("PUT", "/proxies/AUTO-LATENCY"), ("PUT", "/proxies/TG"), ("PUT", "/proxies/DIRECT"),
-        ("PUT", "/providers/proxies/main"), ("PUT", "/providers/rules/other"),
+        ("PUT", "/providers/proxies/other"), ("PUT", "/providers/proxies/main/healthcheck"),
+        ("PUT", "/providers/rules/other"),
         ("DELETE", "/proxies/FAST"), ("PUT", "/proxies/FAST/../../configs"),
         ("PUT", "/proxies/FAST/extra"), ("GET", "/proxies/FAST"),
     ])
@@ -647,11 +648,16 @@ def head(ms, *, tls=True, ok=True, error=""):
 class TestValidator:
     @pytest.mark.parametrize("host", [
         "telegram.org", "web.telegram.org", "t.me", "cdn.telegra.ph", "149.154.167.50",
-        "bujidao.cc", "sub.bujidao.cc", "api.bujidao.com", "nas.local", "192.168.0.5",
+        "nas.local", "192.168.0.5",
         "10.0.0.1", "localhost", "", "no spaces.com", "a.com/path", "x",
     ])
     def test_these_are_never_routed_direct(self, host):
         assert validate_host(host) != ""
+
+    @pytest.mark.parametrize("host", ["sub.example.invalid", "api.sub.example.invalid"])
+    def test_the_subscription_host_is_never_routed_direct(self, host):
+        assert validate_host(host, ("sub.example.invalid",)) == "the subscription host"
+        assert validate_host(host) == ""  # no domain is built in
 
     @pytest.mark.parametrize("host", ["registry.ollama.ai", "github.com", "pypi.org",
                                       "files.pythonhosted.org", "a.r2.cloudflarestorage.com"])
@@ -717,7 +723,7 @@ class TestDirectRouting:
         store.add_hosts([((key, "big.example.com", "other", "proxy", ""), 80 * MB),
                          ((key, "small.example.com", "other", "proxy", ""), 10 * MB),
                          ((key, "web.telegram.org", "telegram", "proxy", ""), 900 * MB),
-                         ((key, "api.bujidao.cc", "proxy-sub", "proxy", ""), 90 * MB),
+                         ((key, "api.sub.example.invalid", "proxy-sub", "proxy", ""), 90 * MB),
                          ((key, "direct.example.com", "other", "direct", ""), 90 * MB)])
         assert d.routing.candidates() == ["big.example.com", "pypi.org"]
 
@@ -768,9 +774,9 @@ class TestDirectRouting:
         states = {r["host"]: r["state"] for r in store.direct_hosts()}
         assert states["b.example.org"] != "applied"
 
-    async def test_telegram_and_bujidao_can_never_be_applied(self, store, tmp_path):
-        d = make_direct(store, tmp_path)
-        for host in ("web.telegram.org", "bujidao.cc", "149.154.167.50"):
+    async def test_telegram_and_the_subscription_host_can_never_be_applied(self, store, tmp_path):
+        d = make_direct(store, tmp_path, sub_hosts=("example.invalid",))
+        for host in ("web.telegram.org", "sub.example.invalid", "149.154.167.50"):
             with pytest.raises(ValueError):
                 await d.routing.apply(host)
         assert not d.rules.exists() and d.controller.reloads == 0

@@ -128,7 +128,10 @@ class TestClassify:
         assert classify(conn("3", "", ip="192.168.0.5", chains=["PROXY", JP_NODE])).leak is True
 
     def test_the_subscription_host(self):
-        assert classify(conn("1", "bujidao.cc")).category == "proxy-sub"
+        assert classify(conn("1", "sub.example.invalid"),
+                        sub_hosts=("example.invalid",)).category == "proxy-sub"
+        # No domain is built in: without SUB_HOSTS it is an ordinary host.
+        assert classify(conn("1", "sub.example.invalid")).category == "other"
 
     def test_everything_else(self):
         info = classify(conn("1", "example.com", chains=[JP_NODE, "PROXY"]))

@@ -2,7 +2,8 @@
 
 Reads are free. Writes are a strict whitelist (docs/wms/M9.1 §A.4) and nothing
 else: no ``PUT /configs``, no restarts, no group other than the four the bot
-owns, no provider other than ``direct-auto``. Every write goes through
+owns, no rule provider other than ``direct-auto``, and one node provider write: the
+re-read of ``main`` after the bot replaced its file (docs/wms/M9.6 §E). Every write goes through
 :meth:`MihomoClient._write`, which refuses anything not on the list *before*
 a request is made.
 """
@@ -29,6 +30,7 @@ _ALLOWED_WRITES = (
     ("PUT", re.compile(r"^/proxies/(" + "|".join(SELECT_GROUPS) + r")$")),
     ("DELETE", re.compile(r"^/connections/[A-Za-z0-9-]+$")),
     ("PUT", re.compile(r"^/providers/rules/" + RULE_PROVIDER + r"$")),
+    ("PUT", re.compile(r"^/providers/proxies/" + NODE_PROVIDER + r"$")),
 )
 
 
@@ -124,6 +126,10 @@ class MihomoClient:
     def reload_rules(self) -> None:
         """Re-read the ``direct-auto`` rule provider's file."""
         self._write("PUT", f"/providers/rules/{RULE_PROVIDER}")
+
+    def reload_nodes(self) -> None:
+        """Re-read the ``main`` node provider's file (M9.6: the bot owns that file)."""
+        self._write("PUT", f"/providers/proxies/{NODE_PROVIDER}")
 
     def close_telegram_connections(self) -> int:
         """Close every live connection whose chain goes through ``TG``, so

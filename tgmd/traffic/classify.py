@@ -47,7 +47,6 @@ TELEGRAM_DOMAINS = (
 )
 PIKPAK_DOMAINS = ("mypikpak.com", "mypikpak.net")
 MODEL_DOMAINS = ("ollama.com", "ollama.ai", "r2.cloudflarestorage.com")
-SUBSCRIPTION_DOMAINS = ("bujidao.cc",)
 DEFAULT_MODEL_PORT = 11434
 
 _TG_GROUP = re.compile(r"^TG(-.*)?$", re.IGNORECASE)
@@ -109,9 +108,11 @@ def parse_model_host(text: str) -> tuple[str, int] | None:
         return None
 
 
-def classify(connection: dict, model_host: tuple[str, int] | None = None) -> Classified:
+def classify(connection: dict, model_host: tuple[str, int] | None = None,
+             sub_hosts: tuple[str, ...] = ()) -> Classified:
     """Outbound, category and the facts alerts need, for one connection. ``model_host`` is
-    the LAN model host's ``(address, port)``, when the owner has one."""
+    the LAN model host's ``(address, port)``, when the owner has one; ``sub_hosts`` are the
+    proxy subscription's domains (``SUB_HOSTS``, private, empty by default)."""
     metadata = connection.get("metadata") or {}
     chains = [str(name) for name in (connection.get("chains") or [])]
     host = str(metadata.get("host") or "").strip().lower()
@@ -146,7 +147,7 @@ def classify(connection: dict, model_host: tuple[str, int] | None = None) -> Cla
         category = "model"
     elif address is not None and (address.is_private or address.is_loopback):
         category = "lan"
-    elif _in_domains(host, SUBSCRIPTION_DOMAINS):
+    elif _in_domains(host, sub_hosts):
         category = "proxy-sub"
     else:
         category = "other"

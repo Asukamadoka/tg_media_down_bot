@@ -84,7 +84,7 @@ class TrafficService:
         self._client = client or MihomoClient(config.mihomo_api)
         self._clock = clock
         self._tz = ZoneInfo(config.timezone)
-        self._meter = Meter(parse_model_host(config.model_host))
+        self._meter = Meter(parse_model_host(config.model_host), config.sub_hosts)
         self._spend = Spend()
         self._hours: dict[HourKey, list[float]] = {}
         self._host_total: dict[HostKey, int] = {}

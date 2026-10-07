@@ -44,8 +44,9 @@ MB = 1024 * 1024
 Notify = Callable[..., Awaitable[None]]
 
 
-def validate_host(host: str) -> str:
-    """Why ``host`` may not be routed direct, or "" when it may."""
+def validate_host(host: str, sub_hosts: tuple[str, ...] = ()) -> str:
+    """Why ``host`` may not be routed direct, or "" when it may. ``sub_hosts`` are the
+    subscription's domains (``SUB_HOSTS``): its own rule routes them, never this list."""
     host = host.strip().lower().rstrip(".")
     if not host or "." not in host or " " in host or "/" in host:
         return "not a domain name"
@@ -59,7 +60,7 @@ def validate_host(host: str) -> str:
         return "an IP address, not a domain"
     if any(host == d or host.endswith("." + d) for d in TELEGRAM_DOMAINS):
         return "Telegram"
-    if "bujidao" in host.split("."):
+    if any(host == d or host.endswith("." + d) for d in sub_hosts):
         return "the subscription host"
     if host.endswith((".local", ".lan", ".internal", ".home.arpa", ".localhost")):
         return "LAN"
@@ -135,7 +136,7 @@ class DirectRouting:
     def write_file(self, hosts: list[str]) -> bool:
         """Write the rule-set atomically (temp file, then rename). True if it changed."""
         for host in hosts:
-            if (why := validate_host(host)):
+            if (why := validate_host(host, self._config.sub_hosts)):
                 raise ValueError(f"{host}: {why}")
         path = Path(self._config.direct_rules_file)
         body = "".join(f"+.{host}\n" for host in sorted(set(hosts)))
@@ -186,7 +187,7 @@ class DirectRouting:
         out: list[str] = []
         for host in [*heavy, *self._config.direct_probe_hosts]:
             host = host.strip().lower()
-            if host in out or host in skip or validate_host(host):
+            if host in out or host in skip or validate_host(host, self._config.sub_hosts):
                 continue
             out.append(host)
         return out
@@ -195,7 +196,7 @@ class DirectRouting:
 
     def check(self, host: str) -> Verdict:
         """Blocking. Test ``host`` direct and through the proxy's current node."""
-        if (why := validate_host(host)):
+        if (why := validate_host(host, self._config.sub_hosts)):
             return Verdict(host, False, reason=why)
         url = self._config.direct_test_urls.get(host)
         proxy_node = self._client.now("AUTO-LATENCY")
@@ -257,7 +258,7 @@ class DirectRouting:
 
     async def apply(self, host: str) -> None:
         """Route ``host`` direct (``设为直连``)."""
-        if (why := validate_host(host)):
+        if (why := validate_host(host, self._config.sub_hosts)):
             raise ValueError(f"{host}: {why}")
         previous = next((r["state"] for r in self._store.direct_hosts() if r["host"] == host),
                         "candidate")

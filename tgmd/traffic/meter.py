@@ -49,8 +49,10 @@ class Step:
 class Meter:
     """Delta accounting over successive ``/connections`` snapshots."""
 
-    def __init__(self, model_host: tuple[str, int] | None = None) -> None:
+    def __init__(self, model_host: tuple[str, int] | None = None,
+                 sub_hosts: tuple[str, ...] = ()) -> None:
         self._model_host = model_host
+        self._sub_hosts = sub_hosts
         self._seen: dict[str, tuple[int, int]] = {}
         self._totals: tuple[int, int] | None = None
         self._warned_reset = False
@@ -96,7 +98,7 @@ class Meter:
                 delta_up, delta_down = up - previous[0], down - previous[1]
                 if delta_up < 0 or delta_down < 0:
                     delta_up, delta_down = up, down
-            info = classify(connection, self._model_host)
+            info = classify(connection, self._model_host, self._sub_hosts)
             step.live[conn_id] = info
             if delta_up or delta_down:
                 step.deltas.append(Delta(conn_id, info, delta_up, delta_down, up + down))

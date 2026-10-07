@@ -64,6 +64,28 @@ CREATE TABLE IF NOT EXISTS direct_keys (
     created_at  REAL NOT NULL,
     PRIMARY KEY (account_id, dc_id, egress)
 );
+
+-- M9.6 (tgmd/subscription): one row per revival case. Never holds a URL.
+CREATE TABLE IF NOT EXISTS sub_case (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    state       TEXT NOT NULL,
+    signals     TEXT NOT NULL DEFAULT '[]',
+    meta        TEXT NOT NULL DEFAULT '{}',
+    opened_at   REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    reminders   INTEGER NOT NULL DEFAULT 0,
+    remind_at   REAL,
+    armed_until REAL,
+    last_error  TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS sub_audit (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    at       REAL NOT NULL,
+    case_id  INTEGER,
+    action   TEXT NOT NULL,
+    detail   TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -295,3 +317,49 @@ class Database:
         secret = secrets.token_urlsafe(32)
         await self.kv_set(key, secret)
         return secret
+
+    # ------------------------------------------------------ subscription cases
+
+    async def sub_case_insert(self, state: str, signals: list[str], now: float,
+                              remind_at: float | None) -> int:
+        return await self._write(
+            "INSERT INTO sub_case (state, signals, opened_at, updated_at, remind_at) "
+            "VALUES (?, ?, ?, ?, ?)", (state, json.dumps(signals), now, now, remind_at))
+
+    async def sub_case_update(self, case_id: int, now: float, **fields: Any) -> None:
+        """Set ``fields`` (column names; ``signals`` and ``meta`` are JSON-encoded)."""
+        allowed = {"state", "signals", "meta", "reminders", "remind_at", "armed_until",
+                   "last_error"}
+        if not fields or not set(fields) <= allowed:
+            raise ValueError("bad sub_case fields")
+        values = [json.dumps(v) if k in ("signals", "meta") else v for k, v in fields.items()]
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        await self._write(f"UPDATE sub_case SET {sets}, updated_at = ? WHERE id = ?",
+                          (*values, now, case_id))
+
+    async def sub_case_open(self) -> dict[str, Any] | None:
+        """The one case that is not finished, newest first."""
+        rows = await self._query(
+            "SELECT * FROM sub_case WHERE state NOT IN ('done', 'failed') "
+            "ORDER BY id DESC LIMIT 1")
+        return _sub_case(rows[0]) if rows else None
+
+    async def sub_case_last(self) -> dict[str, Any] | None:
+        rows = await self._query("SELECT * FROM sub_case ORDER BY id DESC LIMIT 1")
+        return _sub_case(rows[0]) if rows else None
+
+    async def sub_audit_add(self, case_id: int | None, action: str, detail: str,
+                            now: float) -> None:
+        await self._write("INSERT INTO sub_audit (at, case_id, action, detail) VALUES (?,?,?,?)",
+                          (now, case_id, action, detail))
+
+    async def sub_audit_rows(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = await self._query("SELECT * FROM sub_audit ORDER BY id DESC LIMIT ?", (limit,))
+        return [dict(row) for row in rows]
+
+
+def _sub_case(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    data["signals"] = json.loads(data["signals"] or "[]")
+    data["meta"] = json.loads(data["meta"] or "{}")
+    return data

@@ -13,7 +13,7 @@ Facts measured on the NAS on 2026-10-02:
 - **Rules:**
   - LAN goes DIRECT;
   - `mypikpak.com` and `mypikpak.net` go DIRECT, covering login (`user.`), API (`api-drive.`) and downloads (`dl-*.`);
-  - `bujidao.cc` (the subscription) goes DIRECT;
+  - the subscription host (`SUB_HOSTS`) (the subscription) goes DIRECT;
   - Telegram domains and CIDRs go to group `TG`, a fallback over `TG-OTHER` (Canada/England, 0.07–0.09 元/G) and `TG-TOKYO` (0.01–0.02 元/G);
   - everything else is `MATCH,PROXY`, a url-test group.
 - **Proxy logs, last 96 h:**
@@ -38,7 +38,7 @@ So the traffic that costs money is Telegram media (download and upload) plus any
      - `pikpak`: host ends with `mypikpak.com` or `mypikpak.net`;
      - `model`: host is `ollama.com`, `ollama.ai` or `*.r2.cloudflarestorage.com`, or the destination is the Mac model host `<MODEL_HOST>:11434`;
      - `lan`: RFC1918 or loopback;
-     - `proxy-sub`: `bujidao.cc`;
+     - `proxy-sub`: the subscription host (`SUB_HOSTS`);
      - `other`.
    - **direction:** upload and download are kept apart.
 3. **Price.** Parse `(\d+(?:\.\d+)?)\s*元\s*/\s*G` from the node name.
@@ -126,7 +126,7 @@ Already applied on the NAS on 2026-10-02 (proxy config backups `config.yaml.bak8
 
 - the subscription URL was replaced;
 - provider `main` got `proxy: DIRECT`;
-- rule `DOMAIN-SUFFIX,bujidao.cc,DIRECT` was added before `MATCH`;
+- rule `DOMAIN-SUFFIX,the subscription host,DIRECT` was added before `MATCH`;
 - `PROXY` got `exclude-filter: '充值|分割线|群 |官网|失联|0[.]10元'`.
 
 After merge:

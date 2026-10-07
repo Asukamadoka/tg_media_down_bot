@@ -1989,7 +1989,7 @@ Spec: `docs/wms/M9.1-nodes-direct-first-pikpak-speed.md` (baseline `82c6ee1`). S
 
 **B · Direct-first routing** (`tgmd/traffic/direct.py`)
 
-- Candidates: hosts that moved more than `DIRECT_CANDIDATE_MB` (50) through the proxy in the last 24 h (from `traffic_host_day`), plus `DIRECT_PROBE_HOSTS`. Never Telegram domains/CIDRs, `bujidao`, LAN or IP addresses (`validate_host`; also enforced when writing the file and by `apply`).
+- Candidates: hosts that moved more than `DIRECT_CANDIDATE_MB` (50) through the proxy in the last 24 h (from `traffic_host_day`), plus `DIRECT_PROBE_HOSTS`. Never Telegram domains/CIDRs, the subscription host, LAN or IP addresses (`validate_host`; also enforced when writing the file and by `apply`).
 - Test: through the probe listener twice (`PROBE=DIRECT`, then `PROBE=<AUTO-LATENCY's current node>`): TCP + TLS with a verified certificate + `HEAD`; 2xx–4xx is reachable. Throughput only when `DIRECT_TEST_URLS` has a URL for the host. Direct works when TLS is valid, nothing reset or timed out, latency ≤ 3× the proxy's and, when measured, throughput ≥ 70 % of the proxy's or 2 MiB/s.
 - Apply: the bot writes `DIRECT_RULES_FILE` (default `/mihomo-rules/direct-auto.txt`; one `+.host` per line, so subdomains match) with a temp file and `os.replace`, then calls `PUT /providers/rules/direct-auto`. The file is rewritten from the stored state at start.
 - `/proxy` → `直连检测` runs the tests and lists them with `设为直连` / `保持代理` (and `恢复代理` for hosts already direct). `DIRECT_AUTO_APPLY=true` (default false) routes hosts that pass without asking and notes it. Applied hosts are re-tested weekly; if direct breaks, the owner gets one alert with a `恢复代理` button. Discovery runs once a day (only does anything with `DIRECT_AUTO_APPLY`).
@@ -2076,7 +2076,7 @@ rules:
   - IN-NAME,probe,PROBE               # 1. first of all
   # ... the existing LAN rules (DIRECT) ...
   - RULE-SET,direct-auto,DIRECT       # 2. after the LAN rules, before Telegram
-  # ... the existing Telegram rules (-> TG), PikPak DIRECT, bujidao.cc DIRECT ...
+  # ... the existing Telegram rules (-> TG), PikPak DIRECT, the subscription host DIRECT ...
   - MATCH,PROXY                       # last, as today
 ```
 
@@ -2119,7 +2119,7 @@ Found on the NAS (mihomo v1.19.31); tests 1715 → 1722, ruff clean.
 2. **Browser User-Agent** on every request `UrllibNet` makes (download, upload, and the HEAD of the direct tests): `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36`. speed.cloudflare.com answers `Python-urllib` with 403 / error 1010.
 3. **CLI**, run inside the container, text by default, `--json` optional:
    - `python -m tgmd.traffic probe [--apply] [--json]` runs one probe exactly like `立即测速`, saves the results to `proxy_node`, prints node / latency / down and up Mbps / price / alive (skipped nodes with the reason) and the MB used. It points `FAST` at the best node only with `--apply`.
-   - `python -m tgmd.traffic direct-test HOST [HOST...] [--json]` runs the direct-vs-proxy test and prints a verdict per host. It never writes the rules file, reloads the provider or stores a verdict (it only moves `PROBE`, and puts it back on `DIRECT`). Telegram, bujidao, LAN and IPs are refused as in the bot.
+   - `python -m tgmd.traffic direct-test HOST [HOST...] [--json]` runs the direct-vs-proxy test and prints a verdict per host. It never writes the rules file, reloads the provider or stores a verdict (it only moves `PROBE`, and puts it back on `DIRECT`). Telegram, the subscription host, LAN and IPs are refused as in the bot.
 4. **After deploying**: the nodes the first probe stored as dead are overwritten by the next probe; run `python -m tgmd.traffic probe` (or `/proxy` → `立即测速`) once to refresh them, and note it spends the probe's bytes (≤ 150 MB).
 
 ## Stage 3 · M9.2: download log, skip what is on the NAS, files in parallel, per-file cancel, NL exclusions, probe confirm
