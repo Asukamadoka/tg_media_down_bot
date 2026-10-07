@@ -75,7 +75,7 @@ IGNORE_VALUE_RE = re.compile(
     r"^(?:10\.0\.0\.\d+|192\.168\.0\.\d+|172\.16\.0\.\d+|127\.|0\.0\.0\.0|"
     r"(?:nas|name|host|server|mac|example|model|my-nas)\.local|/volume9/|"
     r"-100(?:1234567890|9876543210|9999999999|1111111111|0000000000)|"
-    r"123456789:AA|1234567\d*:AA|smb://<NAS_IP>//(?:<[^>]+>|10\.0\.0\.\d+|nas|nas-host|host|server)/)")
+    r"123456789:AA|1234567\d*:AA|smb://…|smb://(?:<[^>]+>|10\.0\.0\.\d+|nas|nas-host|host|server)/)")
 FAKE_NUMBER = re.compile(r"(?:1234567890?|9876543210?|0123456789|(\d)\1{5,})")
 SKIP_PATHS = re.compile(
     r"(?:^|/)(?:\.git/|__pycache__/|.*\.pyc$|.*\.(?:png|jpg|ico|woff2?)$|"

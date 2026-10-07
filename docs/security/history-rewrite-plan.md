@@ -1,6 +1,16 @@
-# Plan: rewriting the public history (for Saki to decide; nothing here has been run)
+# Plan: rewriting the public history
 
-Status: **prepared, not executed.** The audit (`2026-10-03-public-audit.md`) found no credential in
+**Executed 2026-10-07 with Saki's yes.** `git filter-repo --replace-text` over every branch (`base` and
+the production branch) with the replace-text file kept encrypted in the private store, then
+`git push --force-with-lease`. Verified before the push: `gitleaks git --log-opts=--all` with this
+repo's rules and with the private value rules, `pytest -q` (1944) and `ruff check .`. After the push:
+`scripts/public_audit.py` finds nothing in history or HEAD (`2026-10-07-public-audit.md`). Old commit
+ids map to new ones in `commit-map-2026-10-07.md`. Still outside this repo's reach: GitHub's cached
+views of unreachable commits (support request), and any fork or clone made before the rewrite.
+
+The text below is the plan as it was prepared.
+
+Status (2026-10-03): **prepared, not executed.** The audit (`2026-10-03-public-audit.md`) found no credential in
 history: gitleaks' default rules report four false positives (variable names and an invented hash in
 tests), and the project's own rules find addresses, a chat id, share paths and the NAS's make, in
 the commits listed there. HEAD has been scrubbed; history has not been touched. Rewriting is only
