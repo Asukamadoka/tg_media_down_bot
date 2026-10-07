@@ -46,6 +46,7 @@ select = [
 "tgmd/traffic/pricing.py" = ["RUF001", "RUF002"]
 "tests/test_traffic.py" = ["RUF001", "RUF002"]
 "tests/test_traffic_gate.py" = ["RUF001", "RUF002"]
+"tests/test_subscription.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_traffic_nodes.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_fetch_links.py" = ["RUF001", "RUF002", "RUF003"]
 # Asserts on Chinese output, full-width punctuation included.

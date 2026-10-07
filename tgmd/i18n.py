@@ -1233,6 +1233,113 @@ CATALOG: dict[str, dict[str, str]] = {
             "nodes alive. Renew it, or send the new subscription to Cowork."
         ),
         "nodes.health.recovered": "The proxy subscription is back: {alive}/{total} nodes alive.",
+        "nodes.health.bad.revival": (
+            "The proxy subscription may have failed (out of balance or expired): "
+            "{alive}/{total} nodes alive. A renewal checklist follows; /sub "
+            "shows the state."
+        ),
+        "sub.off": "Subscription revival is off (SUB_REVIVAL_ENABLED=0).",
+        "sub.signal.fetch_dead": "the subscription link no longer answers (401/403/404)",
+        "sub.signal.nodes_dead": "most nodes have been dead for 10 minutes ({alive}/{total} alive)",
+        "sub.signal.sentinel": "the provider's top-up notice node is in the list",
+        "sub.signal.nodes_shrunk": "the real node count dropped ({real}, was {healthy})",
+        "sub.signal.userinfo_expiry": (
+            "the subscription info says it expires soon or is nearly used "
+            "up"
+        ),
+        "sub.signal.manual": "started by hand",
+        "sub.case.dead": "<b>The proxy subscription looks dead.</b>",
+        "sub.case.warning": "<b>The proxy subscription may be running out.</b>",
+        "sub.case.seen": "Seen: {signals}.",
+        "sub.case.steps": (
+            "Steps (you do these by hand; the bot never touches the mailbox "
+            "or the provider site):\n1. Open the provider's login page{hint}.\n"
+            "2. Choose e-mail login (the mailbox on file; see your private "
+            "note).\n3. Open the newest login mail.\n"
+            "4. Check the balance (-9 or lower means it is expiring).\n"
+            "5. Press the account-deletion button (the provider's renew button).\n"
+            "6. Log in again; the balance should now be 0.\n"
+            "7. Open the \"subscription\" section.\n8. Pick the generic subscription.\n"
+            "9. Copy the link and send it here (or press the button first)."
+        ),
+        "sub.btn.got": "I have the new link",
+        "sub.btn.later": "Remind me in 6 hours",
+        "sub.btn.skip": "Not this time",
+        "sub.armed": (
+            "Send the new subscription link now (it is taken for 10 minutes "
+            "and the message is deleted)."
+        ),
+        "sub.later": "I will remind you in 6 hours.",
+        "sub.skipped": "Left alone. You will not be reminded again until it clears and returns.",
+        "sub.reminder": (
+            "Reminder {number}/3: the subscription is still failing ({signals}). "
+            "Use /sub when you have the new link."
+        ),
+        "sub.recovered": (
+            "The proxy subscription is back ({alive}/{total} nodes alive); "
+            "the case is closed."
+        ),
+        "sub.validating": "Checking the subscription…",
+        "sub.usage": "Send /sub &lt;link&gt;, /sub switch or /sub rollback.",
+        "sub.staged": (
+            "<b>New subscription is valid.</b>\nNodes: {old} now, {new} new. "
+            "Mix: {mix}.\n{names}"
+        ),
+        "sub.staged.nofile": "\nThe bot cannot switch yet: SUB_PROVIDER_FILE is not set.",
+        "sub.nothing": "Nothing is staged. Send /sub &lt;link&gt; first.",
+        "sub.switched": "<b>Switched.</b> Nodes: {old} before, {new} now. Mix: {mix}.\n{names}",
+        "sub.switch_failed": "The switch failed ({reason}) and the old list was put back.",
+        "sub.switch_failed.bad_restore": (
+            "The switch failed ({reason}) and the old list did not verify "
+            "either. Check mihomo by hand."
+        ),
+        "sub.switch_failed.no_backup": (
+            "The switch failed ({reason}) and there was no backup to restore. "
+            "Check mihomo by hand."
+        ),
+        "sub.switch_failed.interrupted": (
+            "A switch was interrupted by a restart; the old list was restored "
+            "where needed."
+        ),
+        "sub.refresh_failed": "The scheduled subscription refresh failed ({reason}).",
+        "sub.refreshed": (
+            "The subscription refreshed and the node count changed a lot: "
+            "{old} to {new}."
+        ),
+        "sub.rollback.done": "Rolled back to the newest backup.",
+        "sub.rollback.failed": "Rollback failed ({reason}).",
+        "sub.status": (
+            "<b>Subscription</b>\nNodes: {real} real of {total}\n"
+            "Last refresh: {refresh}\nLast update by mihomo: {updated}\n"
+            "Case: {case}\nBackups: {backups}\nSwitching: {switching}"
+        ),
+        "sub.never": "never",
+        "sub.none": "none",
+        "sub.yes": "available",
+        "sub.no": "off (SUB_PROVIDER_FILE not set)",
+        "sub.reject.url_long": "The link is too long.",
+        "sub.reject.url_invalid": "That is not a usable link.",
+        "sub.reject.url_scheme": "Only http and https links are accepted.",
+        "sub.reject.url_userinfo": "Links with a user name or password in them are refused.",
+        "sub.reject.url_unresolved": "The host does not resolve.",
+        "sub.reject.url_private": "The host resolves to a private address; refused.",
+        "sub.reject.not_direct": (
+            "The subscription host would go through a node. Add the host "
+            "to the direct list first."
+        ),
+        "sub.reject.fetch": "Could not download it ({detail}).",
+        "sub.reject.status": "The server answered HTTP {detail}.",
+        "sub.reject.format": "Unknown format.",
+        "sub.reject.bad_node": "A node entry is malformed.",
+        "sub.reject.too_many": "Too many nodes ({detail}).",
+        "sub.reject.forbidden_type": "The list has a {detail} entry.",
+        "sub.reject.dup_names": "Node names are not unique.",
+        "sub.reject.bad_type": "A node has an unsupported type ({detail}).",
+        "sub.reject.bad_server": "A node has no server.",
+        "sub.reject.bad_port": "A node has a bad port.",
+        "sub.reject.too_few": "Too few real nodes ({detail}).",
+        "sub.reject.same": "Same as the current subscription; nothing to switch.",
+        "sub.reject.no_file": "The bot cannot switch: SUB_PROVIDER_FILE is not set.",
         "nodes.busy": "A Telegram upload is finishing; try again in a moment.",
         "proxy.title": "Proxy nodes",
         "proxy.group.proxy": "Browsing (PROXY)",
@@ -2277,6 +2384,87 @@ CATALOG: dict[str, dict[str, str]] = {
             "请续费或把新订阅发给 Cowork 更换。"
         ),
         "nodes.health.recovered": "代理订阅已恢复：存活 {alive}/{total} 个节点。",
+        "nodes.health.bad.revival": (
+            "代理订阅可能失效（余额不足或已过期）：存活 {alive}/{total} 个节点。"
+            "下面是续费清单，/sub 可查看状态。"
+        ),
+        "sub.off": "订阅复活未启用（SUB_REVIVAL_ENABLED=0）。",
+        "sub.signal.fetch_dead": "订阅链接已不再响应（401/403/404）",
+        "sub.signal.nodes_dead": "多数节点已连续 10 分钟不可用（存活 {alive}/{total}）",
+        "sub.signal.sentinel": "节点列表里出现了服务商的“充值提示”节点",
+        "sub.signal.nodes_shrunk": "真实节点数明显减少（现 {real} 个，原 {healthy} 个）",
+        "sub.signal.userinfo_expiry": "订阅信息显示即将到期或流量快用完",
+        "sub.signal.manual": "手动发起",
+        "sub.case.dead": "<b>代理订阅看起来已失效。</b>",
+        "sub.case.warning": "<b>代理订阅可能快用完了。</b>",
+        "sub.case.seen": "现象：{signals}。",
+        "sub.case.steps": (
+            "步骤（都由你手动完成，机器人不会碰邮箱，也不会操作服务商网站）："
+            "\n1. 打开服务商的登录页{hint}。\n2. 选择邮箱登录（用预留的那个邮箱，"
+            "见你的私人笔记）。\n3. 打开最新的登录邮件。\n"
+            "4. 查看余额（-9 或更低表示快到期）。\n5. 点“删除账号”按钮（即服务商的续费按钮）。"
+            "\n6. 重新登录，余额应为 0。\n7. 打开“订阅”栏目。\n"
+            "8. 选择通用订阅。\n9. 复制链接发到这里（也可以先点下面的按钮）。"
+        ),
+        "sub.btn.got": "我已拿到新链接",
+        "sub.btn.later": "6 小时后再提醒",
+        "sub.btn.skip": "这次不处理",
+        "sub.armed": "现在把新的订阅链接发过来（10 分钟内有效，消息会被删除）。",
+        "sub.later": "6 小时后再提醒你。",
+        "sub.skipped": "这次不处理。在问题消失并再次出现之前不会再提醒。",
+        "sub.reminder": "提醒 {number}/3：订阅仍然异常（{signals}）。拿到新链接后用 /sub。",
+        "sub.recovered": "代理订阅已恢复（存活 {alive}/{total} 个节点），案例已关闭。",
+        "sub.validating": "正在检查订阅…",
+        "sub.usage": "用法：/sub &lt;链接&gt;、/sub switch、/sub rollback。",
+        "sub.staged": (
+            "<b>新订阅有效。</b>\n节点：现有 {old} 个，新 {new} 个。协议："
+            "{mix}。\n{names}"
+        ),
+        "sub.staged.nofile": "\n机器人暂时无法切换：未设置 SUB_PROVIDER_FILE。",
+        "sub.nothing": "没有待切换的订阅，请先发送 /sub &lt;链接&gt;。",
+        "sub.switched": "<b>已切换。</b>节点：原 {old} 个，现 {new} 个。协议：{mix}。\n{names}",
+        "sub.switch_failed": "切换失败（{reason}），已恢复原节点列表。",
+        "sub.switch_failed.bad_restore": (
+            "切换失败（{reason}），恢复后的旧列表也未通过验证，请手动检查 "
+            "mihomo。"
+        ),
+        "sub.switch_failed.no_backup": (
+            "切换失败（{reason}），且没有可恢复的备份，请手动检查 mihomo。"
+        ),
+        "sub.switch_failed.interrupted": "切换被重启打断；需要时已恢复旧列表。",
+        "sub.refresh_failed": "定时刷新订阅失败（{reason}）。",
+        "sub.refreshed": "订阅已刷新，节点数变化较大：{old} → {new}。",
+        "sub.rollback.done": "已回滚到最新备份。",
+        "sub.rollback.failed": "回滚失败（{reason}）。",
+        "sub.status": (
+            "<b>订阅</b>\n节点：{total} 个中真实 {real} 个\n"
+            "上次刷新：{refresh}\nmihomo 上次更新：{updated}\n"
+            "案例：{case}\n备份：{backups}\n切换：{switching}"
+        ),
+        "sub.never": "从未",
+        "sub.none": "无",
+        "sub.yes": "可用",
+        "sub.no": "未开启（未设置 SUB_PROVIDER_FILE）",
+        "sub.reject.url_long": "链接太长。",
+        "sub.reject.url_invalid": "这不是可用的链接。",
+        "sub.reject.url_scheme": "只接受 http 和 https 链接。",
+        "sub.reject.url_userinfo": "带用户名或密码的链接会被拒绝。",
+        "sub.reject.url_unresolved": "主机无法解析。",
+        "sub.reject.url_private": "主机解析到内网地址，已拒绝。",
+        "sub.reject.not_direct": "订阅主机会经节点访问。请先把该主机加入直连列表。",
+        "sub.reject.fetch": "下载失败（{detail}）。",
+        "sub.reject.status": "服务器返回 HTTP {detail}。",
+        "sub.reject.format": "无法识别的格式。",
+        "sub.reject.bad_node": "有节点条目格式不对。",
+        "sub.reject.too_many": "节点太多（{detail}）。",
+        "sub.reject.forbidden_type": "列表里有 {detail} 类型的条目。",
+        "sub.reject.dup_names": "节点名称不唯一。",
+        "sub.reject.bad_type": "有节点类型不受支持（{detail}）。",
+        "sub.reject.bad_server": "有节点没有服务器地址。",
+        "sub.reject.bad_port": "有节点端口不合法。",
+        "sub.reject.too_few": "真实节点太少（{detail}）。",
+        "sub.reject.same": "与当前订阅相同，无需切换。",
+        "sub.reject.no_file": "机器人无法切换：未设置 SUB_PROVIDER_FILE。",
         "nodes.busy": "有 Telegram 上传正在收尾，请稍后再试。",
         "proxy.title": "节点",
         "proxy.group.proxy": "访问（PROXY）",

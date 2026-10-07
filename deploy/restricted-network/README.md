@@ -152,6 +152,31 @@ DC2、DC4 各有一个媒体专用端点能从 NAS 直连（2026-09-26 实测）
    ```
    `FAIL6` 也不影响 bot：v2 先试 IPv4，IPv6 连不上就跳过。
 
+## Subscription as a file provider (M9.6)
+
+Only needed for subscription revival (`docs/wms/M9.6-subscription-revival.md`). Without it the
+subscription stays an `http` provider and everything above works as before. All values below are
+placeholders; the real ones live in the NAS's `.env` and `mihomo/config.yaml`.
+
+1. Back up `mihomo/config.yaml` as `config.yaml.bakN-<date>` first. The `mihomo` directory is not
+   readable by the host user: edit inside the container, never `sed -i` from the host.
+2. In the `proxy-providers` section change `main` from `type: http` (with `url: <SUB_URL>`) to
+   `type: file` with `path: <SUB_FILE>` in a directory mounted writable for the bot. Keep the same
+   `health-check` and groups. Seed the file once from the current subscription (a `proxies:` list).
+3. Mount that directory into the `bot` service the way the direct-rules file is mounted, owned by
+   uid 10001 (`chown 10001:10001`). Set `SUB_PROVIDER_FILE=<SUB_FILE>` as the bot sees it.
+4. Make sure `<SUB_HOST>` is routed `DIRECT` by a rule (the bot fetches the subscription itself and
+   refuses to fetch through a node), and set `SUB_HOSTS=<SUB_HOST>`.
+5. Changing the provider type needs a config reload. A hot reload (`PUT /configs`) or a restart of
+   `proxy` (which breaks the bot's shared network namespace and means recreating `bot`) is the
+   owner's decision; the bot itself never does either.
+6. Spike first: confirm that `PUT /providers/proxies/main` makes mihomo re-read the file
+   (UNVERIFIED on mihomo 1.19 until run on the NAS).
+7. Deploy the image, restart `bot` only, and set `SUB_REVIVAL_ENABLED=1` last.
+
+Rollback: restore the `config.yaml.bakN-<date>` copy (the `http` provider) and set
+`SUB_REVIVAL_ENABLED=0`.
+
 ## 安全
 
 - `mihomo/config.yaml` 里有你的订阅地址或节点凭据，`chmod 600`，别提交。

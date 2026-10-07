@@ -21,10 +21,18 @@ say where the real one lives.
 | `<SHARE>` | the share name in `smb://` links | `LOCAL_URL_PREFIX` in the NAS's `.env` |
 | `<NAS_MODEL>`, `<FUNNEL_HOST>` | the NAS's make and the public Funnel host | Saki's private notes |
 | `<USER>` | a user name in a home directory | — |
+| `<SUB_HOST>` | the proxy subscription's domain | `SUB_HOSTS` in the NAS's `.env` |
+| `<SUB_URL>` | the proxy subscription link (a credential) | the proxy container's config and the bot's database only; never printed, logged or committed |
+| `<SUB_FILE>` | the path of the node-list file the bot writes | `SUB_PROVIDER_FILE` in the NAS's `.env` |
 
 In **tests** and examples use values that are plainly invented, so the code can still parse them:
 `10.0.0.x`, `192.168.0.x`, `172.16.0.x` for addresses, `-1001234567890` for a chat id,
 `/volume9/x` for a volume path, `nas.local` for a host.
+
+Subscription revival (M9.6): `SUB_SENTINEL_REGEX` (the provider's own phrase), `SUB_LOGIN_HINT`,
+`SUB_HOSTS` and the `SUB_PROVIDER_FILE` path are private values. They are listed in
+`deploy/private.env.example` with empty defaults. In tests use `https://sub.example.invalid/...`
+and invented node names; the provider's name and domain appear nowhere in the repository.
 
 **Code defaults never contain a real address or id.** A setting that needs one is empty by default
 and read from the environment (`TRAFFIC_MODEL_HOST` is the example: empty means "no model host").

@@ -30,6 +30,8 @@ from .pikpak import PikPakService
 from .portal import PikPakLoginPortal
 from .resolver import Resolver
 from .setup import USER_SESSION_KEY, SetupWizard, stored_user_session
+from .subscription import ui as sub_ui
+from .subscription.service import SubscriptionService
 from .tasks import JobQueue
 from .traffic import TrafficControl, TrafficService
 from .traffic.direct import DirectRouting
@@ -275,6 +277,31 @@ class Application:
         service.add_extra(nodes)
         service.add_extra(direct)
         self.handlers.attach_nodes(nodes, direct)
+        if self.config.subscription.enabled:
+            await self._start_subscription(service, nodes, direct)
+
+    async def _start_subscription(self, service, nodes, direct) -> None:
+        """M9.6, only with SUB_REVIVAL_ENABLED=1. It must never stop the bot."""
+        settings = self.config.subscription
+
+        async def say(kind: str, data: dict) -> None:
+            text, buttons = sub_ui.render(kind, data, login_hint=settings.login_hint)
+            if text:
+                await self._notify_admins(text, buttons)
+
+        revival = SubscriptionService(
+            settings, service.client, self.db, say=say,
+            sub_hosts=self.config.traffic.sub_hosts,
+            direct_hosts=direct.hosts_in_file)
+        try:
+            await revival.load()
+            await revival.resume()
+        except Exception:
+            log.exception("subscription revival could not start; the bot carries on without it")
+            return
+        nodes.revival = revival
+        service.add_extra(revival)
+        self.handlers.attach_subscription(revival)
 
     async def _notify_admins(self, text: str, buttons=None) -> None:
         for admin in self.config.access.admin_user_ids:

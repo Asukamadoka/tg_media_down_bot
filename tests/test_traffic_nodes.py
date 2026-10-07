@@ -717,7 +717,8 @@ class TestDirectRouting:
             self, store, tmp_path):
         from datetime import UTC, datetime
 
-        d = make_direct(store, tmp_path, direct_probe_hosts=("pypi.org", "telegram.org"))
+        d = make_direct(store, tmp_path, direct_probe_hosts=("pypi.org", "telegram.org"),
+                        sub_hosts=("example.invalid",))
         day = datetime.now(UTC).astimezone(__import__("zoneinfo").ZoneInfo("Asia/Shanghai"))
         key = day.date().isoformat()
         store.add_hosts([((key, "big.example.com", "other", "proxy", ""), 80 * MB),

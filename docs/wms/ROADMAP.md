@@ -16,6 +16,8 @@
 > | M8.1 | 索引靠事件流保持最新（文件转存进已有目录不更新目录的 modified_time），见 `M8.1-index-freshness.md` |
 > | M8.2 | 自然语言结果的规范化与安全护栏（时间方向双保险、规则层拦截、按语义评测），见 `M8.2-nl-normalize-and-safety.md` |
 >
+> | M9.6 | 订阅复活（bot 侧）：检测订阅将死、推送续费清单、接收新订阅链接、校验后自动切换并带备份与回滚，见 `M9.6-subscription-revival.md` |
+>
 > **进度**：M1–M8.2 全部完成（见 `docs/HANDOFF.md` 各节）。M4 的手机端验收等公网 HTTPS 地址；M6 的模型后端准确率等 Cowork 在 NAS 上实测。
 >
 > 另外一并做（先写规格再实现）：按 hash 去重、归档、基于 `events` 的增量盘点、出库推送 aria2、`star` / `share` 动作。下面是原路线图，保留作背景。

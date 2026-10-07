@@ -19,6 +19,7 @@ from .i18n import describe, display_mode, display_state, t
 from .links import LinkBundle, extract_links
 from .pikpak import PikPakError, PikPakService
 from .portal import PikPakLoginPortal
+from .subscription import ui as sub_ui
 from .tasks import Job, JobKind, JobQueue, QueueFull
 from .traffic import proxy_ui
 from .traffic import ui as traffic_ui
@@ -77,6 +78,7 @@ class BotHandlers:
         self._traffic = None
         self._nodes = None
         self._direct = None
+        self._sub = None
         # chat id -> (when, whether a bot admin runs it); see CHANNEL_CHECK_TTL.
         self._channel_checks: dict[int, tuple[float, bool]] = {}
         self._me = None
@@ -98,6 +100,10 @@ class BotHandlers:
         """Give the handlers the node manager and direct routing (tgmd.traffic)."""
         self._nodes = nodes
         self._direct = direct
+
+    def attach_subscription(self, service) -> None:
+        """Give the handlers the subscription revival service (tgmd.subscription)."""
+        self._sub = service
 
     def attach_wizard(self, wizard) -> None:
         """Give the handlers the setup wizard, before registering."""
@@ -126,6 +132,8 @@ class BotHandlers:
         add(self.on_downloads, events.NewMessage(pattern=r"^/downloads\b"))
         add(self.on_traffic, events.NewMessage(pattern=r"^/traffic\b"))
         add(self.handle_traffic_button, events.CallbackQuery(pattern=rb"^traffic:"))
+        add(self.handle_sub_command, events.NewMessage(pattern=r"^/sub\b"))
+        add(self.handle_sub_button, events.CallbackQuery(pattern=rb"^sub:"))
         add(self.on_proxy, events.NewMessage(pattern=r"^/proxy\b"))
         add(self.handle_proxy_button, events.CallbackQuery(pattern=rb"^proxy:"))
         add(self.handle_wms_button, events.CallbackQuery(pattern=rb"^wms:"))
@@ -677,6 +685,15 @@ class BotHandlers:
             return
         text, buttons = await proxy_ui.show(self._nodes)
         await event.reply(text, parse_mode="html", buttons=buttons, link_preview=False)
+
+    async def handle_sub_command(self, event) -> None:
+        """Subscription revival (admins only; anyone else is ignored silently)."""
+        await sub_ui.handle_command(event, self._sub, self._config.access.is_admin(
+            event.sender_id or 0))
+
+    async def handle_sub_button(self, event) -> None:
+        await sub_ui.handle_button(event, self._sub, self._config.access.is_admin(
+            event.sender_id or 0))
 
     async def handle_proxy_button(self, event) -> None:
         user_id = event.sender_id
@@ -1241,6 +1258,12 @@ class BotHandlers:
             and self._wizard.active(event.sender_id)
             and await self._wizard.handle(event)
         ):
+            return
+
+        # After 「我已拿到新链接」 the next URL an admin sends is the subscription, not a link
+        # to download.
+        if self._sub is not None and await sub_ui.url_message(
+                event, self._sub, self._config.access.is_admin(event.sender_id or 0)):
             return
 
         bundle = extract_links(text)

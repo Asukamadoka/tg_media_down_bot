@@ -94,6 +94,8 @@ class NodeManager:
         self.ask_at = 0.0
         self._last_request_check = 0.0
         self.last_error = ""
+        self.revival = None
+        """M9.6: the subscription revival service; None leaves M9.1's alerts as they were."""
         self.alive_count: tuple[int, int] | None = None
         self.pick_lists: dict[str, list[str]] = {}
         """Per group, the node names the manual picker last showed (callbacks carry an index)."""
@@ -316,11 +318,17 @@ class NodeManager:
         if sick and not self.incident:
             self.incident = True
             await self._save()
-            await self._say(t("nodes.health.bad", alive=alive, total=total))
+            await self._say(t("nodes.health.bad.revival" if self.revival else "nodes.health.bad",
+                              alive=alive, total=total))
         elif not sick and self.incident:
             self.incident = False
             await self._save()
             await self._say(t("nodes.health.recovered", alive=alive, total=total))
+        if self.revival is not None:
+            try:
+                await self.revival.on_health(sick=sick, alive=alive, total=total)
+            except Exception:
+                log.warning("subscription revival check failed", exc_info=True)
 
     async def _say(self, text: str, buttons=None) -> None:
         log.info("nodes: %s", text.replace("\n", " "))
