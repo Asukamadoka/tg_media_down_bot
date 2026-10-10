@@ -1,0 +1,116 @@
+name: CI
+
+# Lint and tests.
+#
+# Runs on every pull request and on pushes to any branch *except* the
+# production branch. On the production branch the very same jobs run inside
+# publish-image.yml instead, called from there as the gate in front of the
+# image build, so each commit is tested exactly once and the image is built
+# only from code that passed.
+
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - claude/telegram-media-downloader-bot-samm1v
+  workflow_call:
+    inputs:
+      simulate_failure:
+        description: Fail the test job on purpose, to prove the image build is gated.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # One pin, in requirements-dev.txt, shared with local development.
+      - name: Install ruff
+        run: pip install "$(grep -E '^ruff==' requirements-dev.txt)"
+
+      - name: ruff check
+        run: ruff check --output-format=github .
+
+  # The repository and the image are public. This fails the build on a token, or on an address,
+  # chat id, share path or device name that belongs in the NAS's .env instead (see
+  # docs/security/README.md). It reads the files of this commit with .gitleaks.toml; history
+  # is audited with scripts/public_audit.py (a finding already in history cannot be un-found).
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned release, checksum verified: the scanner is not itself a way into the build.
+      - name: Install gitleaks
+        env:
+          VERSION: "8.30.1"
+          SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          curl -sSLfo gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
+          echo "${SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+
+      - name: gitleaks (this commit's files)
+        run: ./gitleaks dir . --config .gitleaks.toml --redact --no-banner --exit-code 1
+
+      # Value-based rules (the exact real host, chat id, model) cannot live in a public repository.
+      # Saki keeps them in a private config and stores its base64 as the secret
+      # GITLEAKS_PRIVATE_RULES (docs/security/README.md). Without the secret (forks, other
+      # contributors) this step is skipped; the file is written to a temp path and never echoed.
+      - name: gitleaks (private value rules, if configured)
+        env:
+          GITLEAKS_PRIVATE_RULES: ${{ secrets.GITLEAKS_PRIVATE_RULES }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GITLEAKS_PRIVATE_RULES:-}" ]; then
+            exit 0
+          fi
+          private="$(mktemp)"
+          trap 'rm -f "$private"' EXIT
+          printf '%s' "$GITLEAKS_PRIVATE_RULES" | base64 -d > "$private"
+          ./gitleaks dir . --config "$private" --redact --no-banner --exit-code 1
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is what the image runs; 3.11 is the development floor. They are
+        # not interchangeable: how a (str, Enum) member formats differs
+        # between them, and only testing one would hide that.
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # Only reachable through publish-image.yml's manual dispatch. Proves the
+      # gate without pushing broken code anywhere; see docs/HANDOFF.md.
+      - name: Simulated failure
+        if: ${{ inputs.simulate_failure }}
+        run: |
+          echo "::error::simulate_failure is set: failing on purpose to prove the image build is gated"
+          exit 1
+
+      - name: pytest
+        run: python -m pytest -q

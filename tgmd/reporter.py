@@ -37,10 +37,6 @@ class Reporter:
         self._last_edit = 0.0
         self._lock = asyncio.Lock()
 
-    @property
-    def message_id(self) -> int | None:
-        return getattr(self._message, "id", None)
-
     async def open(self, text: str) -> None:
         """Post the initial status message."""
         async with self._lock:
@@ -77,18 +73,9 @@ class Reporter:
                 # Back off for real: pushing through here gets the bot limited.
                 log.info("edit flood wait %ss, pausing progress updates", exc.seconds)
                 self._last_edit = now + exc.seconds
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - progress is cosmetic, the job is not
                 log.debug("status edit failed: %s", exc)
 
     async def close(self, text: str) -> None:
         """Write the final state, bypassing the throttle."""
         await self.update(text, force=True)
-
-    async def say(self, text: str) -> None:
-        """Send a separate message, for results that should not overwrite status."""
-        try:
-            await self._bot.send_message(
-                self._chat_id, text, parse_mode="html", link_preview=False
-            )
-        except Exception:
-            log.exception("could not send a message to chat %s", self._chat_id)

@@ -12,6 +12,8 @@ ENV_VARS = (
     "TG_API_HASH",
     "TG_BOT_TOKEN",
     "TG_USER_SESSION",
+    "TG_DIRECT_MEDIA",
+    "TG_DIRECT_ENDPOINTS",
     "SESSION_DIR",
     "ADMIN_USER_IDS",
     "ALLOWED_USER_IDS",
@@ -19,7 +21,14 @@ ENV_VARS = (
     "DOWNLOAD_DIR",
     "DATA_DIR",
     "FILENAME_TEMPLATE",
+    "MEDIA_DIR",
+    "MEDIA_TEMPLATE",
+    "LOCAL_URL_PREFIX",
+    "LIBRARY_DIR",
+    "DOWNLOAD_LAYOUT",
+    "DOWNLOAD_DEFAULT_LAYOUT",
     "CONCURRENT_DOWNLOADS",
+    "DOWNLOAD_CONNECTIONS",
     "MAX_QUEUE_PER_USER",
     "MAX_BATCH",
     "PROGRESS_INTERVAL",
@@ -28,17 +37,104 @@ ENV_VARS = (
     "DEFAULT_MODE",
     "MAX_UPLOAD_SIZE_MB",
     "CACHE_CHAT_ID",
+    "CHANNEL_REPLY_DM",
+    "CHANNEL_REQUESTS",
     "PIKPAK_ENABLED",
     "PIKPAK_USERNAME",
     "PIKPAK_PASSWORD",
     "PIKPAK_FOLDER",
     "PIKPAK_TASK_TIMEOUT",
+    "PIKPAK_STREAM",
+    "PIKPAK_ALLOW_USER_LOGIN",
+    "PIKPAK_LOGIN_LINK_TTL",
     "HTTP_ENABLED",
     "HTTP_HOST",
     "HTTP_PORT",
     "PUBLIC_BASE_URL",
     "HTTP_URL_TTL",
     "LOG_LEVEL",
+    # M9: proxy traffic metering, budgets, the download gate
+    "MIHOMO_API",
+    "TRAFFIC_ENABLED",
+    "TRAFFIC_POLL_SECONDS",
+    "TRAFFIC_BYTES_PER_GB",
+    "TRAFFIC_DEFAULT_PRICE",
+    "TRAFFIC_DAILY_REPORT_AT",
+    "TRAFFIC_BUDGET_DAILY_CNY",
+    "TRAFFIC_BUDGET_MONTHLY_CNY",
+    "TRAFFIC_BUDGET_DAILY_PROXY_GB",
+    "TRAFFIC_SPIKE_MBPS",
+    "TRAFFIC_CONN_ALERT_MB",
+    "TRAFFIC_ON_BUDGET",
+    "TRAFFIC_DIRECT_DAILY_GB",
+    "TRAFFIC_TIMEZONE",
+    "TG_MEDIA_RATE_LIMIT_MBPS",
+    "TG_UPLOAD_RATE_LIMIT_MBPS",
+    # M9.1: node selection, direct-first routing, faster PikPak fetch
+    "PROXY_PROBE_HOURS",
+    "PROXY_PROBE_CONFIRM",
+    "PROXY_PROBE_URL",
+    "PROXY_PROBE_UP_URL",
+    "PROXY_PROBE_LISTENER",
+    "PROXY_PROBE_MAX_PRICE",
+    "PROXY_PROBE_MAX_MB",
+    "PROXY_SWITCH_MIN_MINUTES",
+    "DIRECT_CANDIDATE_MB",
+    "DIRECT_PROBE_HOSTS",
+    "DIRECT_TEST_URLS",
+    "DIRECT_AUTO_APPLY",
+    "DIRECT_RULES_FILE",
+    # M9.6: subscription revival
+    "SUB_REVIVAL_ENABLED",
+    "SUB_PROVIDER_FILE",
+    "SUB_CHECK_HOURS",
+    "SUB_REFRESH_HOURS",
+    "SUB_SENTINEL_REGEX",
+    "SUB_WARN_DAYS",
+    "SUB_MIN_NODES",
+    "SUB_FETCH_UA",
+    "SUB_ALLOW_PRIVATE",
+    "SUB_VERIFY_SECONDS",
+    "SUB_VERIFY_ALIVE",
+    "SUB_LOGIN_HINT",
+    "SUB_HOSTS",
+    "OUTBOUND_CONNECTIONS",
+    "OUTBOUND_MAX_CONNECTIONS",
+    "OUTBOUND_PARALLEL_FILES",
+    "OUTBOUND_MAX_TOTAL_CONNECTIONS",
+    "OUTBOUND_RETRY_MINUTES",
+    "OUTBOUND_SKIP_KNOWN",
+    # Which message catalogue tgmd.i18n reads. POSIX LANG is deliberately not
+    # one of these: images set it to C.UTF-8 for unrelated reasons.
+    "TGMD_LANG",
+    "BOT_LANG",
+    # pikpak_wms
+    "WMS_ENABLED",
+    "WMS_ACCOUNT",
+    "WMS_AUTO_SHELVE",
+    "WMS_CONFIG",
+    "WMS_RULES",
+    "WMS_LANG",
+    "PIKPAK_ENCODED_TOKEN",
+    "ARIA2_SECRET",
+    "NL_BACKEND",
+    "NL_FALLBACK",
+    "NL_CLAUDE_MODEL",
+    "NL_CLAUDE_EFFORT",
+    "NL_OLLAMA_MODEL",
+    "NL_OPENAI_BASE_URL",
+    "NL_OPENAI_MODEL",
+    "NL_OPENAI_API_KEY",
+    "NL_OPENAI_TIMEOUT",
+    "OLLAMA_URL",
+    "ANTHROPIC_API_KEY",
+    # Hosting platforms export these; they must not leak into tests.
+    "PORT",
+    "RENDER_EXTERNAL_URL",
+    "KOYEB_PUBLIC_DOMAIN",
+    "RAILWAY_PUBLIC_DOMAIN",
+    "SPACE_HOST",
+    "FLY_APP_NAME",
 )
 
 
@@ -47,3 +143,40 @@ def clean_environment(monkeypatch):
     """Remove every setting the config loader looks at."""
     for name in ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_pikpak_network(monkeypatch):
+    """Make a real PikPak call fail loudly instead of hanging.
+
+    Every request in the library funnels through these two methods, so a test
+    that reaches PikPak by accident (a renamed attribute breaking a stub, say)
+    fails in milliseconds with a clear message rather than stalling on a
+    network timeout.
+    """
+
+    async def refuse(*_args, **_kwargs):
+        raise AssertionError(
+            "a test tried to reach PikPak over the network; stub the client instead"
+        )
+
+    monkeypatch.setattr("pikpakapi.PikPakApi.login", refuse)
+    monkeypatch.setattr("pikpakapi.PikPakApi._make_request", refuse)
+
+
+@pytest.fixture(autouse=True)
+def no_model_hosts(monkeypatch):
+    """No test asks a real model host whether it is up (docs/wms/M8 §A).
+
+    An unstubbed probe finds every host offline, and the shared record of
+    who is up starts empty in each test.
+    """
+    from pikpak_wms.nl import hosts
+
+    async def refuse(*_args, **_kwargs):
+        raise ConnectionError("tests do not reach model hosts")
+
+    monkeypatch.setattr(hosts, "_http_get", refuse)
+    hosts.BOARD.reset()
+    yield
+    hosts.BOARD.reset()

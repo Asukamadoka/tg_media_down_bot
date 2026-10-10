@@ -1,0 +1,46 @@
+# Project genes for pikpak-wms (scope project:pikpak-wms). Global genes: ~/Developer/agents-md/ops/gene/genes.yaml.
+# Same schema as the global bank. Genes not yet in Saki's own words stay `candidate`.
+version: 1
+updated: '2026-10-04'
+
+genes:
+  - id: G-WMS-001
+    kind: constraint
+    strength: must
+    scope: project:pikpak-wms
+    tags: [nas, data, acl]
+    statement: Never edit data/db or wms.yaml from the NAS host; edit inside the container (docker compose exec -T bot python -), because host edits break the ACLs the container user needs.
+    source: pikpak-wms-nas-ops skill; CC_BRIEF.md §1
+    status: candidate
+  - id: G-WMS-002
+    kind: constraint
+    strength: must
+    scope: project:pikpak-wms
+    tags: [telegram, security]
+    statement: Never touch Telegram sessions or auth keys; TG_DIRECT_MEDIA stays off.
+    source: pikpak-wms-nas-ops skill; CC_BRIEF.md §1
+    status: candidate
+  - id: G-WMS-003
+    kind: order
+    strength: must
+    scope: project:pikpak-wms
+    tags: [wms, plan, apply]
+    statement: wms do and wms outbound only plan by default; --apply, moves and deletes only on Saki's word; never empty PikPak trash.
+    source: CC_BRIEF.md §1; coordinator brief 2026-10-03
+    status: candidate
+  - id: G-WMS-004
+    kind: taste
+    strength: default
+    scope: project:pikpak-wms
+    tags: [nl, model, eval]
+    statement: An NL model is accepted at model-only >= 80 %, with rules >= 95 %, dangerous = 0 and <= 5 s per sentence.
+    source: pikpak-wms-nas-ops skill (baseline 2026-10-01)
+    status: candidate
+  - id: G-WMS-005
+    kind: constraint
+    strength: must
+    scope: project:pikpak-wms
+    tags: [nas, docker, deploy]
+    statement: Restart only the bot service, never proxy (bot shares the proxy's network namespace); back up a config file before changing it.
+    source: pikpak-wms-nas-ops skill; CC_BRIEF.md §1
+    status: candidate

@@ -1,0 +1,22 @@
+{
+ "actions": 50,
+ "by_rule": {
+  "dedupe:trash": 50
+ },
+ "first": [
+  "  trash   /Cosplay/JK日常 Vol.305/dup1.mp4",
+  "  trash   /Cosplay/album_398/dup19.mp4",
+  "  trash   /Yuki合集/album_295/dup12.mp4",
+  "  trash   /婚礼/舞蹈练习 合集/dup12.mp4",
+  "  trash   /Pack From Shared/Tokyo Walk Vol.47/dup9.mp4",
+  "  trash   /Pack From Shared/素材12/dup33.mp4",
+  "  trash   /Pack From Shared/素材12/dup37.mp4",
+  "  trash   /Vlog/Mika Vol.330/dup6.mp4",
+  "  trash   /Vlog/album_250/dup21.mp4",
+  "  trash   /访谈/album_158/dup23.mp4",
+  "  trash   /写真/JK日常 Vol.225/dup4.mp4",
+  "  trash   /宝宝/Yuki Vol.74/dup4.mp4"
+ ],
+ "sha256": "7266fe3ab42af255f3161eb09f1cec87859145ecfe4b20eab09841be17f4138d",
+ "source": "dedupe"
+}
