@@ -1,4 +1,4 @@
-> Universal v3.0.0 — universal rules: ~/Developer/agents-md/core/AGENTS.md (read §2, §5, §6, §9 at boot)
+> Universal v4.1.0 — universal rules: ~/Developer/agents-md/core/AGENTS.md (read the kernel at boot, blocks on demand via its route table). Project folder: ~/Developer/pikpak-wms (see its AGENTS.md for the other blocks).
 
 # AGENTS.md — tg_media_down_bot (pikpak-wms)
 
@@ -35,7 +35,8 @@ Private values:     Saki's private, sops/age-encrypted values repo; never copied
 Gene bank:          global: ~/Developer/agents-md/ops/gene/genes.yaml + ops/gene/genes.yaml (scope project:pikpak-wms)
 Language override:  none — docs and commits in English; replies to Saki in Simplified Chinese.
 Quality bar:        NL model: model-only ≥ 80 %, with rules ≥ 95 %, dangerous = 0, ≤ 5 s per sentence.
-Vault:              ~/Documents/claude/pikapk_WMS
+Vault:              ~/Developer/pikpak-wms/notes (vault link ~/Documents/claude/pikapk_WMS)
+Folder:             ~/Developer/pikpak-wms (v5): repo, private values, notes, local study
 ```
 
 ## Habits
@@ -48,7 +49,7 @@ Vault:              ~/Documents/claude/pikapk_WMS
 
 <!-- genes:start -->
 ## Saki's genes for this project
-_Compiled 2026-10-05 from agents-md global genes + ops/gene/genes.yaml (domains=[], tags=[]). Orders in REDESIGN.md override these. Edit genes in the hub, then re-run compile-agents.py._
+_Compiled 2026-10-11 from agents-md global genes + genes.yaml (hub) + tg_media_down_bot/ops/gene/genes.yaml (domains=[], tags=[]). Orders in REDESIGN.md override these. Edit genes in the hub, then re-run compile-agents.py._
 
 - **G-AGT-005** (must) Every derived project ships agent instruction files written for Saki (AGENTS.md canonical, CLAUDE.md importing it, others as needed), compiled from this gene bank plus the project's orders.
 - **G-AGT-010** (must) After changing anything that belongs to another conversation, project or agent, end the reply with a quick verification guide Saki can run there in full - files touched, commands, expected output, and how to undo.
@@ -57,6 +58,7 @@ _Compiled 2026-10-05 from agents-md global genes + ops/gene/genes.yaml (domains=
 - **G-SYS-006** (must) agents-md is the universal baseline and every project and agent is under its jurisdiction, the skill-builder architect included. Inside its own project, each project's architect is that project's baseline agent and keeps priority over execution and design there. Any change to rules or sets between projects (e.g. skill-builder and agents-md) is logged in both projects and notified to the other project's baseline agent. This is a universal rule.
 - **G-SYS-009** (must) From 2026-10-04 agents-md holds full control of rule design for every agent and project, including global agent configs (Claude Code, Codex) and the shared engine. skill-builder's architect manages its own project only; its new designs reach agents-md only when Saki hands them over, otherwise they stay project rules on top of the agreed universal rules. skill-builder is "advanced" in session depth and thinking, not in rank.
   - Saki: “我说过你控制全局agents的配置 codex的调整也由你负责 不是推给skill-builder | 你提到advance 这个冲突处 实际不存在 我说skill-builder 的agent advanced 是在session深度 以及思考程度上 而你拥有全局set control 给所有agent定调 写规则 skill-builder 不会跟你在意见上有不一致 今天之前你的一切都来自skill-builder project baseline agent 从此时此刻起你掌舵 获得全部控制权 交接skill-builder agent 在规则设计上的所有 由与skill-builder agent 管理他自己的skill-builder project 此后在他那里做出的新设计 新变动 需要你吸收的我会主动跟他提出并交接给你 如果没有 那么那些新的改动 就只是在他自己的项目内 在你们已经达成一致的通用规则基础上附加项目专用的一些规则和设定”
+- **G-SYS-010** (must) Every skill ships in three forms — Claude Code CLI skill, Claude desktop/Cowork .plugin (from SKILL.cowork.md) and Codex skill — each with a working script and a verification. agents-md builds them (scripts/skills-three.py, sync-targets.py apply).
 - **G-UX-001** (must) "Hover" means: text is selected AND the pointer rests on it for 5 seconds -> the related popup appears. Plain pointer-over is not hover.
   - Saki: “我认为的悬停是选中鼠标悬停 5 秒就显示相关弹窗”
 - **G-AGT-004** (default) Redesign runs in one of three modes per decision — Saki-led (concrete orders), co-design (iterate together), Claude-led (Saki gives a concept; Claude researches and proposes options beyond Saki's knowledge).
