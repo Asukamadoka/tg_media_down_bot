@@ -49,7 +49,7 @@ Folder:             ~/Developer/pikpak-wms (v5): repo, private values, notes, lo
 
 <!-- genes:start -->
 ## Saki's genes for this project
-_Compiled 2026-10-11 from agents-md global genes + genes.yaml (hub) + tg_media_down_bot/ops/gene/genes.yaml (domains=[], tags=[]). Orders in REDESIGN.md override these. Edit genes in the hub, then re-run compile-agents.py._
+_Compiled 2026-10-13 from agents-md global genes + genes.yaml (hub) + tg_media_down_bot/ops/gene/genes.yaml (domains=[], tags=[]). Orders in REDESIGN.md override these. Edit genes in the hub, then re-run compile-agents.py._
 
 - **G-AGT-005** (must) Every derived project ships agent instruction files written for Saki (AGENTS.md canonical, CLAUDE.md importing it, others as needed), compiled from this gene bank plus the project's orders.
 - **G-AGT-010** (must) After changing anything that belongs to another conversation, project or agent, end the reply with a quick verification guide Saki can run there in full - files touched, commands, expected output, and how to undo.
@@ -70,7 +70,7 @@ _Compiled 2026-10-11 from agents-md global genes + genes.yaml (hub) + tg_media_d
 - **G-ENV-009** (default) lazygit is installed and is Saki's git TUI; suggest it for interactive git work.
 - **G-UX-002** (default) Floating panels and popups should feel system-level, like macOS's own (native look, system-wide availability), not an app-bound overlay.
 
-Stated in core (ids only; wording and Saki's words: `~/Developer/agents-md/ops/gene/genes.yaml`): G-AGT-001 (kernel §1), G-AGT-002 (kernel §2.1-2), G-AGT-003 (kernel §2.3), G-AGT-006 (kernel §5 + block git), G-AGT-007 (block roles), G-AGT-011 (kernel §2.7), G-AGT-013 (block cc), G-ENV-006 (kernel §5), G-ENV-008 (kernel §5), G-SEC-002 (kernel §5), G-SYS-001 (block evolve), G-SYS-002 (block evolve), G-AGT-012 (kernel §2.8), G-AGT-014 (kernel §9), G-ENV-001 (block mac), G-ENV-003 (block mac), G-ENV-004 (block mac), G-ENV-007 (block mac + cc), G-ENV-010 (block mac), G-ENV-011 (block mac), G-SEC-001 (kernel §5), G-SYS-004 (kernel header), G-SYS-008 (block evolve)
+Stated in core (ids only; wording and Saki's words: `~/Developer/agents-md/ops/gene/genes.yaml`): G-AGT-001 (kernel §1), G-AGT-002 (kernel §2.1-2), G-AGT-003 (kernel §2.3), G-AGT-006 (kernel §5 + block git), G-AGT-007 (block roles), G-AGT-011 (kernel §2.7), G-AGT-013 (block cc), G-AGT-016 (kernel §1), G-ENV-006 (kernel §5), G-ENV-008 (kernel §5), G-SEC-002 (kernel §5), G-SYS-001 (block evolve), G-SYS-002 (block evolve), G-AGT-012 (kernel §2.8), G-AGT-014 (kernel §9), G-ENV-001 (block mac), G-ENV-003 (block mac), G-ENV-004 (block mac), G-ENV-007 (block mac + cc), G-ENV-010 (block mac), G-ENV-011 (block mac), G-SEC-001 (kernel §5), G-SYS-004 (kernel header), G-SYS-008 (block evolve)
 
 ### Candidate genes (unconfirmed — treat as hints, ask Saki)
 - **G-WMS-001** (must) Never edit data/db or wms.yaml from the NAS host; edit inside the container (docker compose exec -T bot python -), because host edits break the ACLs the container user needs.
