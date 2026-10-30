@@ -1,4 +1,4 @@
-> Universal v4.1.0 — universal rules: ~/Developer/agents-md/core/AGENTS.md (read the kernel at boot, blocks on demand via its route table). Project folder: ~/Developer/pikpak-wms (see its AGENTS.md for the other blocks).
+> Universal v5.1.0 — universal rules: ~/Developer/agents-md/core/AGENTS.md (read the kernel at boot, blocks on demand via its route table). Project folder: ~/Developer/pikpak-wms (see its AGENTS.md for the other blocks).
 
 # AGENTS.md — tg_media_down_bot (pikpak-wms)
 
@@ -49,7 +49,7 @@ Folder:             ~/Developer/pikpak-wms (v5): repo, private values, notes, lo
 
 <!-- genes:start -->
 ## Saki's genes for this project
-_Compiled 2026-10-13 from agents-md global genes + genes.yaml (hub) + tg_media_down_bot/ops/gene/genes.yaml (domains=[], tags=[]). Orders in REDESIGN.md override these. Edit genes in the hub, then re-run compile-agents.py._
+_Compiled 2026-10-31 from agents-md global genes + genes.yaml (hub) + tg_media_down_bot/ops/gene/genes.yaml (domains=[], tags=[]). Orders in REDESIGN.md override these. Edit genes in the hub, then re-run compile-agents.py._
 
 - **G-AGT-005** (must) Every derived project ships agent instruction files written for Saki (AGENTS.md canonical, CLAUDE.md importing it, others as needed), compiled from this gene bank plus the project's orders.
 - **G-AGT-010** (must) After changing anything that belongs to another conversation, project or agent, end the reply with a quick verification guide Saki can run there in full - files touched, commands, expected output, and how to undo.
@@ -65,6 +65,9 @@ _Compiled 2026-10-13 from agents-md global genes + genes.yaml (hub) + tg_media_d
 - **G-AGT-008** (default) When Saki names a derived project, that name (as a lowercase slug) is used for the repo, folder, notes and agent files instead of <upstream>-local; the upstream stays recorded in SKILLBUILDER.md and the registry.
 - **G-AGT-009** (default) AGENTS.md is enough for Codex and other agents; add an agent-specific section only when a real difference shows up.
 - **G-AGT-015** (default) When a project starts in (or is upgraded to) a Claude CC project, the coordinator first reviews the whole project and then pushes its open tasks to threads or Claude Code in cmux.
+- **G-AGT-017** (default) Before asking Saki, finish the already-authorized work that turns the next step into a reviewable result; Saki approves concrete, checkable results, not plans.
+- **G-AGT-018** (default) Don't add warnings, disclaimers, approval steps or compliance lists for hypothetical risks; real risks (attacks, leaks, irreversible steps) keep their gates.
+- **G-AGT-019** (default) Tests proportionate to the change — none for small reversible edits that only restate the code, prefer an end-to-end check with a reproducible artifact, widen only on new changes, failures or open doubts; delete temp files at the end.
 - **G-ENV-002** (default) Microsoft Edge is the day-to-day browser; browser integrations target Edge (Chromium).
 - **G-ENV-005** (default) Saki works with Claude (Cowork and Claude Code) and Codex; outputs must be usable by all of them.
 - **G-ENV-009** (default) lazygit is installed and is Saki's git TUI; suggest it for interactive git work.
