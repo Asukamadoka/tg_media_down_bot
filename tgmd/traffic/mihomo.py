@@ -79,7 +79,20 @@ class MihomoClient:
         chain = [group]
         name = group
         for _ in range(depth):
-            chosen = self.proxy(name).get("now")
+            try:
+                chosen = self.proxy(name).get("now")
+            except urllib.error.HTTPError as exc:
+                # Provider nodes are absent from /proxies/<name> in mihomo 1.19.
+                # Confirm the terminal node exists before accepting the chain.
+                if exc.code != 404 or len(chain) == 1:
+                    raise
+                provider_names = {
+                    str(item.get("name") or "")
+                    for item in self.provider().get("proxies") or []
+                }
+                if name not in provider_names:
+                    raise
+                break
             if not chosen:
                 break
             chain.append(str(chosen))

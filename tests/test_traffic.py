@@ -8,6 +8,7 @@ import json
 import logging
 import socket
 import threading
+import urllib.error
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
@@ -723,6 +724,26 @@ class TestMihomoClient:
             assert client.current_exit("TG") == ["TG", "TG-OTHER", TG_NODE]
         finally:
             server.stop()
+
+    def test_provider_node_404_is_a_valid_terminal_only_when_present(self):
+        provider_names = ["node"]
+
+        def fetch(url: str) -> dict:
+            if url.endswith("/proxies/TG"):
+                return {"now": "PICK"}
+            if url.endswith("/proxies/PICK"):
+                return {"now": "node"}
+            if url.endswith("/proxies/node"):
+                raise urllib.error.HTTPError(url, 404, "not found", None, None)
+            if url.endswith("/providers/proxies/main"):
+                return {"proxies": [{"name": name} for name in provider_names]}
+            raise AssertionError(url)
+
+        client = MihomoClient("http://mihomo", fetch=fetch)
+        assert client.current_exit("TG") == ["TG", "PICK", "node"]
+        provider_names.clear()
+        with pytest.raises(urllib.error.HTTPError):
+            client.current_exit("TG")
 
 
 class TestTheMeterOutlivesMihomo:
