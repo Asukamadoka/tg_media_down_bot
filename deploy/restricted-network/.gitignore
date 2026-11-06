@@ -1,0 +1,6 @@
+# 这些文件含凭据，只在部署机上存在
+mihomo/config.yaml
+mihomo/providers/
+mihomo/cache.db
+.env
+data/
