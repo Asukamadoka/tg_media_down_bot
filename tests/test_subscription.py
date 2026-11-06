@@ -471,6 +471,8 @@ class TestSwitch:
         assert not switcher.new_path.exists()
         [backup] = switcher.backups()
         assert "old0" in backup.read_text() and ".bak-" in backup.name
+        assert active.stat().st_mode & 0o777 == 0o600
+        assert backup.stat().st_mode & 0o777 == 0o600
         assert seen["checkpoint"]["digest"] == new.digest
 
     def test_a_verify_failure_restores_the_backup_and_puts_again(self, tmp_path):
@@ -487,6 +489,7 @@ class TestSwitch:
         assert result.rolled_back and result.restored_ok is True
         assert [m for m, _ in mihomo.writes] == ["PUT", "PUT"]
         assert "old0" in Path(config.provider_file).read_text()
+        assert Path(config.provider_file).stat().st_mode & 0o777 == 0o600
         assert mihomo.names[0].startswith("old")
         assert not switcher.new_path.exists()
 

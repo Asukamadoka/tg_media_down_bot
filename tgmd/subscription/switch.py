@@ -88,6 +88,7 @@ class Switcher:
             if path.exists():
                 stamp = datetime.fromtimestamp(self._clock(), UTC).strftime("%Y%m%dT%H%M%S%fZ")
                 backup = path.with_name(f"{path.name}.bak-{stamp}")
+                backup.touch(mode=0o600, exist_ok=False)
                 shutil.copyfile(path, backup)
                 self._prune()
             if checkpoint is not None:
@@ -129,11 +130,12 @@ class Switcher:
 
     def _write_new(self, text: str) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.new_path, "w", encoding="utf-8") as handle:
+        fd = os.open(self.new_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        self.new_path.chmod(0o644)
 
     def _prune(self) -> None:
         for old in self.backups()[BACKUPS_KEPT:]:
@@ -147,6 +149,7 @@ class Switcher:
         tmp = self.path.with_name(self.path.name + ".restore")
         try:
             shutil.copyfile(backup, tmp)
+            tmp.chmod(0o600)
             os.replace(tmp, self.path)
         finally:
             tmp.unlink(missing_ok=True)
